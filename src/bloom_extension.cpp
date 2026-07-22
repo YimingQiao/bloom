@@ -93,13 +93,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("enable_rpt", "Enable the Robust Predicate Transfer optimizer", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(EnvFlagDefault("RPT_ENABLE", true)));
-	config.AddExtensionOption(
-	    "rpt_sample_cache_dir", "RPT sampling cache directory ('auto' stores it beside the database)",
-	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_CACHE_DIR", "auto")));
+	config.AddExtensionOption("rpt_sample_cache_dir",
+	                          "RPT sampling cache directory ('auto' stores it beside the database)",
+	                          LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_CACHE_DIR", "auto")));
 	config.AddExtensionOption("rpt_sample_size", "RPT per-table sample target row count", LogicalType::UBIGINT,
 	                          Value::UBIGINT(EnvUBigIntDefault("RPT_SAMPLE_SIZE", 10000)));
-	config.AddExtensionOption("rpt_sample_rate", "RPT sample rate for in-memory materialized data",
-	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("RPT_SAMPLE_RATE", 0.01)));
+	config.AddExtensionOption("rpt_sample_rate", "RPT sample rate for in-memory materialized data", LogicalType::DOUBLE,
+	                          Value::DOUBLE(EnvDoubleDefault("RPT_SAMPLE_RATE", 0.01)));
 	config.AddExtensionOption("rpt_sample_memory_cache", "Keep RPT samples in the process object cache",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_SAMPLE_MEMORY_CACHE", true)));
 	config.AddExtensionOption("rpt_log_transfer_steps", "Log RPT transfer-plan generation to stderr",

@@ -167,8 +167,8 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			chunk_cols[spec_idx].push_back(chunk_col);
 		}
 		integral_key[spec_idx] = chunk_cols[spec_idx].size() == 1 && spec.key_types.front().IsIntegral() &&
-		                                 spec.key_types.front() != LogicalType::HUGEINT &&
-		                                 spec.key_types.front() != LogicalType::UHUGEINT;
+		                         spec.key_types.front() != LogicalType::HUGEINT &&
+		                         spec.key_types.front() != LogicalType::UHUGEINT;
 		if (integral_key[spec_idx]) {
 			stats_request_indices[spec_idx] = stats_requests.size();
 			stats_requests.push_back({chunk_cols[spec_idx][0], spec.key_types.front()});
@@ -221,7 +221,8 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 		if (prefix_filters[spec_idx] && task_count > 1) {
 			auto state_size = prefix_filters[spec_idx]->GetLocalBuildStateSize();
 			D_ASSERT(state_size > 0);
-			auto lane_count = MinValue<idx_t>(task_count, MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1));
+			auto lane_count =
+			    MinValue<idx_t>(task_count, MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1));
 			shared_prefix_lanes[spec_idx] = lane_count < task_count;
 			for (idx_t lane_id = 0; lane_id < lane_count; lane_id++) {
 				local_prefix_states[spec_idx].push_back(prefix_filters[spec_idx]->InitializeLocalBuildState(context_));
@@ -326,8 +327,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 		TaskExecutor executor(context_);
 		class RowIDInsertTask final : public BaseExecutorTask {
 		public:
-			RowIDInsertTask(TaskExecutor &executor, idx_t task_id,
-			                ParallelCollectionScanTask::ScanFunction &function)
+			RowIDInsertTask(TaskExecutor &executor, idx_t task_id, ParallelCollectionScanTask::ScanFunction &function)
 			    : BaseExecutorTask(executor), task_id(task_id), function(function) {
 			}
 			void ExecuteTask() override {
@@ -337,6 +337,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 			string TaskType() const override {
 				return "RPTRowIDBitmapInsert";
 			}
+
 		private:
 			idx_t task_id;
 			ParallelCollectionScanTask::ScanFunction &function;

@@ -69,8 +69,7 @@ private:
 	void PrepareSourceTable(idx_t source_table_id);
 	void GenerateJoinStageExecutionPlan();
 
-	vector<shared_ptr<GraphEdge>> ActivateTables(idx_t source_table_id,
-	                                             const vector<shared_ptr<GraphEdge>> &edges);
+	vector<shared_ptr<GraphEdge>> ActivateTables(idx_t source_table_id, const vector<shared_ptr<GraphEdge>> &edges);
 
 	//! Filter attached to a destination during flooding.
 	struct CascadeFilter {

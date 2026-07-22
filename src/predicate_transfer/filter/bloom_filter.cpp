@@ -136,12 +136,11 @@ size_t DuckDBBloomFilterAdapter::Hash() const {
 	return std::hash<string> {}("DuckDBBloomFilter");
 }
 
-DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &context,
-	                                                            const LogicalType &key_type,
-	                                                            int64_t lower_bound, int64_t upper_bound,
-	                                                            idx_t row_count)
-	: key_type_(key_type), lower_bound_(lower_bound), upper_bound_(upper_bound),
-	  filter_(PrefixRangeFilter::CreatePrefixRangeFilter(key_type)) {
+DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &context, const LogicalType &key_type,
+                                                               int64_t lower_bound, int64_t upper_bound,
+                                                               idx_t row_count)
+    : key_type_(key_type), lower_bound_(lower_bound), upper_bound_(upper_bound),
+      filter_(PrefixRangeFilter::CreatePrefixRangeFilter(key_type)) {
 	if (!filter_) {
 		throw InternalException("RPT: DuckDB prefix-range filter does not support type %s", key_type.ToString());
 	}
@@ -152,8 +151,8 @@ DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &co
 	build_state_ = filter_->InitializeBuildState(context);
 }
 
-int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols,
-	                                        SelectionVector &results, size_t &result_count) const {
+int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, SelectionVector &results,
+                                           size_t &result_count) const {
 	if (bound_cols.size() != 1) {
 		throw InternalException("RPT: prefix-range filter requires one key column");
 	}
@@ -162,7 +161,7 @@ int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t>
 }
 
 int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, Vector &results,
-	                                        size_t &result_count) const {
+                                           size_t &result_count) const {
 	SelectionVector selected(chunk.size());
 	Lookup(chunk, bound_cols, selected, result_count);
 	auto result_data = FlatVector::GetDataMutable<bool>(results);
@@ -190,7 +189,7 @@ idx_t DuckDBPrefixRangeFilterAdapter::GetLocalBuildStateSize() const {
 }
 
 void DuckDBPrefixRangeFilterAdapter::InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols,
-	                                              PrefixRangeFilter::BuildState &state, bool parallel) const {
+                                                 PrefixRangeFilter::BuildState &state, bool parallel) const {
 	if (bound_cols.size() != 1) {
 		throw InternalException("RPT: prefix-range filter requires one key column");
 	}

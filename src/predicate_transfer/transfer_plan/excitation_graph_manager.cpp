@@ -29,8 +29,9 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 
 void ExcitationGraphManager::InitEstimator() {
-	estimator_ = make_uniq<SamplingCardinalityEstimator>(context, config.sample_rate, config.sample_materialization_size,
-	                                                    config.sample_cache_dir, config.sample_memory_cache);
+	estimator_ =
+	    make_uniq<SamplingCardinalityEstimator>(context, config.sample_rate, config.sample_materialization_size,
+	                                            config.sample_cache_dir, config.sample_memory_cache);
 }
 
 idx_t ExcitationGraphManager::ComputeBaseTableRows(const LogicalOperator &op) const {
@@ -658,8 +659,8 @@ void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 	executor_.EnsureMaterialized(*op, required);
 }
 
-vector<shared_ptr<GraphEdge>>
-ExcitationGraphManager::ActivateTables(idx_t source_table_id, const vector<shared_ptr<GraphEdge>> &edges) {
+vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t source_table_id,
+                                                                     const vector<shared_ptr<GraphEdge>> &edges) {
 	struct PreparedActivation {
 		shared_ptr<GraphEdge> edge;
 		vector<ColumnBinding> sorted_src;
@@ -687,7 +688,7 @@ ExcitationGraphManager::ActivateTables(idx_t source_table_id, const vector<share
 			const auto &left = edge->source_columns[a];
 			const auto &right = edge->source_columns[b];
 			return left.table_index.index == right.table_index.index ? left.column_index < right.column_index
-			                                                       : left.table_index.index < right.table_index.index;
+			                                                         : left.table_index.index < right.table_index.index;
 		});
 		for (auto index : order) {
 			activation.sorted_src.push_back(edge->source_columns[index]);

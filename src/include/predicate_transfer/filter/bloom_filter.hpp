@@ -236,12 +236,11 @@ private:
 class DuckDBPrefixRangeFilterAdapter : public RPTFilter {
 public:
 	DuckDBPrefixRangeFilterAdapter(ClientContext &context, const LogicalType &key_type, int64_t lower_bound,
-	                                 int64_t upper_bound, idx_t row_count);
+	                               int64_t upper_bound, idx_t row_count);
 
 	int Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, SelectionVector &results,
 	           size_t &result_count) const override;
-	int Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, Vector &results,
-	           size_t &result_count) const override;
+	int Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, Vector &results, size_t &result_count) const override;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) override;
 	unique_ptr<PrefixRangeFilter::BuildState> InitializeLocalBuildState(ClientContext &context) const;
 	idx_t GetLocalBuildStateSize() const;

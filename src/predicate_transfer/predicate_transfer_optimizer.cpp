@@ -429,7 +429,8 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 		final_data = SelectColumns(*data, combined);
 	}
 
-	auto mem_scan = make_uniq<LogicalRPTColumnDataGet>(table_index, wanted_types, std::move(final_data), wanted_bindings);
+	auto mem_scan =
+	    make_uniq<LogicalRPTColumnDataGet>(table_index, wanted_types, std::move(final_data), wanted_bindings);
 	return std::move(mem_scan);
 }
 

@@ -26,8 +26,7 @@ BitmapFilter::BitmapFilter(ClientContext &context_p, const BitmapFilterConfig &c
 }
 
 template <typename T>
-void BitmapFilter::BitmapFilterInsert(int num, const_data_ptr_t BF_RESTRICT keys_ori,
-	                                  uint64_t *BF_RESTRICT bf) const {
+void BitmapFilter::BitmapFilterInsert(int num, const_data_ptr_t BF_RESTRICT keys_ori, uint64_t *BF_RESTRICT bf) const {
 	const T *keys = reinterpret_cast<const T *>(keys_ori);
 	for (int i = 0; i + SIMD_BATCH_SIZE <= num; i += SIMD_BATCH_SIZE) {
 		uint64_t block1[SIMD_BATCH_SIZE], mask1[SIMD_BATCH_SIZE];
@@ -72,8 +71,7 @@ size_t BitmapFilter::Hash() const {
 }
 
 template <typename T>
-int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori,
-	                                 const uint64_t *BF_RESTRICT bf,
+int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori, const uint64_t *BF_RESTRICT bf,
                                      SelectionVector &results, size_t &result_count) const {
 	const T *keys = reinterpret_cast<const T *>(keys_ori);
 	result_count = 0;
@@ -106,8 +104,7 @@ int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_
 }
 
 template <typename T>
-int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori,
-	                                 const uint64_t *BF_RESTRICT bf,
+int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori, const uint64_t *BF_RESTRICT bf,
                                      Vector &results, size_t &result_count) const {
 	const T *keys = reinterpret_cast<const T *>(keys_ori);
 	result_count = 0;

@@ -29,8 +29,7 @@ struct RPTFilterFunctionData final : FunctionData {
 struct OwnedPrefixRangeFunctionData final : PrefixRangeFunctionData {
 	OwnedPrefixRangeFunctionData(shared_ptr<RPTFilter> owner_p, PrefixRangeFilter &filter_p,
 	                             const LogicalType &input_type_p)
-	    : PrefixRangeFunctionData(&filter_p, true, string(), input_type_p, 0.0f, idx_t(0)),
-	      owner(std::move(owner_p)) {
+	    : PrefixRangeFunctionData(&filter_p, true, string(), input_type_p, 0.0f, idx_t(0)), owner(std::move(owner_p)) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -45,10 +44,8 @@ struct OwnedPrefixRangeFunctionData final : PrefixRangeFunctionData {
 };
 
 struct OwnedBloomFilterFunctionData final : BloomFilterFunctionData {
-	OwnedBloomFilterFunctionData(shared_ptr<RPTFilter> owner_p, BloomFilter &filter_p,
-	                            const LogicalType &input_type_p)
-	    : BloomFilterFunctionData(&filter_p, true, string(), input_type_p, 0.0f, idx_t(0)),
-	      owner(std::move(owner_p)) {
+	OwnedBloomFilterFunctionData(shared_ptr<RPTFilter> owner_p, BloomFilter &filter_p, const LogicalType &input_type_p)
+	    : BloomFilterFunctionData(&filter_p, true, string(), input_type_p, 0.0f, idx_t(0)), owner(std::move(owner_p)) {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
@@ -87,14 +84,13 @@ static FilterPropagateResult RPTFilterPrune(const FunctionStatisticsPruneInput &
 	return stats ? data.filter->CheckStatistics(*stats) : FilterPropagateResult::NO_PRUNING_POSSIBLE;
 }
 
-unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_threshold,
-	                                                    idx_t n_vectors_to_check) const {
+unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_threshold, idx_t n_vectors_to_check) const {
 	if (auto prefix_filter = dynamic_cast<DuckDBPrefixRangeFilterAdapter *>(filter_.get())) {
 		auto function = PrefixRangeScalarFun::GetFunction(input_type_);
 		vector<unique_ptr<Expression>> arguments;
 		arguments.push_back(make_uniq<BoundReferenceExpression>(input_type_, storage_t(0)));
-		auto bind_data = make_uniq<OwnedPrefixRangeFunctionData>(filter_, prefix_filter->GetPrefixRangeFilter(),
-		                                                             input_type_);
+		auto bind_data =
+		    make_uniq<OwnedPrefixRangeFunctionData>(filter_, prefix_filter->GetPrefixRangeFilter(), input_type_);
 		unique_ptr<Expression> expression = make_uniq<BoundFunctionExpression>(
 		    BoundScalarFunction(function), std::move(arguments), std::move(bind_data));
 		if (selectivity_threshold < 1.0f) {
@@ -107,8 +103,7 @@ unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_thresho
 		auto function = BloomFilterScalarFun::GetFunction(input_type_);
 		vector<unique_ptr<Expression>> arguments;
 		arguments.push_back(make_uniq<BoundReferenceExpression>(input_type_, storage_t(0)));
-		auto bind_data =
-		    make_uniq<OwnedBloomFilterFunctionData>(filter_, duckdb_filter->GetBloomFilter(), input_type_);
+		auto bind_data = make_uniq<OwnedBloomFilterFunctionData>(filter_, duckdb_filter->GetBloomFilter(), input_type_);
 		unique_ptr<Expression> expression = make_uniq<BoundFunctionExpression>(
 		    BoundScalarFunction(function), std::move(arguments), std::move(bind_data));
 		if (selectivity_threshold < 1.0f) {
@@ -118,16 +113,15 @@ unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_thresho
 		return make_uniq<ExpressionFilter>(std::move(expression));
 	}
 
-	ScalarFunction function("__internal_bloom_rpt_filter", {input_type_}, LogicalType::BOOLEAN,
-	                        RPTFilterExecute);
+	ScalarFunction function("__internal_bloom_rpt_filter", {input_type_}, LogicalType::BOOLEAN, RPTFilterExecute);
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	function.SetFilterPruneCallback(RPTFilterPrune);
 
 	vector<unique_ptr<Expression>> arguments;
 	arguments.push_back(make_uniq<BoundReferenceExpression>(input_type_, storage_t(0)));
 	auto bind_data = make_uniq<RPTFilterFunctionData>(filter_, input_type_);
-	unique_ptr<Expression> expression = make_uniq<BoundFunctionExpression>(
-	    BoundScalarFunction(function), std::move(arguments), std::move(bind_data));
+	unique_ptr<Expression> expression =
+	    make_uniq<BoundFunctionExpression>(BoundScalarFunction(function), std::move(arguments), std::move(bind_data));
 
 	if (selectivity_threshold < 1.0f) {
 		expression = CreateSelectivityOptionalFilterExpression(std::move(expression), input_type_,

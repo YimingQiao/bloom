@@ -182,11 +182,9 @@ public:
 				}
 
 				auto input_type = filter_plan.logical_plan->return_types[expr_idx];
-				unique_ptr<Expression> column =
-				    make_uniq<BoundReferenceExpression>(input_type, storage_t(0));
+				unique_ptr<Expression> column = make_uniq<BoundReferenceExpression>(input_type, storage_t(0));
 				auto in_expression = ExpressionFilter::CreateInExpression(std::move(column), std::move(in_list));
-				auto optional_expression =
-				    CreateOptionalFilterExpression(std::move(in_expression), input_type);
+				auto optional_expression = CreateOptionalFilterExpression(std::move(in_expression), input_type);
 				auto filter = make_uniq<ExpressionFilter>(std::move(optional_expression));
 				dynamic_filters->PushFilter(op, apply_col_index, std::move(filter));
 			}

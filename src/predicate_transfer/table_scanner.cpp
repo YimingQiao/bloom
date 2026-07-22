@@ -149,7 +149,8 @@ TableScanner::TableScanner(Optimizer &optimizer, ClientContext &context, Logical
 			auto &cref = expr->Cast<BoundColumnRefExpression>();
 			for (idx_t i = 0; i < current_bindings.size(); i++) {
 				if (current_bindings[i] == cref.Binding()) {
-					expr = make_uniq<BoundReferenceExpression>(cref.GetAlias(), cref.GetReturnType(), current_positions[i]);
+					expr = make_uniq<BoundReferenceExpression>(cref.GetAlias(), cref.GetReturnType(),
+					                                           current_positions[i]);
 					return;
 				}
 			}
@@ -661,7 +662,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 				FunctionBinder function_binder(context_);
 				vector<unique_ptr<Expression>> aggr_children;
 				aggr_children.push_back(make_uniq<BoundReferenceExpression>(stats_requests[request_idx].type,
-				                                                               stats_requests[request_idx].chunk_col));
+				                                                            stats_requests[request_idx].chunk_col));
 				auto aggr_expr = function_binder.BindAggregateFunction(aggr, std::move(aggr_children), nullptr,
 				                                                       AggregateType::NON_DISTINCT);
 				min_max_aggregates.push_back(std::move(aggr_expr));
