@@ -8,3 +8,4 @@ test/python/__pycache__/
 .Rhistory
 .cache/
 rpt_sample_cache/
+benchmark_results/

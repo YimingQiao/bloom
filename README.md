@@ -58,14 +58,33 @@ equivalent `RPT_*` environment variables are useful for benchmark runner jobs.
 
 ## IMDB Benchmark
 
-Build DuckDB's native runner, then run the IMDB benchmark sequentially:
+Build DuckDB's native runner, then run the full comparison suite with one
+command:
 
 ```bash
 BUILD_BENCHMARK=1 make release -j2
-python3 scripts/run_imdb_benchmark.py --db /path/to/imdb.duckdb
+python3 scripts/run_benchmark_suite.py --db /path/to/imdb.duckdb
 ```
 
-The wrapper only creates temporary benchmark definitions containing
+This runs all 113 IMDB queries sequentially through DuckDB's native
+`benchmark_runner` for every configuration (Bloom RPT and stock baseline, at 1
+and 8 threads by default; override with `--threads`). Each query gets one
+untimed warmup plus five timed runs and is summarized by its median. The
+script prints a Markdown table with total times, total speedup, and the
+geomean of per-query median speedups; raw per-run timings land in
+`benchmark_results/`.
+
+For a single configuration or a quick check, use the lower-level wrapper
+directly:
+
+```bash
+python3 scripts/run_imdb_benchmark.py --db /path/to/imdb.duckdb  # RPT, 1 thread
+python3 scripts/run_imdb_benchmark.py --db /path/to/imdb.duckdb --baseline
+python3 scripts/run_imdb_benchmark.py --db /path/to/imdb.duckdb \
+    --pattern benchmark/imdb/32a.benchmark --timed-runs 1
+```
+
+Both wrappers only create temporary benchmark definitions containing
 `require bloom`; execution, timing, and result verification remain in DuckDB's
-native runner. Use `--baseline` for a stock-planner comparison, or
-`--pattern benchmark/imdb/32a.benchmark --timed-runs 1` for a quick check.
+native runner. Sample caches are created next to the database file
+(`<database>.rpt_samples/`) on first use.
