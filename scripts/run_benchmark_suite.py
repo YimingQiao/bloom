@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""One-click IMDB benchmark suite: Bloom RPT vs DuckDB baseline.
+"""One-click benchmark suite: Bloom RPT vs DuckDB baseline.
 
 Runs DuckDB's native benchmark_runner sequentially for every configuration
 (RPT on/off x thread counts), then prints a Markdown summary with total
@@ -15,13 +15,15 @@ from math import exp, log
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-RUNNER = ROOT / "scripts" / "run_imdb_benchmark.py"
+RUNNER = ROOT / "scripts" / "run_benchmark.py"
 TIMING = re.compile(r"^(benchmark/\S+\.benchmark)\t\d+\t(\d+(?:\.\d+)?)\s*$")
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--db", type=Path, required=True, help="IMDB DuckDB database")
+    parser.add_argument("--workload", default="imdb",
+                        help="Workload name understood by run_benchmark.py (imdb, tpch_sf1, ...)")
+    parser.add_argument("--db", type=Path, help="Database file override")
     parser.add_argument("--threads", type=int, nargs="+", default=[1, 8])
     parser.add_argument("--timed-runs", type=int, default=5)
     parser.add_argument(
@@ -35,17 +37,19 @@ def parse_args():
 
 def run_config(args, threads, baseline):
     """Run one configuration and return {query: median_seconds}."""
-    tag = f"{'base' if baseline else 'rpt'}_t{threads}"
+    tag = f"{args.workload}_{'base' if baseline else 'rpt'}_t{threads}"
     command = [
         sys.executable,
         str(RUNNER),
-        "--db",
-        str(args.db),
+        "--workload",
+        args.workload,
         "--threads",
         str(threads),
         "--timed-runs",
         str(args.timed_runs),
     ]
+    if args.db:
+        command += ["--db", str(args.db)]
     if baseline:
         command.append("--baseline")
 

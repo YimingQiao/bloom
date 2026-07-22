@@ -9,3 +9,4 @@ __pycache__/
 .cache/
 rpt_sample_cache/
 benchmark_results/
+.bench_cache/
