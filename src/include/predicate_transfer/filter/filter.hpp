@@ -49,7 +49,7 @@ public:
 
 class RPTFilterUsage {
 public:
-	RPTFilterUsage(shared_ptr<RPTFilterWrapper> filter) : filter(std::move(filter)) {
+	explicit RPTFilterUsage(shared_ptr<RPTFilterWrapper> filter) : filter(std::move(filter)) {
 	}
 
 	bool IsValid() const {

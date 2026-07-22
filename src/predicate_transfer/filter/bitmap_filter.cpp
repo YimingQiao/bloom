@@ -82,7 +82,7 @@ int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_
 		for (int j = 0; j < SIMD_BATCH_SIZE; j++) {
 			bool flag = keys[i + j] >= config_.lower_bound && keys[i + j] <= config_.upper_bound;
 			uint64_t bit_id = flag ? keys[i + j] - config_.lower_bound : 0;
-			outs[j] = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : 0;
+			outs[j] = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : false;
 		}
 
 		for (int j = 0; j < SIMD_BATCH_SIZE; j++) {
@@ -96,7 +96,7 @@ int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_
 	for (int i = num & ~(SIMD_BATCH_SIZE - 1); i < num; i++) {
 		bool flag = keys[i] >= config_.lower_bound && keys[i] <= config_.upper_bound;
 		uint64_t bit_id = flag ? keys[i] - config_.lower_bound : 0;
-		bool out = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : 0;
+		bool out = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : false;
 		results.set_index(result_count, i);
 		result_count += out;
 	}
@@ -116,7 +116,7 @@ int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_
 		for (int j = 0; j < SIMD_BATCH_SIZE; j++) {
 			bool flag = keys[i + j] >= config_.lower_bound && keys[i + j] <= config_.upper_bound;
 			uint64_t bit_id = flag ? keys[i + j] - config_.lower_bound : 0;
-			outs[j] = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : 0;
+			outs[j] = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : false;
 		}
 
 		for (int j = 0; j < SIMD_BATCH_SIZE; j++) {
@@ -130,7 +130,7 @@ int BitmapFilter::BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_
 	for (int i = num & ~(SIMD_BATCH_SIZE - 1); i < num; i++) {
 		bool flag = keys[i] >= config_.lower_bound && keys[i] <= config_.upper_bound;
 		uint64_t bit_id = flag ? keys[i] - config_.lower_bound : 0;
-		bool out = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : 0;
+		bool out = flag ? (blocks[bit_id >> 6] >> (bit_id & 63) & 1) : false;
 		result_data[i] = out;
 		result_count += out;
 	}
@@ -285,14 +285,16 @@ FilterPropagateResult BitmapFilter::BitmapFilterRangeLookup(const BaseStatistics
 	}
 	uint64_t L = min_value < config_.lower_bound ? 0 : min_value - config_.lower_bound;
 	uint64_t R = std::min<uint64_t>(config_.upper_bound - config_.lower_bound, max_value - config_.lower_bound);
-	for (uint64_t i = L; i < (L + 63) && i <= R; i++)
+	for (uint64_t i = L; i < (L + 63) && i <= R; i++) {
 		if (bf[i >> 6] >> (i & 63) & 1) {
 			return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 		}
-	for (uint64_t i = R; i > (R - 63) && i >= L; i--)
+	}
+	for (uint64_t i = R; i > (R - 63) && i >= L; i--) {
 		if (bf[i >> 6] >> (i & 63) & 1) {
 			return FilterPropagateResult::NO_PRUNING_POSSIBLE;
 		}
+	}
 
 	L = (L / 64 + 1) * 64;
 	R = R / 64 * 64;

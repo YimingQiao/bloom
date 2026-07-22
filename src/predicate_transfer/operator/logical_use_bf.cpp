@@ -38,9 +38,9 @@ InsertionOrderPreservingMap<string> LogicalUseBF::ParamsToString() const {
 		auto &v = expr;
 		bfs += std::to_string(v.table_index.index) + "." + std::to_string(v.column_index) + " ";
 	}
-	bfs += "\n";
+	bfs += '\n';
 
-	result["BloomFilters"] = bfs;
+	result["BloomFilters"] = std::move(bfs);
 	result["BF Creator"] = std::to_string(reinterpret_cast<size_t>(related_create_bf));
 	return result;
 }

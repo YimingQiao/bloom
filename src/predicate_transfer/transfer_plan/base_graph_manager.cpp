@@ -41,8 +41,9 @@ string EdgeInfo::ToString() const {
 	ss << TableOperatorManager::GetScalarTableIndex(right_table);
 	ss << ", keys=[";
 	for (idx_t i = 0; i < left_bindings.size(); ++i) {
-		if (i > 0)
+		if (i > 0) {
 			ss << ", ";
+		}
 		ss << left_bindings[i].ToString() << "=" << right_bindings[i].ToString() << ":" << return_types[i].ToString();
 	}
 	ss << "]";

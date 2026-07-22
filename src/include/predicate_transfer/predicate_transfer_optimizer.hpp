@@ -9,7 +9,7 @@ namespace duckdb {
 
 class PredicateTransferOptimizer {
 public:
-	explicit PredicateTransferOptimizer(Optimizer &optimizer, ClientContext &context, RPTOptimizerConfig config)
+	explicit PredicateTransferOptimizer(Optimizer &optimizer, ClientContext &context, const RPTOptimizerConfig &config)
 	    : optimizer(optimizer), config(config) {
 		graph_manager = make_uniq<ExcitationGraphManager>(optimizer, context, config);
 	}

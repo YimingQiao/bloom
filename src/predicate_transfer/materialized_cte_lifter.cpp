@@ -111,7 +111,7 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperat
 
 unique_ptr<LogicalOperator> MaterializedCTELifter::ReplaceCTERefs(unique_ptr<LogicalOperator> op,
                                                                   TableIndex target_cte_index,
-                                                                  shared_ptr<ColumnDataCollection> shared_data) {
+                                                                  const shared_ptr<ColumnDataCollection> &shared_data) {
 	if (!op) {
 		return op;
 	}
@@ -171,7 +171,7 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	unique_ptr<ColumnDataCollection> result_data = mat_result.TakeCollection();
 
-	client_data.profiler = saved_profiler;
+	client_data.profiler = std::move(saved_profiler);
 	return result_data;
 }
 

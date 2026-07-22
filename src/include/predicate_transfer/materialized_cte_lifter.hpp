@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include "duckdb/common/types/column/column_data_collection.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/logical_operator.hpp"
@@ -25,7 +27,7 @@ namespace duckdb {
 class MaterializedCTELifter {
 public:
 	MaterializedCTELifter(Optimizer &optimizer, ClientContext &context, RPTOptimizerConfig config)
-	    : optimizer(optimizer), context(context), config(config) {
+	    : optimizer(optimizer), context(context), config(std::move(config)) {
 	}
 
 	//! Top-down recursive walker. Returns the rewritten plan.
@@ -38,7 +40,7 @@ private:
 	//! Replace every LOGICAL_CTE_REF whose cte_index matches `target_cte_index`
 	//! with a LogicalColumnDataGet that scans `shared_data`.
 	unique_ptr<LogicalOperator> ReplaceCTERefs(unique_ptr<LogicalOperator> op, TableIndex target_cte_index,
-	                                           shared_ptr<ColumnDataCollection> shared_data);
+	                                           const shared_ptr<ColumnDataCollection> &shared_data);
 
 	Optimizer &optimizer;
 	ClientContext &context;

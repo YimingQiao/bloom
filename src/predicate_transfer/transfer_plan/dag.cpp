@@ -43,8 +43,9 @@ GraphEdge *DirectedGraph::AddEdge(idx_t from, idx_t to, const ColumnBinding &sou
 
 void DirectedGraph::RemoveInEdge(idx_t node_id, idx_t source) {
 	auto it = in_index_.find(node_id);
-	if (it == in_index_.end())
+	if (it == in_index_.end()) {
 		return;
+	}
 	auto &edges = it->second;
 	for (auto eit = edges.begin(); eit != edges.end(); eit++) {
 		if ((*eit)->source == source) {
@@ -87,18 +88,18 @@ string FilterPlan::ToString() const {
 	stringstream ss;
 	ss << "plan_id=" << plan_id << ", ";
 
-	auto vec_to_str = [&](vector<ColumnBinding> v) {
+	auto vec_to_str = [&](const vector<ColumnBinding> &v) {
 		for (auto &x : v) {
 			ss << x.ToString() << ", ";
 		}
 	};
-	auto vectype_to_str = [&](vector<LogicalType> v) {
+	auto vectype_to_str = [&](const vector<LogicalType> &v) {
 		for (auto &x : v) {
 			ss << x.ToString() << ", ";
 		}
 	};
 
-	auto vecint_to_str = [&](vector<idx_t> v) {
+	auto vecint_to_str = [&](const vector<idx_t> &v) {
 		for (auto &x : v) {
 			ss << x << ", ";
 		}

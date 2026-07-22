@@ -12,6 +12,12 @@
 
 namespace duckdb {
 
+//! Task count for parallel scans over a materialized collection. Eight chunks
+//! (~16K rows) per task amortize task-scheduling overhead while still engaging
+//! every thread on mid-sized collections; collections under eight chunks stay
+//! serial.
+idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection);
+
 //===--------------------------------------------------------------------===//
 // TableScanner
 //===--------------------------------------------------------------------===//

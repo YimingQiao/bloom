@@ -349,11 +349,12 @@ static unique_ptr<ColumnDataCollection> SelectColumns(ColumnDataCollection &src,
 	while (true) {
 		src_chunk.Reset();
 		src.Scan(scan_state, src_chunk);
-		if (src_chunk.size() == 0)
+		if (src_chunk.size() == 0) {
 			break;
+		}
 
 		dst_chunk.Reset();
-		dst_chunk.SetCardinality(src_chunk.size());
+		dst_chunk.SetCardinalityUnsafe(src_chunk.size());
 		for (idx_t i = 0; i < col_positions.size(); i++) {
 			dst_chunk.data[i].Reference(src_chunk.data[col_positions[i]]);
 		}
@@ -375,8 +376,9 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 	unordered_map<ColumnBinding, idx_t, ColumnBindingHashFunc> binding_to_col;
 	idx_t col_idx = 0;
 	for (idx_t i = 0; i < output_bindings.size(); i++) {
-		if (i == rowid_chunk_col)
+		if (i == rowid_chunk_col) {
 			continue;
+		}
 		binding_to_col[output_bindings[i]] = col_idx++;
 	}
 
@@ -402,8 +404,9 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 	// Check if we need reordering beyond just stripping rowid
 	bool needs_reorder = (col_positions.size() != strip_positions.size());
 	for (idx_t i = 0; !needs_reorder && i < col_positions.size(); i++) {
-		if (col_positions[i] != i)
+		if (col_positions[i] != i) {
 			needs_reorder = true;
+		}
 	}
 
 	for (auto &binding : wanted_bindings) {

@@ -43,19 +43,6 @@ private:
 	ScanFunction &function;
 };
 
-static idx_t ParallelScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
-	static constexpr idx_t MIN_PARALLEL_ROWS = STANDARD_VECTOR_SIZE * 32;
-	static constexpr idx_t ROWS_PER_TASK = STANDARD_VECTOR_SIZE * 8;
-	static constexpr idx_t CHUNKS_PER_TASK = 32;
-	auto rows = collection.Count();
-	auto chunks = MaxValue<idx_t>(collection.ChunkCount(), 1);
-	auto row_tasks = rows < MIN_PARALLEL_ROWS ? idx_t(1) : (rows + ROWS_PER_TASK - 1) / ROWS_PER_TASK;
-	auto chunk_tasks = (chunks + CHUNKS_PER_TASK - 1) / CHUNKS_PER_TASK;
-	auto tasks = MaxValue<idx_t>(row_tasks, chunk_tasks);
-	tasks = MinValue<idx_t>(tasks, chunks);
-	return MinValue<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads(), tasks);
-}
-
 static void ScanCollection(ClientContext &context, const ColumnDataCollection &collection, idx_t task_count,
                            ParallelCollectionScanTask::ScanFunction function) {
 	if (task_count <= 1) {
@@ -179,7 +166,7 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 	auto compact_result = scanner.Compact(stats_requests);
 	collection = scanner.GetData();
 	D_ASSERT(collection);
-	auto task_count = ParallelScanTaskCount(context_, *collection);
+	auto task_count = RPTScanTaskCount(context_, *collection);
 	auto total_rows = compact_result.row_count;
 	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 		if (chunk_cols[spec_idx].empty()) {
@@ -276,7 +263,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 		return nullptr;
 	}
 
-	auto task_count = ParallelScanTaskCount(context_, *collection);
+	auto task_count = RPTScanTaskCount(context_, *collection);
 	vector<vector<int64_t>> local_rids(task_count);
 	for (auto &rids : local_rids) {
 		rids.reserve(scanner.Count() / task_count + STANDARD_VECTOR_SIZE);
@@ -311,7 +298,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 		for (idx_t offset = 0; offset < rids.size(); offset += STANDARD_VECTOR_SIZE) {
 			auto batch = MinValue<idx_t>(STANDARD_VECTOR_SIZE, rids.size() - offset);
 			tmp_chunk.Reset();
-			tmp_chunk.SetCardinality(batch);
+			tmp_chunk.SetCardinalityUnsafe(batch);
 			auto *data = FlatVector::GetDataMutable<int64_t>(tmp_chunk.data[0]);
 			memcpy(data, rids.data() + offset, batch * sizeof(int64_t));
 			static const vector<idx_t> rid_insert_cols = {0};

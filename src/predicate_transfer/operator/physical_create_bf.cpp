@@ -1,4 +1,6 @@
 #include "predicate_transfer/operator/physical_create_bf.hpp"
+
+#include <cstddef>
 #include "predicate_transfer/filter/bitmap_filter.hpp"
 #include "predicate_transfer/filter/table_filter.hpp"
 
@@ -482,8 +484,8 @@ SinkFinalizeType PhysicalCreateBF::Finalize(Pipeline &pipeline, Event &event, Cl
 		auto id = pair.first;
 		if (config.use_bitmap_filter && id.size() == 1 && sink.val_ranges.count(id[0])) {
 			auto range = sink.val_ranges[id[0]];
-			if (range.second >= range.first &&
-			    (range.second - range.first <= 128 * num_rows || range.second - range.first <= 8e6)) {
+			if (range.second >= range.first && (range.second - range.first <= static_cast<long>(128 * num_rows) ||
+			                                    range.second - range.first <= 8e6)) {
 				bf->filter = make_shared_ptr<BitmapFilter>(context, BitmapFilterConfig(range.first, range.second));
 			} else if (range.second < range.first) { // empty?
 				bf->filter = make_shared_ptr<BitmapFilter>(context, BitmapFilterConfig(range.first, range.second));
@@ -564,7 +566,7 @@ InsertionOrderPreservingMap<string> PhysicalCreateBF::ParamsToString() const {
 			min_max_filter += std::to_string(v.table_index.index) + "." + std::to_string(v.column_index) + " ";
 		}
 	}
-	result["Min-Max Filter"] = min_max_filter;
+	result["Min-Max Filter"] = std::move(min_max_filter);
 
 	return result;
 }

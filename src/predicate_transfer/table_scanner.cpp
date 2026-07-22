@@ -62,17 +62,6 @@ private:
 	ScanFunction &function;
 };
 
-static idx_t CompactTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
-	static constexpr idx_t ROWS_PER_TASK = STANDARD_VECTOR_SIZE * 64;
-	static constexpr idx_t CHUNKS_PER_TASK = 32;
-	auto rows = collection.Count();
-	auto chunks = MaxValue<idx_t>(collection.ChunkCount(), 1);
-	auto row_tasks = MaxValue<idx_t>((rows + ROWS_PER_TASK - 1) / ROWS_PER_TASK, 1);
-	auto chunk_tasks = (chunks + CHUNKS_PER_TASK - 1) / CHUNKS_PER_TASK;
-	auto tasks = MinValue<idx_t>(MaxValue<idx_t>(row_tasks, chunk_tasks), chunks);
-	return MinValue<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads(), tasks);
-}
-
 static void ParallelCompactScan(ClientContext &context, const ColumnDataCollection &collection, idx_t task_count,
                                 ParallelCompactScanTask::ScanFunction function) {
 	ColumnDataParallelScanState scan_state;
@@ -85,6 +74,12 @@ static void ParallelCompactScan(ClientContext &context, const ColumnDataCollecti
 }
 
 } // namespace
+
+idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
+	static constexpr idx_t CHUNKS_PER_TASK = 8;
+	auto tasks = MaxValue<idx_t>(collection.ChunkCount() / CHUNKS_PER_TASK, 1);
+	return MinValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), tasks);
+}
 
 bool TableScanner::RptLogEnabled() const {
 	if (ClientConfig::GetConfig(context_).enable_profiler) {
@@ -232,8 +227,9 @@ idx_t TableScanner::FindChunkCol(const ColumnBinding &binding) const {
 //! Helper: execute a plan via Executor and store the result in data_.
 bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto col_types = plan_copy->types;
-	if (col_types.empty())
+	if (col_types.empty()) {
 		return false;
+	}
 
 	PhysicalPlanGenerator generator(context_);
 	auto physical_plan = generator.Plan(std::move(plan_copy));
@@ -270,7 +266,7 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 		data_ = shared_ptr<ColumnDataCollection>(make_uniq<ColumnDataCollection>(context_, mat_result.types).release());
 	}
 
-	client_data.profiler = saved_profiler;
+	client_data.profiler = std::move(saved_profiler);
 
 	materialized_ = true;
 	data_->InitializeScan(scan_state_);
@@ -297,8 +293,9 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 void TableScanner::Materialize() {
 	// Already-materialized CHUNK_GET leaves are set up in the constructor;
 	// nothing to do here.
-	if (materialized_)
+	if (materialized_) {
 		return;
+	}
 
 	auto plan_copy = table_op_.Copy(context_);
 
@@ -400,8 +397,9 @@ void TableScanner::Materialize() {
 	}
 
 	// Step 3: Execute the (possibly modified) subtree.
-	if (!ExecutePlan(std::move(plan_copy)))
+	if (!ExecutePlan(std::move(plan_copy))) {
 		return;
+	}
 
 	// Resolve chunk_col for any filters that did NOT get pushed into a GET.
 	// They will be applied in-memory by Scan() / Compact().
@@ -475,25 +473,30 @@ static void CollectGetsByTableIndex(LogicalOperator &op, unordered_map<idx_t, Lo
 }
 
 void TableScanner::InjectTableFilters(LogicalOperator &plan_copy) {
-	if (filters_.empty())
+	if (filters_.empty()) {
 		return;
+	}
 
 	unordered_map<idx_t, LogicalGet *> gets_by_table_index;
 	CollectGetsByTableIndex(plan_copy, gets_by_table_index);
-	if (gets_by_table_index.empty())
+	if (gets_by_table_index.empty()) {
 		return;
+	}
 
 	auto pushed_end = std::remove_if(filters_.begin(), filters_.end(), [&](FilterEntry &entry) {
-		if (!entry.filter)
+		if (!entry.filter) {
 			return false;
+		}
 		// Composite-key filters cannot be pushed down as per-column TableFilters.
-		if (entry.bindings.size() != 1)
+		if (entry.bindings.size() != 1) {
 			return false;
+		}
 		auto &binding = entry.bindings.front();
 
 		auto get_it = gets_by_table_index.find(binding.table_index.index);
-		if (get_it == gets_by_table_index.end())
+		if (get_it == gets_by_table_index.end()) {
 			return false;
+		}
 		auto &get = *get_it->second;
 		auto &column_ids = get.GetMutableColumnIds();
 
@@ -514,8 +517,9 @@ void TableScanner::InjectTableFilters(LogicalOperator &plan_copy) {
 //===--------------------------------------------------------------------===//
 
 void TableScanner::InitScanChunk(DataChunk &chunk) const {
-	if (!data_)
+	if (!data_) {
 		return;
+	}
 	// When pending_expr_filter_ narrows via projection_map, the caller-visible
 	// chunk schema is narrower than the raw CDC. Initialize to table_op_ types
 	// so FindChunkCol (which resolves against output_bindings_) stays correct.
@@ -531,8 +535,9 @@ void TableScanner::InitScanChunk(DataChunk &chunk) const {
 //===--------------------------------------------------------------------===//
 
 bool TableScanner::Scan(DataChunk &chunk) {
-	if (!data_)
+	if (!data_) {
 		return false;
+	}
 
 	while (true) {
 		chunk.Reset();
@@ -553,10 +558,11 @@ bool TableScanner::Scan(DataChunk &chunk) {
 				count = pf.executor->SelectExpression(pf.scratch, sel);
 				sliced = count < pf.scratch.size();
 			}
-			if (count == 0)
+			if (count == 0) {
 				continue;
+			}
 
-			chunk.SetCardinality(count);
+			chunk.SetCardinalityUnsafe(count);
 			for (idx_t i = 0; i < chunk.ColumnCount(); i++) {
 				idx_t src = pf.projection_map.empty() ? i : pf.projection_map[i];
 				if (sliced) {
@@ -599,15 +605,18 @@ idx_t TableScanner::Count() const {
 //===--------------------------------------------------------------------===//
 
 void TableScanner::ApplyFilters(DataChunk &chunk) {
-	if (chunk.size() == 0)
+	if (chunk.size() == 0) {
 		return;
+	}
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
 
 	for (auto &entry : filters_) {
-		if (chunk.size() == 0)
+		if (chunk.size() == 0) {
 			break;
-		if (!entry.filter || entry.chunk_cols.empty())
+		}
+		if (!entry.filter || entry.chunk_cols.empty()) {
 			continue;
+		}
 		const idx_t column_count = chunk.ColumnCount();
 		if (std::any_of(entry.chunk_cols.begin(), entry.chunk_cols.end(),
 		                [&](idx_t cc) { return cc >= column_count; })) {
@@ -680,7 +689,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 		new_data = make_uniq<ColumnDataCollection>(context_, chunk.GetTypes());
 	}
 
-	auto task_count = CompactTaskCount(context_, *data_);
+	auto task_count = RPTScanTaskCount(context_, *data_);
 	if (task_count <= 1) {
 		while (Scan(chunk)) {
 			if (collect_min_max) {
@@ -752,7 +761,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 				if (!pending.projection_map.empty()) {
 					auto &projected = *local_projection_chunks[task_id];
 					projected.Reset();
-					projected.SetCardinality(selected_count);
+					projected.SetCardinalityUnsafe(selected_count);
 					for (idx_t col_idx = 0; col_idx < projected.ColumnCount(); col_idx++) {
 						auto source_idx = pending.projection_map[col_idx];
 						if (selected_count < original_count) {

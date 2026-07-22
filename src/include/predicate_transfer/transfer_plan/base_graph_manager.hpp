@@ -1,5 +1,7 @@
 #pragma once
 
+#include <utility>
+
 #include "duckdb/planner/logical_operator.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/planner/expression.hpp"
@@ -22,7 +24,7 @@ public:
 	virtual ~BaseGraphManager() = default;
 
 	explicit BaseGraphManager(Optimizer &optimizer, ClientContext &context, RPTOptimizerConfig config)
-	    : optimizer(optimizer), context(context), table_operator_manager(context), config(config) {
+	    : optimizer(optimizer), context(context), table_operator_manager(context), config(std::move(config)) {
 	}
 
 	//===----------------------------------------------------------------===//

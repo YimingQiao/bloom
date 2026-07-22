@@ -149,10 +149,12 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 
 		// BF filters.
 		for (auto &entry : filters) {
-			if (chunk.size() == 0)
+			if (chunk.size() == 0) {
 				break;
-			if (!entry.filter || entry.chunk_cols.empty())
+			}
+			if (!entry.filter || entry.chunk_cols.empty()) {
 				continue;
+			}
 			idx_t col_count = chunk.ColumnCount();
 			bool skip = false;
 			for (auto cc : entry.chunk_cols) {
@@ -161,8 +163,9 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 					break;
 				}
 			}
-			if (skip)
+			if (skip) {
 				continue;
+			}
 
 			size_t count = chunk.size();
 			entry.filter->Lookup(chunk, entry.chunk_cols, sel, count);
@@ -316,7 +319,7 @@ string SamplingCardinalityEstimator::SampleCacheKey(const LogicalGet &get) {
 	key += "|types=";
 	for (idx_t i = 0; i < get.returned_types.size(); i++) {
 		if (i > 0) {
-			key += ",";
+			key += ',';
 		}
 		key += get.returned_types[i].ToString();
 	}
@@ -646,7 +649,7 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 			}
 			std::cerr << sample.needed_columns[i] << "->" << sample.output_bindings[i].ToString();
 		}
-		std::cerr << ")" << std::endl;
+		std::cerr << ")" << '\n';
 	}
 	while (node) {
 		if (node->type == LogicalOperatorType::LOGICAL_FILTER) {
@@ -665,7 +668,7 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 				bool unbound = HasUnboundColumnRef(*cloned);
 				if (rpt_log) {
 					std::cerr << "    [LogicalFilter] " << original << " -> " << cloned->ToString()
-					          << (unbound ? " SKIPPED(unbound)" : " APPLIED") << std::endl;
+					          << (unbound ? " SKIPPED(unbound)" : " APPLIED") << '\n';
 				}
 				if (!unbound) {
 					preds.push_back(std::move(cloned));
@@ -675,8 +678,9 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 			get = &node->Cast<LogicalGet>();
 			break;
 		}
-		if (node->children.empty())
+		if (node->children.empty()) {
 			break;
+		}
 		node = node->children[0].get();
 	}
 
@@ -687,14 +691,14 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 		if (rpt_log) {
 			std::cerr << "    [Get] table_index=" << get->table_index.index
 			          << " projected_cols=" << get->GetColumnIds().size()
-			          << " table_filters=" << get->table_filters.FilterCount() << std::endl;
+			          << " table_filters=" << get->table_filters.FilterCount() << '\n';
 		}
 		for (auto &f : get->table_filters) {
 			auto projection_col = f.GetIndex().GetIndex();
 			if (projection_col >= get->GetColumnIds().size() || get->GetColumnIds()[projection_col].IsVirtualColumn()) {
 				if (rpt_log) {
 					std::cerr << "      [TableFilter] projection=" << projection_col << " SKIPPED(out-of-range/virtual)"
-					          << std::endl;
+					          << '\n';
 				}
 				continue;
 			}
@@ -709,7 +713,7 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 			if (chunk_col == DConstants::INVALID_INDEX || chunk_col >= sample_types.size()) {
 				if (rpt_log) {
 					std::cerr << "      [TableFilter] projection=" << projection_col << " storage=" << storage_col
-					          << " SKIPPED(not-in-sample)" << std::endl;
+					          << " SKIPPED(not-in-sample)" << '\n';
 				}
 				continue;
 			}
@@ -720,7 +724,7 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 			if (rpt_log) {
 				std::cerr << "      [TableFilter] projection=" << projection_col << " storage=" << storage_col
 				          << " sample=" << chunk_col << " filter=" << expr_filter.DebugToString()
-				          << " expr=" << predicate->ToString() << " APPLIED" << std::endl;
+				          << " expr=" << predicate->ToString() << " APPLIED" << '\n';
 			}
 			preds.push_back(std::move(predicate));
 		}
@@ -777,7 +781,7 @@ void SamplingCardinalityEstimator::EnsureLocalFiltered(SampleEntry &sample, cons
 	sample.local_survivors = survivors;
 	if (rpt_log) {
 		std::cerr << "    [RPT-Sample] predicates=" << preds.size() << " survivors=" << survivors << "/"
-		          << sample.sample_row_count << std::endl;
+		          << sample.sample_row_count << '\n';
 	}
 }
 
@@ -794,8 +798,9 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(SampleEntry &sample, const 
 	// Resolve BF filters to sample chunk columns (same order in local_cdc).
 	vector<TableScanner::FilterEntry> bf_filters;
 	for (auto &bf : filters) {
-		if (!bf.filter)
+		if (!bf.filter) {
 			continue;
+		}
 		idx_t chunk_col = DConstants::INVALID_INDEX;
 		for (idx_t i = 0; i < sample.output_bindings.size(); i++) {
 			if (sample.output_bindings[i] == bf.binding) {
@@ -803,8 +808,9 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(SampleEntry &sample, const 
 				break;
 			}
 		}
-		if (chunk_col == DConstants::INVALID_INDEX)
+		if (chunk_col == DConstants::INVALID_INDEX) {
 			continue;
+		}
 		TableScanner::FilterEntry e;
 		e.bindings.push_back(bf.binding);
 		e.chunk_cols.push_back(chunk_col);

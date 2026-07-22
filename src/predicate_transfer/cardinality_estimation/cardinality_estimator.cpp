@@ -48,11 +48,11 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 			result_cdc = make_shared_ptr<ColumnDataCollection>(context, col_types);
 		}
 	} catch (...) {
-		client_data.profiler = saved_profiler;
+		client_data.profiler = std::move(saved_profiler);
 		throw;
 	}
 
-	client_data.profiler = saved_profiler;
+	client_data.profiler = std::move(saved_profiler);
 	return result_cdc;
 }
 

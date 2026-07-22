@@ -46,7 +46,7 @@ InsertionOrderPreservingMap<string> LogicalCreateBF::ParamsToString() const {
 			auto &v = expr;
 			bfs += std::to_string(v.table_index.index) + "." + std::to_string(v.column_index) + " ";
 		}
-		bfs += "\n";
+		bfs += '\n';
 	}
 	result["BloomFilters"] = bfs;
 	result["ID"] = std::to_string(reinterpret_cast<size_t>(this));
@@ -57,7 +57,7 @@ InsertionOrderPreservingMap<string> LogicalCreateBF::ParamsToString() const {
 			min_max_filter += std::to_string(v.table_index.index) + "." + std::to_string(v.column_index) + " ";
 		}
 	}
-	result["Min-Max Filter"] = min_max_filter;
+	result["Min-Max Filter"] = std::move(min_max_filter);
 	return result;
 }
 

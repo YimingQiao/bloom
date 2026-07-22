@@ -241,8 +241,9 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		vector<DirectFilterInfo> direct_filters;
 		direct_filters.reserve(dest_filters.size());
 		for (auto &dest_filter : dest_filters) {
-			if (dest_filter.bindings.size() != 1)
+			if (dest_filter.bindings.size() != 1) {
 				continue;
+			}
 			direct_filters.push_back({dest_filter.bindings.front(), dest_filter.filter, dest_filter.lineage.lineages});
 		}
 
@@ -304,8 +305,9 @@ void ExcitationGraphManager::PropagateZeroCardinality(idx_t table_id, const vect
 //===--------------------------------------------------------------------===//
 
 void ExcitationGraphManager::PruneRedundantSteps(vector<TransferStep> &steps) {
-	if (steps.empty())
+	if (steps.empty()) {
 		return;
+	}
 
 	// === Phase 1: Flatten all edges into a linear timeline ===
 	// Each entry records: (step_index, source_id, dest_id, edge_ptr)
@@ -349,8 +351,9 @@ void ExcitationGraphManager::PruneRedundantSteps(vector<TransferStep> &steps) {
 	for (auto &entry : pair_to_timeline_indices) {
 		auto &pair = entry.first;
 		auto &indices = entry.second;
-		if (indices.size() <= 1)
+		if (indices.size() <= 1) {
 			continue;
+		}
 
 		idx_t dest_id = pair.second;
 		auto &dest_source_steps = source_steps[dest_id];
@@ -420,16 +423,16 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	}
 
 	if (rpt_log) {
-		std::cerr << "[RPT-Excitation] === Initial table cardinalities ===" << std::endl;
+		std::cerr << "[RPT-Excitation] === Initial table cardinalities ===" << '\n';
 		for (auto &[tid, state] : state_.cardinality) {
 			auto *op = table_operator_manager.GetTableOperator(tid);
 			std::string name = op ? TableOperatorManager::GetTableName(*op) : "?";
 			bool active = state_.active_nodes.count(tid) > 0;
 			std::cerr << "  [" << tid << "] " << name << "  card=" << static_cast<idx_t>(state)
 			          << "  baseline=" << static_cast<idx_t>(state_.cardinality_baseline[tid])
-			          << (active ? "  ACTIVE" : "") << std::endl;
+			          << (active ? "  ACTIVE" : "") << '\n';
 		}
-		std::cerr << "[RPT-Excitation] active_nodes count: " << state_.active_nodes.size() << std::endl;
+		std::cerr << "[RPT-Excitation] active_nodes count: " << state_.active_nodes.size() << '\n';
 	}
 
 	idx_t excitation_round = 0;
@@ -450,7 +453,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			std::string src_name = src_op ? TableOperatorManager::GetTableName(*src_op) : "?";
 			std::cerr << "[RPT-Excitation] --- Round " << excitation_round << ": source=[" << table_id << "] "
 			          << src_name << "  card=" << static_cast<idx_t>(state_.cardinality[table_id])
-			          << "  remaining_active=" << state_.active_nodes.size() << std::endl;
+			          << "  remaining_active=" << state_.active_nodes.size() << '\n';
 		}
 
 		auto informative_candidates = CollectOutgoingEdges(table_id);
@@ -489,8 +492,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 
 		if (effective_candidates.empty()) {
 			if (rpt_log) {
-				std::cerr << "    [timing] materialize=" << round_mat << "ms build_bf=" << round_bf << "ms"
-				          << std::endl;
+				std::cerr << "    [timing] materialize=" << round_mat << "ms build_bf=" << round_bf << "ms" << '\n';
 			}
 			continue;
 		}
@@ -502,7 +504,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		est_ms += round_est;
 		if (rpt_log) {
 			std::cerr << "    [timing] materialize=" << round_mat << "ms build_bf=" << round_bf
-			          << "ms re_estimate=" << round_est << "ms" << std::endl;
+			          << "ms re_estimate=" << round_est << "ms" << '\n';
 		}
 
 		if (rpt_log) {
@@ -512,7 +514,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 				bool reactivated = state_.active_nodes.count(edge->destination) > 0;
 				std::cerr << "    -> [" << edge->destination << "] " << dest_name
 				          << "  card=" << static_cast<idx_t>(state_.cardinality[edge->destination])
-				          << (reactivated ? "  RE-ACTIVATED" : "") << std::endl;
+				          << (reactivated ? "  RE-ACTIVATED" : "") << '\n';
 			}
 		}
 
@@ -525,7 +527,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		finalize_ms = elapsed_ms(t_fin, SteadyClock::now());
 		std::cerr << "[RPT-Timing] init_estimates=" << init_ms << "ms materialize=" << mat_ms << "ms build_bf=" << bf_ms
 		          << "ms re_estimate=" << est_ms << "ms finalize=" << finalize_ms
-		          << "ms total=" << (init_ms + mat_ms + bf_ms + est_ms + finalize_ms) << "ms" << std::endl;
+		          << "ms total=" << (init_ms + mat_ms + bf_ms + est_ms + finalize_ms) << "ms" << '\n';
 	}
 }
 
@@ -566,8 +568,9 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 		auto &direct = direct_filters_[table_id];
 		direct.reserve(direct.size() + cascade_filters.size());
 		for (auto &cf : cascade_filters) {
-			if (cf.bindings.size() != 1)
+			if (cf.bindings.size() != 1) {
 				continue;
+			}
 			direct.push_back({cf.bindings.front(), cf.filter, cf.lineage.lineages});
 		}
 	}
@@ -610,8 +613,9 @@ TableTransferResult ExcitationGraphManager::GetTableResult(idx_t table_id, Logic
 
 void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 	auto *op = table_operator_manager.GetTableOperator(source_table_id);
-	if (!op)
+	if (!op) {
 		return;
+	}
 	if (executor_.IsMaterialized(*op)) {
 		return;
 	}
@@ -742,7 +746,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 			cols << ")";
 			std::cerr << "    [RPTFilterCache " << (activation.cache_hit ? "HIT " : "MISS") << "] src=["
 			          << source_table_id << "] cols=" << cols.str() << " → dest=[" << activation.edge->destination
-			          << "]" << std::endl;
+			          << "]" << '\n';
 		}
 		if (!activation.filter) {
 			continue;
@@ -807,8 +811,9 @@ string ExcitationGraphManager::TablesToString() const {
 			ss << ", lineage={";
 			bool first = true;
 			for (auto ancestor_id : tl) {
-				if (!first)
+				if (!first) {
 					ss << ",";
+				}
 				ss << ancestor_id;
 				first = false;
 			}
@@ -830,8 +835,9 @@ string ExcitationGraphManager::TransferPlanToString() const {
 
 	ss << "ExcitationTimeline={\n";
 	for (auto &step : result_transfer_steps) {
-		if (!step.table)
+		if (!step.table) {
 			continue;
+		}
 		auto src_id = TableOperatorManager::GetScalarTableIndex(*step.table);
 		auto src_name = TableOperatorManager::GetTableName(*step.table);
 		ss << "\tstep_" << step.id << ": \"" << src_name << "\" (id=" << src_id << ")";
@@ -839,8 +845,9 @@ string ExcitationGraphManager::TransferPlanToString() const {
 		if (!step.depends_on.empty()) {
 			ss << " [depends_on=";
 			for (idx_t i = 0; i < step.depends_on.size(); i++) {
-				if (i > 0)
+				if (i > 0) {
 					ss << ",";
+				}
 				ss << step.depends_on[i];
 			}
 			ss << "]";
