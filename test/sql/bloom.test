@@ -1,0 +1,55 @@
+# name: test/sql/bloom.test
+# description: test bloom extension
+# group: [sql]
+
+require bloom
+
+query I
+SELECT current_setting('enable_rpt');
+----
+true
+
+query T
+SELECT current_setting('rpt_sample_cache_dir');
+----
+auto
+
+query III
+SELECT current_setting('rpt_sample_size'),
+       current_setting('rpt_sample_memory_cache'),
+       current_setting('rpt_late_materialize');
+----
+10000	true	false
+
+statement ok
+CREATE TABLE rpt_build(id INTEGER, payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_build VALUES (1, 'one'), (2, 'two'), (3, 'three');
+
+statement ok
+CREATE TABLE rpt_probe(id INTEGER, keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_probe VALUES (2, true), (3, false), (4, true);
+
+query II
+SELECT b.id, b.payload
+FROM rpt_build b
+JOIN rpt_probe p ON b.id = p.id
+WHERE p.keep
+ORDER BY b.id;
+----
+2	two
+
+statement ok
+SET enable_rpt = false;
+
+query II
+SELECT b.id, b.payload
+FROM rpt_build b
+JOIN rpt_probe p ON b.id = p.id
+WHERE p.keep
+ORDER BY b.id;
+----
+2	two
