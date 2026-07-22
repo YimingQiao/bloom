@@ -104,10 +104,10 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 		}
 		if (leaf->type == LogicalOperatorType::LOGICAL_CHUNK_GET) {
 			auto &chunk_get = leaf->Cast<LogicalColumnDataGet>();
-			double base_rows = chunk_get.collection ? chunk_get.collection->Count() : 0;
+			double base_rows = chunk_get.collection ? static_cast<double>(chunk_get.collection->Count()) : 0;
 			// If a FILTER sits above CHUNK_GET we need the estimator for the
 			// post-filter cardinality; for bare CHUNK_GET card == baseline.
-			double row_count = (leaf == &op) ? base_rows : estimator_->Estimate(op);
+			double row_count = (leaf == &op) ? base_rows : static_cast<double>(estimator_->Estimate(op));
 			state_.cardinality[table_id] = row_count;
 			state_.cardinality_baseline[table_id] = base_rows;
 			init_lineage(table_id);
@@ -116,8 +116,8 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 			continue;
 		}
 
-		double true_card = estimator_->Estimate(op);
-		double base_rows = ComputeBaseTableRows(op);
+		double true_card = static_cast<double>(estimator_->Estimate(op));
+		double base_rows = static_cast<double>(ComputeBaseTableRows(op));
 		state_.cardinality[table_id] = true_card;
 		state_.cardinality_baseline[table_id] = base_rows;
 
@@ -564,7 +564,7 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 		// them into LogicalGet. Composite-key filters cannot be expressed
 		// per-column, but the destination always materialises so we never
 		// hit this branch with a composite anyway (the materialized branch
-		// above handles them via the in-memory scanner + UseBF).
+		// above handles them via the in-memory scanner).
 		auto &direct = direct_filters_[table_id];
 		direct.reserve(direct.size() + cascade_filters.size());
 		for (auto &cf : cascade_filters) {
@@ -577,12 +577,11 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 }
 
 TableTransferResult ExcitationGraphManager::GetTableResult(idx_t table_id, LogicalOperator &op) {
-	auto state_it = state_.cardinality.find(table_id);
-	bool zero_card = state_it != state_.cardinality.end() && state_it->second == 0.0;
-	if (zero_card) {
-		return {TableTransferResult::Kind::Empty, nullptr, nullptr, nullptr};
-	}
-
+	// EmptyResult must come from ground truth, not an estimate: a flooding
+	// cardinality of 0 can be a false zero (the estimation BF is built from the
+	// source table's *sample*, so it has false negatives and can wrongly empty a
+	// non-empty join). Only a materialized scanner with Count()==0 below, or a
+	// pushed filter that empties the scan at execution, may drop all rows.
 	auto *scanner = executor_.Find(op);
 	if (scanner && scanner->IsMaterialized()) {
 		if (scanner->Count() == 0) {
@@ -794,7 +793,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 // ExcitationGraphManager — Debug output
 //===--------------------------------------------------------------------===//
 
-string ExcitationGraphManager::TablesToString() const {
+string ExcitationGraphManager::TablesToString() {
 	stringstream ss;
 
 	ss << "all_tables=(";
@@ -826,12 +825,11 @@ string ExcitationGraphManager::TablesToString() const {
 	return ss.str();
 }
 
-string ExcitationGraphManager::TransferPlanToString() const {
+string ExcitationGraphManager::TransferPlanToString() {
 	stringstream ss;
 
 	// Prune redundant steps only when we actually generate the debug timeline
-	auto &mutable_steps = const_cast<vector<TransferStep> &>(result_transfer_steps);
-	const_cast<ExcitationGraphManager *>(this)->PruneRedundantSteps(mutable_steps);
+	PruneRedundantSteps(result_transfer_steps);
 
 	ss << "ExcitationTimeline={\n";
 	for (auto &step : result_transfer_steps) {

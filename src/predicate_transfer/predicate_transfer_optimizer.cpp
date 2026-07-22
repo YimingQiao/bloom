@@ -111,6 +111,36 @@ static bool HasInequalityJoin(const LogicalOperator &op) {
 	return false;
 }
 
+//! Disjunctive/arbitrary join predicate at or below `op` (same CTE-boundary
+//! behaviour). A JoinCondition with comparison == INVALID carries a whole
+//! non-equi expression (e.g. an OR of per-table conjunctions). RPT's MemoryScan
+//! rewrite replaces a materialized subtree with a flat scan, which cannot
+//! preserve the bindings such a predicate reads across the two join sides, so
+//! we skip the scope and let the query run on plain DuckDB.
+static bool HasComplexJoinCondition(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
+	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+		return op.children.size() > 1 && HasComplexJoinCondition(*op.children[1]);
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
+		return true;
+	}
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		for (auto &cond : join.conditions) {
+			if (!cond.IsComparison()) {
+				return true;
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (HasComplexJoinCondition(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 static bool IsJoinNode(const LogicalOperator &op) {
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_COMPARISON_JOIN:
@@ -140,7 +170,7 @@ static idx_t CountJoins(const LogicalOperator &op) {
 
 //! Find the root-most join node in `op`, descending through non-join
 //! operators. Returns nullptr if there is no join above the next scope break.
-static const LogicalOperator *FindTopJoin(const LogicalOperator &op) {
+static LogicalOperator *FindTopJoin(LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
 	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
 		return op.children.size() > 1 ? FindTopJoin(*op.children[1]) : nullptr;
@@ -183,7 +213,7 @@ static bool IsLeftDeepJoinTree(LogicalOperator &op, ClientContext &context) {
 	if (!AllJoinRightSidesAreLeaf(op)) {
 		return false;
 	}
-	auto *top_join = const_cast<LogicalOperator *>(FindTopJoin(op));
+	auto *top_join = FindTopJoin(op);
 	if (!top_join) {
 		return false;
 	}
@@ -285,6 +315,9 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	if (config.skip_on_inequality_join && HasInequalityJoin(*plan)) {
 		return plan;
 	}
+	if (HasComplexJoinCondition(*plan)) {
+		return plan;
+	}
 	if (config.skip_left_deep_join_tree && IsLeftDeepJoinTree(*plan, optimizer.context)) {
 		return plan;
 	}
@@ -369,6 +402,15 @@ static unique_ptr<ColumnDataCollection> SelectColumns(ColumnDataCollection &src,
 //===--------------------------------------------------------------------===//
 static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const vector<ColumnBinding> &wanted_bindings,
                                                    const vector<LogicalType> &wanted_types, TableIndex table_index) {
+	// A MemoryScan replaces the subtree with a flat ColumnDataGet exposing
+	// exactly wanted_bindings/wanted_types. If the source op reports a
+	// different number of bindings than types (seen when an upstream pass left
+	// a projection_map and types out of sync), the replacement would produce
+	// an operator whose GetColumnBindings() disagrees with types and break
+	// binding resolution downstream — fall back to passthrough instead.
+	if (wanted_bindings.size() != wanted_types.size()) {
+		return nullptr;
+	}
 	const auto &output_bindings = scanner.GetOutputBindings();
 	auto rowid_chunk_col = scanner.GetRowIdChunkCol();
 

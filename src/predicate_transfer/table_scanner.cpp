@@ -826,8 +826,8 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 			    max_val.type() == min_val.type()) {
 				auto &stats = result.column_stats[collected_request_indices[stats_idx]];
 				stats.has_min_max = true;
-				stats.observed_min = IntegralValue::Get(min_val).lower;
-				stats.observed_max = IntegralValue::Get(max_val).lower;
+				stats.observed_min = static_cast<int64_t>(IntegralValue::Get(min_val).lower);
+				stats.observed_max = static_cast<int64_t>(IntegralValue::Get(max_val).lower);
 			}
 		}
 	}

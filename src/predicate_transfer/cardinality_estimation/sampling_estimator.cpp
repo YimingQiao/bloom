@@ -113,7 +113,8 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 	idx_t target_chunks = total_chunks;
 	if (sample_rate > 0.0 && sample_rate < 1.0) {
 		target_chunks = MaxValue<idx_t>(
-		    1, MinValue<idx_t>(total_chunks, static_cast<idx_t>(std::ceil(total_chunks * sample_rate))));
+		    1, MinValue<idx_t>(total_chunks,
+		                       static_cast<idx_t>(std::ceil(static_cast<double>(total_chunks) * sample_rate))));
 	}
 
 	DataChunk chunk;
@@ -204,7 +205,7 @@ idx_t SamplingCardinalityEstimator::SampleCDC(const LogicalOperator &op) {
 	auto &cdc = *chunk_get.collection;
 
 	// Build expression filter (same rewrite as TableScanner constructor).
-	auto chunk_bindings = const_cast<LogicalColumnDataGet &>(chunk_get).GetColumnBindings();
+	auto chunk_bindings = LogicalOperator::GenerateColumnBindings(chunk_get.table_index, chunk_get.chunk_types.size());
 	vector<ColumnBinding> current_bindings = chunk_bindings;
 	vector<idx_t> current_positions;
 	current_positions.reserve(chunk_bindings.size());
@@ -345,7 +346,7 @@ string SamplingCardinalityEstimator::SampleCachePath(const LogicalGet &get, cons
 	}
 	auto h = std::hash<string> {}(key);
 	auto &fs = FileSystem::GetFileSystem(context_);
-	return fs.JoinPath(cache_dir, StringUtil::Format("%016llx.sample", static_cast<unsigned long long>(h)));
+	return fs.JoinPath(cache_dir, StringUtil::Format("%016llx.sample", static_cast<uint64_t>(h)));
 }
 
 shared_ptr<ColumnDataCollection> SamplingCardinalityEstimator::GetFromMemoryCache(const string &key) {
@@ -831,16 +832,22 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(SampleEntry &sample, const 
 	// single sample row (total/sample) rather than 1: a hard floor of 1 would tie
 	// with genuinely single-row tables (whose full-sample estimate is exact) and
 	// mislead the excitation ordering into flooding an uncertain table first.
+	//
+	// A 0 is only trustworthy for a pure LOCAL predicate on a fully materialized
+	// sample: then the whole table was checked. With BF filters applied the
+	// probe BF was itself built from the *source* table's sample, so it has
+	// false negatives — 0 survivors here does not mean the join is empty, and
+	// returning 0 would wrongly rewrite a non-empty table to EmptyResult.
 	idx_t est;
 	if (survivors == 0) {
-		if (sample.sample_row_count >= sample.total_rows) {
+		if (sample.sample_row_count >= sample.total_rows && bf_filters.empty()) {
 			est = 0;
 		} else {
-			est = MaxValue<idx_t>(sample.total_rows / sample.sample_row_count, 1);
+			est = MaxValue<idx_t>(sample.total_rows / MaxValue<idx_t>(sample.sample_row_count, 1), 1);
 		}
 	} else {
 		double frac = static_cast<double>(survivors) / static_cast<double>(sample.sample_row_count);
-		est = static_cast<idx_t>(frac * static_cast<double>(sample.total_rows) + 0.5);
+		est = static_cast<idx_t>(std::lround(frac * static_cast<double>(sample.total_rows)));
 		if (est == 0) {
 			est = 1;
 		}

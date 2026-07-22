@@ -46,8 +46,6 @@ public:
 
 	static idx_t GetScalarTableIndex(const LogicalOperator &op);
 
-	static bool CheckLogicalCreateBF(const LogicalOperator &op);
-	static bool CheckLogicalUseBF(const LogicalOperator &op);
 	static string GetTableName(const LogicalOperator &op);
 	string GetColumnName(const ColumnBinding &binding);
 

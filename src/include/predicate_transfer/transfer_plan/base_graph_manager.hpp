@@ -35,10 +35,10 @@ public:
 	bool Build(LogicalOperator &op);
 
 	//! Debug output.
-	virtual string TransferPlanToString() const {
+	virtual string TransferPlanToString() {
 		return "";
 	}
-	virtual string TablesToString() const {
+	virtual string TablesToString() {
 		return "";
 	}
 	string EdgesToString() const;

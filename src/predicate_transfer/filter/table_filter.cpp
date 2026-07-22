@@ -33,7 +33,8 @@ struct OwnedPrefixRangeFunctionData final : PrefixRangeFunctionData {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<OwnedPrefixRangeFunctionData>(owner, const_cast<PrefixRangeFilter &>(*filter), key_type);
+		auto &adapter = static_cast<DuckDBPrefixRangeFilterAdapter &>(*owner);
+		return make_uniq<OwnedPrefixRangeFunctionData>(owner, adapter.GetPrefixRangeFilter(), key_type);
 	}
 
 	bool Equals(const FunctionData &other) const override {
@@ -49,7 +50,8 @@ struct OwnedBloomFilterFunctionData final : BloomFilterFunctionData {
 	}
 
 	unique_ptr<FunctionData> Copy() const override {
-		return make_uniq<OwnedBloomFilterFunctionData>(owner, const_cast<BloomFilter &>(*filter), key_type);
+		auto &adapter = static_cast<DuckDBBloomFilterAdapter &>(*owner);
+		return make_uniq<OwnedBloomFilterFunctionData>(owner, adapter.GetBloomFilter(), key_type);
 	}
 
 	bool Equals(const FunctionData &other) const override {

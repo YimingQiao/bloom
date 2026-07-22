@@ -31,8 +31,8 @@ class ExcitationGraphManager : public BaseGraphManager {
 public:
 	using BaseGraphManager::BaseGraphManager;
 
-	string TransferPlanToString() const override;
-	string TablesToString() const override;
+	string TransferPlanToString() override;
+	string TablesToString() override;
 
 	TableTransferResult GetTableResult(idx_t table_id, LogicalOperator &op);
 

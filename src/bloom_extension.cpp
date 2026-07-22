@@ -2,8 +2,6 @@
 
 #include "bloom_extension.hpp"
 #include "predicate_transfer/config.hpp"
-#include "predicate_transfer/operator/logical_create_bf.hpp"
-#include "predicate_transfer/operator/logical_use_bf.hpp"
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
 
 #include "duckdb/common/string_util.hpp"
@@ -108,8 +106,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LATE_MATERIALIZE", false)));
 
 	config.GetCallbackManager().Register(BloomOptimizerExtension());
-	config.GetCallbackManager().Register(make_uniq<LogicalCreateBF::OperatorExtension>());
-	config.GetCallbackManager().Register(make_uniq<LogicalUseBF::OperatorExtension>());
 }
 
 void BloomExtension::Load(ExtensionLoader &loader) {

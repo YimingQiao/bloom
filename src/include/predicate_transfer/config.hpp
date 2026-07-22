@@ -6,12 +6,7 @@ namespace duckdb {
 
 class RPTOptimizerConfig {
 public:
-	bool skip_unfiltered_table_flag = true;
 	bool late_materialize_flag = false;
-	bool use_dynamic_in_filter = false;
-	bool use_table_filter_bf = true;
-	bool use_row_id_filter = true;
-	bool use_bitmap_filter = true;
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
 	//! These tables benefit from early termination; RPT materialisation would defeat it.
 	bool enable_table_protection = false;

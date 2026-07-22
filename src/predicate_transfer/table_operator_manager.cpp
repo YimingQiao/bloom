@@ -1,6 +1,4 @@
 #include "predicate_transfer/table_operator_manager.hpp"
-#include "predicate_transfer/operator/logical_create_bf.hpp"
-#include "predicate_transfer/operator/logical_use_bf.hpp"
 
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
@@ -54,20 +52,6 @@ void TableOperatorManager::FindInnerColumnRef(Expression &expr, BoundColumnRefEx
 		}
 	}
 	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { FindInnerColumnRef(child, out_ref); });
-}
-
-bool TableOperatorManager::CheckLogicalCreateBF(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR) {
-		return op.Cast<const LogicalExtensionOperator>().GetExtensionName() == LogicalCreateBF::kExtensionName;
-	}
-	return false;
-}
-
-bool TableOperatorManager::CheckLogicalUseBF(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_EXTENSION_OPERATOR) {
-		return op.Cast<const LogicalExtensionOperator>().GetExtensionName() == LogicalUseBF::kExtensionName;
-	}
-	return false;
 }
 
 void TableOperatorManager::Build(LogicalOperator &plan) {

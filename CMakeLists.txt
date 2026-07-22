@@ -21,10 +21,6 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/filter/bloom_filter.cpp
     src/predicate_transfer/filter/table_filter.cpp
     src/predicate_transfer/materialized_cte_lifter.cpp
-    src/predicate_transfer/operator/logical_create_bf.cpp
-    src/predicate_transfer/operator/logical_use_bf.cpp
-    src/predicate_transfer/operator/physical_create_bf.cpp
-    src/predicate_transfer/operator/physical_use_bf.cpp
     src/predicate_transfer/predicate_transfer_optimizer.cpp
     src/predicate_transfer/table_operator_manager.cpp
     src/predicate_transfer/table_scanner.cpp
