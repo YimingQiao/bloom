@@ -1,23 +1,33 @@
-# Extension updating 
-When cloning this template, the target version of DuckDB should be the latest stable release of DuckDB. However, there 
-will inevitably come a time when a new DuckDB is released and the extension repository needs updating. This process goes
-as follows:
+# Updating the pinned DuckDB version
 
-- Bump submodules
-  - `./duckdb` should be set to latest tagged release
-  - `./extension-ci-tools` should be set to updated branch corresponding to latest DuckDB release. So if you're building for DuckDB `v1.1.0` there will be a branch in `extension-ci-tools` named `v1.1.0` to which you should check out. 
-- Bump versions in `./github/workflows`
-  - `duckdb_version` input in `duckdb-stable-build` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - `duckdb_version` input in `duckdb-stable-deploy` job in `MainDistributionPipeline.yml` should be set to latest tagged release
-  - the reusable workflow `duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml` for the `duckdb-stable-build` job should be set to latest tagged release
+Bloom targets DuckDB `main` (currently pinned to `21aca042`) because it needs
+the extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633)),
+which is not in any stable release yet. To move the pin forward:
 
-# API changes
-DuckDB extensions built with this extension template are built against the internal C++ API of DuckDB. This API is not guaranteed to be stable.
-What this means for extension development is that when updating your extensions DuckDB target version using the above steps, you may run into the fact that your extension no longer builds properly.
+1. Bump the `duckdb` submodule to the new commit and rebuild:
+   ```bash
+   cd duckdb && git fetch origin main && git checkout <new-commit> && cd ..
+   git submodule update --init --recursive
+   make release
+   ```
+2. Update `duckdb_version` in `.github/workflows/MainDistributionPipeline.yml`
+   to the same commit hash. Keep `ci_tools_version: main` and update the
+   `extension-ci-tools` submodule alongside it if the reusable workflows
+   changed.
+3. Update the pinned commit mentioned in `README.md`.
+4. Run the tests and the IMDB benchmark suite before pushing:
+   ```bash
+   make test
+   python3 scripts/run_benchmark_suite.py --db /path/to/imdb.duckdb
+   ```
 
-Currently, DuckDB does not (yet) provide a specific change log for these API changes, but it is generally not too hard to figure out what has changed.
+Once a stable DuckDB release contains #20633, switch `duckdb_version` and the
+submodule to that tag and pin `ci_tools_version` to the matching
+`extension-ci-tools` release branch.
 
-For figuring out how and why the C++ API changed, we recommend using the following resources:
+Bloom builds against DuckDB's internal C++ API, which is not stable; a pin
+bump may require code fixes. Useful resources for tracking API changes:
+
 - DuckDB's [Release Notes](https://github.com/duckdb/duckdb/releases)
 - DuckDB's history of [Core extension patches](https://github.com/duckdb/duckdb/commits/main/.github/patches/extensions)
-- The git history of the relevant C++ Header file of the API that has changed
+- The git history of the relevant C++ header in the `duckdb` submodule

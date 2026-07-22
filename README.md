@@ -58,6 +58,26 @@ equivalent `RPT_*` environment variables are useful for benchmark runner jobs.
 
 ## IMDB Benchmark
 
+### Results
+
+All 113 IMDB (JOB) queries through DuckDB's native `benchmark_runner` on the
+uncompressed 3.9 GiB IMDB database; per query one untimed warmup plus five
+timed runs, summarized by the median (2026-07-22, commit-pinned DuckDB
+`21aca042`, both sides reading the same database file):
+
+| Threads | DuckDB baseline | Bloom | Total speedup | Per-query median speedup (geomean) | Queries faster |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 28.904 s | 19.063 s | **1.516x** | **1.437x** | 84/113 |
+| 8 | 7.229 s | 5.066 s | **1.427x** | **1.313x** | 71/113 |
+
+The 8-thread gap versus single-thread comes from short queries (5–50 ms
+baselines): execution shrinks ~8x with threads while the transfer phase's
+serial parts do not, so fixed transfer overhead weighs more. See
+`docs/porting-memory.md` for the measured breakdown and open optimization
+directions.
+
+### Reproducing
+
 Build DuckDB's native runner, then run the full comparison suite with one
 command:
 
