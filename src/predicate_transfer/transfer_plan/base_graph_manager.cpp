@@ -1,5 +1,7 @@
 #include "predicate_transfer/transfer_plan/base_graph_manager.hpp"
 
+#include <algorithm>
+
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/expression/bound_comparison_expression.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"

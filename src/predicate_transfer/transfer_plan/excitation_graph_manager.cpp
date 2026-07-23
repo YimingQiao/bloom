@@ -14,8 +14,10 @@
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/client_config.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <numeric>
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
