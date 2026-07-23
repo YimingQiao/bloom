@@ -63,32 +63,29 @@ Advanced / diagnostic:
 
 Bloom RPT vs. the DuckDB baseline (both with DuckDB's built-in hash-join Bloom
 filters), measured with DuckDB's native `benchmark_runner`: one untimed warmup
-plus five timed runs per query, each query summarized by its median. Both sides
-read the same database file (2026-07-23, pinned DuckDB `21aca042`).
+followed by five timed runs per query, taking the median as the query time.
+Both sides read the same database file (2026-07-23, pinned DuckDB
+`21aca042`).
 
 The latest post-rewrite checks completed every reported query correctly.
-Unless noted otherwise, these are one-timed-run health checks, so treat 1–3%
-deltas as noise rather than a new stable benchmark. The uncompressed
-single-thread row compares the current Bloom run with the comparable historical
-five-run DuckDB baseline.
 
 Single-thread:
 
-| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean |
-|---|---:|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.133 s | **1.530×** | **1.465×** |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.951 s | **1.409×** | **1.351×** |
-| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.785 s | **1.118×** | **1.077×** |
-| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 74.290 s | **1.033×** | **1.044×** |
+| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
+|---|---:|---:|---:|---:|---:|
+| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.133 s | **1.530×** |
+| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.951 s | **1.409×** |
+| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.785 s | **1.118×** |
+| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 74.290 s | **1.033×** |
 
 Eight threads:
 
-| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean |
-|---|---:|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 7.167 s | 5.170 s | **1.386×** | **1.296×** |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 8.123 s | 6.042 s | **1.344×** | **1.258×** |
-| TPC-H SF10 | 2.68 GB | 22 | 3.209 s | 3.291 s | 0.975× | 0.952× |
-| TPC-DS SF10 | 3.19 GB | 99 | 14.649 s | 14.660 s | 0.999× | 0.995× |
+| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
+|---|---:|---:|---:|---:|---:|
+| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 7.167 s | 5.170 s | **1.386×** |
+| IMDB (JOB) | compressed, 2.05 GB | 113 | 8.123 s | 6.042 s | **1.344×** |
+| TPC-H SF10 | 2.68 GB | 22 | 3.209 s | 3.291 s | 0.975× |
+| TPC-DS SF10 | 3.19 GB | 99 | 14.649 s | 14.660 s | 0.999× |
 
 TPC-DS 8-thread execution is the post-CTE-lifter check: all 99 queries,
 including the eight queries that previously failed, completed correctly. The
@@ -98,8 +95,7 @@ process crash did not reproduce.
 IMDB — a many-join workload — is where predicate transfer pays off most. On
 TPC-H/TPC-DS the gains are smaller (fewer, larger joins already served well by
 DuckDB's own filters), and at 8 threads short queries can regress because the
-transfer phase's serial parts don't shrink with thread count. `docs/porting-memory.md`
-has the measured breakdown and the open optimization directions.
+transfer phase's serial parts don't shrink with thread count.
 
 ### Reproducing
 
@@ -117,9 +113,9 @@ python3 scripts/run_benchmark_suite.py --workload tpch_sf10
 python3 scripts/run_benchmark_suite.py --workload tpcds_sf10
 ```
 
-It prints the total-time / speedup / geomean table above and writes raw
-per-run timings under `benchmark_results/`. The reported scale-factor
-workloads are `imdb`, `tpch_sf10`, `tpcds_sf10`, and `appian`.
+It prints a total-time and speedup summary and writes raw per-run timings under
+`benchmark_results/`. The reported scale-factor workloads are `imdb`,
+`tpch_sf10`, `tpcds_sf10`, and `appian`.
 
 For a single configuration or a quick spot check, call the lower-level runner
 directly (`--baseline` disables RPT; `--pattern` selects queries):

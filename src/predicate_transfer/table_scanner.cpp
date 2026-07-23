@@ -291,8 +291,7 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	if (log_operator_profile) {
 		client_data.profiler->EndQuery();
 		std::cerr << "      [MaterializeOperatorProfileBegin]\n"
-		          << client_data.profiler->QueryTreeToString()
-		          << "      [MaterializeOperatorProfileEnd]\n";
+		          << client_data.profiler->QueryTreeToString() << "      [MaterializeOperatorProfileEnd]\n";
 	}
 
 	client_data.profiler = std::move(saved_profiler);
@@ -345,8 +344,7 @@ static void LogResidualFilters(LogicalOperator &op, const char *phase) {
 	if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
 		auto &filter = op.Cast<LogicalFilter>();
 		for (auto &expr : filter.expressions) {
-			std::cerr << "        [MaterializeResidualFilter] phase=" << phase << " expr=" << expr->ToString()
-			          << '\n';
+			std::cerr << "        [MaterializeResidualFilter] phase=" << phase << " expr=" << expr->ToString() << '\n';
 		}
 	}
 	for (auto &child : op.children) {
@@ -363,8 +361,7 @@ static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 	for (auto &entry : gets) {
 		auto &get = *entry.second;
 		auto table = get.GetTable();
-		std::cerr << "      [MaterializePlan] phase=" << phase << " scan=" << (table ? table->name : "?")
-		          << " cols=(";
+		std::cerr << "      [MaterializePlan] phase=" << phase << " scan=" << (table ? table->name : "?") << " cols=(";
 		for (auto &col_id : get.GetColumnIds()) {
 			auto idx = col_id.GetPrimaryIndex();
 			bool named = table && idx < table->GetColumns().LogicalColumnCount();

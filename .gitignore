@@ -11,3 +11,4 @@ rpt_sample_cache/
 rpt_cardinality_cache.txt
 benchmark_results/
 .bench_cache/
+docs/porting-memory.md
