@@ -475,6 +475,83 @@ void BaseGraphManager::DiscoverEdges() {
 			            /*protect_left=*/false, /*protect_right=*/false);
 		}
 	}
+
+	if (config.bundle_composite_edges) {
+		BundleCompositeEdges();
+	}
+}
+
+void BaseGraphManager::BundleCompositeEdges() {
+	struct EdgeBundle {
+		bool protect_left;
+		bool protect_right;
+		vector<ColumnBinding> left_bindings;
+		vector<ColumnBinding> right_bindings;
+		vector<LogicalType> return_types;
+	};
+
+	for (auto &outer : neighbor_matrix) {
+		idx_t left_id = outer.first;
+		for (auto &inner : outer.second) {
+			idx_t right_id = inner.first;
+			if (left_id >= right_id || inner.second.size() < 2) {
+				continue;
+			}
+
+			vector<EdgeBundle> bundles;
+			for (auto &edge : inner.second) {
+				auto bundle_it = std::find_if(bundles.begin(), bundles.end(), [&](const EdgeBundle &bundle) {
+					return bundle.protect_left == edge.protect_left && bundle.protect_right == edge.protect_right;
+				});
+				if (bundle_it == bundles.end()) {
+					bundles.push_back({edge.protect_left, edge.protect_right, {}, {}, {}});
+					bundle_it = bundles.end() - 1;
+				}
+
+				for (idx_t key_idx = 0; key_idx < edge.KeyCount(); key_idx++) {
+					bool duplicate = false;
+					for (idx_t existing_idx = 0; existing_idx < bundle_it->left_bindings.size(); existing_idx++) {
+						if (bundle_it->left_bindings[existing_idx] == edge.left_bindings[key_idx] &&
+						    bundle_it->right_bindings[existing_idx] == edge.right_bindings[key_idx]) {
+							duplicate = true;
+							break;
+						}
+					}
+					if (duplicate) {
+						continue;
+					}
+					bundle_it->left_bindings.push_back(edge.left_bindings[key_idx]);
+					bundle_it->right_bindings.push_back(edge.right_bindings[key_idx]);
+					bundle_it->return_types.push_back(edge.return_types[key_idx]);
+				}
+			}
+
+			auto *left_table = table_operator_manager.GetTableOperator(left_id);
+			auto *right_table = table_operator_manager.GetTableOperator(right_id);
+			D_ASSERT(left_table && right_table);
+
+			vector<EdgeInfo> merged;
+			merged.reserve(bundles.size());
+			for (auto &bundle : bundles) {
+				EdgeInfo edge(std::move(bundle.return_types), *left_table, std::move(bundle.left_bindings),
+				              *right_table, std::move(bundle.right_bindings));
+				edge.protect_left = bundle.protect_left;
+				edge.protect_right = bundle.protect_right;
+				merged.push_back(std::move(edge));
+			}
+			inner.second = std::move(merged);
+
+			auto reverse_outer = neighbor_matrix.find(right_id);
+			D_ASSERT(reverse_outer != neighbor_matrix.end());
+			auto reverse_inner = reverse_outer->second.find(left_id);
+			D_ASSERT(reverse_inner != reverse_outer->second.end());
+			reverse_inner->second.clear();
+			reverse_inner->second.reserve(inner.second.size());
+			for (auto &edge : inner.second) {
+				reverse_inner->second.push_back(edge.Flip());
+			}
+		}
+	}
 }
 
 //===--------------------------------------------------------------------===//

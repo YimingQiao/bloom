@@ -62,6 +62,11 @@ protected:
 	void DiscoverEdges();
 
 private:
+	//! Merge all compatible edges between the same table pair after transitive
+	//! closure. Join-order rewrites can place equivalent key conditions in
+	//! different join operators, so per-join grouping alone is insufficient.
+	void BundleCompositeEdges();
+
 	//! Parse join operators to populate neighbor_matrix.
 	void ExtractEdgesInfo(const vector<reference<LogicalOperator>> &join_operators);
 

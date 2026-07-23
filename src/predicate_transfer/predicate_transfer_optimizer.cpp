@@ -53,27 +53,41 @@ static bool HasSetOperator(const LogicalOperator &op) {
 	return false;
 }
 
-//! Inequality join at or below `op`, with the same CTE-boundary behaviour.
-static bool HasInequalityJoin(const LogicalOperator &op) {
+static bool IsRangeInequality(ExpressionType comparison_type) {
+	return comparison_type == ExpressionType::COMPARE_LESSTHAN ||
+	       comparison_type == ExpressionType::COMPARE_GREATERTHAN ||
+	       comparison_type == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
+	       comparison_type == ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+}
+
+//! Pure range-inequality join at or below `op`, with the same CTE-boundary
+//! behaviour. A mixed join with at least one equality key is not pure: RPT can
+//! still use its equality graph while ignoring the range condition.
+static bool HasPureInequalityJoin(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
 	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
-		return op.children.size() > 1 && HasInequalityJoin(*op.children[1]);
+		return op.children.size() > 1 && HasPureInequalityJoin(*op.children[1]);
 	}
 	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
 		auto &join = op.Cast<LogicalComparisonJoin>();
+		bool has_range_inequality = false;
+		bool has_equality = false;
 		for (auto &cond : join.conditions) {
 			if (cond.IsComparison()) {
 				auto cmp = cond.GetComparisonType();
-				if (cmp == ExpressionType::COMPARE_LESSTHAN || cmp == ExpressionType::COMPARE_GREATERTHAN ||
-				    cmp == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
-				    cmp == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
-					return true;
+				if (IsRangeInequality(cmp)) {
+					has_range_inequality = true;
+				} else if (cmp == ExpressionType::COMPARE_EQUAL || cmp == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+					has_equality = true;
 				}
 			}
 		}
+		if (has_range_inequality && !has_equality) {
+			return true;
+		}
 	}
 	for (auto &child : op.children) {
-		if (HasInequalityJoin(*child)) {
+		if (HasPureInequalityJoin(*child)) {
 			return true;
 		}
 	}
@@ -239,11 +253,20 @@ static unordered_set<idx_t> ComputeProtectedTables(const LogicalOperator &plan) 
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
 	if (config.enable_materialized_cte_lifting) {
-		// Lift LOGICAL_MATERIALIZED_CTE nodes before building the PT graph.
-		// The implementation remains available, but is disabled by default
-		// until optimizer-time parallel execution has a valid query Executor.
+		// Lift optimizer-time-safe LOGICAL_MATERIALIZED_CTE nodes before
+		// building the PT graph. Unsafe definitions remain in the plan for
+		// DuckDB's runtime Executor.
 		MaterializedCTELifter lifter(optimizer, optimizer.context, config);
 		plan = lifter.Lift(std::move(plan));
+		if (ContainsMaterializedCTE(*plan)) {
+			// A retained CTE still separates definition and consumer binding
+			// scopes. Safe sibling CTEs may already have been lifted, but the
+			// remaining parent scope must stay intact.
+			if (config.log_transfer_steps) {
+				fprintf(stderr, "[RPT-Excitation] scope skipped: unsafe_materialized_cte_retained\n");
+			}
+			return plan;
+		}
 	} else if (ContainsMaterializedCTE(*plan)) {
 		// Without lifting, the CTE definition and its consumer are separate
 		// binding scopes. Do not let graph construction cross that boundary;
@@ -260,8 +283,8 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	const char *skip_reason = nullptr;
 	if (config.skip_on_set_operator && HasSetOperator(*plan)) {
 		skip_reason = "set_operator";
-	} else if (config.skip_on_inequality_join && HasInequalityJoin(*plan)) {
-		skip_reason = "inequality_join";
+	} else if (config.skip_on_inequality_join && HasPureInequalityJoin(*plan)) {
+		skip_reason = "pure_inequality_join";
 	} else if (config.skip_left_deep_join_tree && IsLeftDeepJoinTree(*plan, optimizer.context)) {
 		skip_reason = "left_deep_join_tree";
 	}

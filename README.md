@@ -7,6 +7,11 @@ A DuckDB extension for **robust predicate transfer (RPT)**. It propagates Bloom
 and bitmap filters bidirectionally across a query's joins, pruning each table's
 rows before the joins run. It loads into **unmodified** DuckDB — no patched build.
 
+DuckDB already pushes Bloom filters from selective hash joins into probe-side
+scans ([duckdb/duckdb#19502](https://github.com/duckdb/duckdb/pull/19502)).
+Bloom extends this join-local, one-way optimization into bidirectional
+predicate transfer across multiple joins.
+
 ## How it works
 
 - **Adaptive-excitation optimizer.** An optimizer extension rewrites the logical
@@ -19,9 +24,6 @@ rows before the joins run. It loads into **unmodified** DuckDB — no patched bu
   statistics pruning**. This is why Bloom targets DuckDB `main` — it relies on
   the extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633),
   merged 2026-02-12), which is not in the v1.5.x stable line.
-- **Sampling only.** Bloom uses the sampling cardinality estimator. The research
-  prototype's oracle execution path and its DuckDB-patching `RPTTableFilter` are
-  intentionally not included.
 
 **Target:** DuckDB `main`, pinned to commit `21aca042`. See
 [`docs/UPDATING.md`](docs/UPDATING.md) to move the pin forward.
@@ -37,65 +39,26 @@ The loadable extension lands at
 `build/release/extension/bloom/bloom.duckdb_extension`. It is enabled by default
 once loaded.
 
-## Configuration
-
-Every setting can be changed at runtime with `SET <name> = <value>`; each also
-reads an `RPT_*` environment variable at load time, which is handy for
-benchmark-runner jobs. The two most useful are `enable_rpt` (turn RPT off for an
-A/B comparison) and `rpt_sample_cache_dir`.
-
-| Setting | Env var | Default | Meaning |
-|---|---|---|---|
-| `enable_rpt` | `RPT_ENABLE` | `true` | Master on/off switch for the optimizer. |
-| `rpt_sample_cache_dir` | `RPT_SAMPLE_CACHE_DIR` | `auto` | Where per-table samples are cached. `auto` uses `<database>.rpt_samples/`; set a path to share a cache, or `''` to disable disk caching. |
-| `rpt_sample_size` | `RPT_SAMPLE_SIZE` | `10000` | Target rows for the **on-disk per-table sample** used to estimate base-table cardinalities. |
-| `rpt_sample_rate` | `RPT_SAMPLE_RATE` | `0.01` | Chunk-sampling fraction for estimating cardinalities of **already-materialized intermediate data** during flooding. Distinct from `rpt_sample_size`. |
-
-Advanced / diagnostic:
-
-| Setting | Env var | Default | Meaning |
-|---|---|---|---|
-| `rpt_sample_memory_cache` | `RPT_SAMPLE_MEMORY_CACHE` | `true` | Also keep samples in the process object cache to skip disk reloads across queries. |
-| `rpt_log_transfer_steps` | `RPT_LOG_TRANSFER_STEPS` | `false` | Print the transfer plan (cardinalities, rounds, timeline) to stderr. |
-| `rpt_late_materialize` | `RPT_LATE_MATERIALIZE` | `false` | **Experimental.** Rowid-based late materialization. Correct but currently a net slowdown (the rowid re-fetch beats column materialization only for very selective transfers on wide tables); left off by default. |
-
 ## Benchmarks
 
-Bloom RPT vs. the DuckDB baseline (both with DuckDB's built-in hash-join Bloom
-filters), measured with DuckDB's native `benchmark_runner`: one untimed warmup
-followed by five timed runs per query, taking the median as the query time.
-Both sides read the same database file (2026-07-23, pinned DuckDB
-`21aca042`).
+Bloom RPT vs. the DuckDB baseline, measured with DuckDB's native
+`benchmark_runner`: one untimed warmup followed by five timed runs per query,
+taking the median as the query time. Both sides retain DuckDB's built-in join
+filters and read the same database file (2026-07-23, pinned DuckDB
+`21aca042`). The results below use one thread.
 
 The latest post-rewrite checks completed every reported query correctly.
 
-Single-thread:
-
 | Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
 |---|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.133 s | **1.530×** |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.951 s | **1.409×** |
-| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.785 s | **1.118×** |
-| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 74.290 s | **1.033×** |
-
-Eight threads:
-
-| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
-|---|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 7.167 s | 5.170 s | **1.386×** |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 8.123 s | 6.042 s | **1.344×** |
-| TPC-H SF10 | 2.68 GB | 22 | 3.209 s | 3.291 s | 0.975× |
-| TPC-DS SF10 | 3.19 GB | 99 | 14.649 s | 14.660 s | 0.999× |
-
-TPC-DS 8-thread execution is the post-CTE-lifter check: all 99 queries,
-including the eight queries that previously failed, completed correctly. The
-uncompressed IMDB rerun also completed all 113 queries; an earlier intermittent
-process crash did not reproduce.
+| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.047 s | **1.537×** |
+| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.511 s | **1.435×** |
+| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.685 s | **1.124×** |
+| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 73.393 s | **1.046×** |
 
 IMDB — a many-join workload — is where predicate transfer pays off most. On
-TPC-H/TPC-DS the gains are smaller (fewer, larger joins already served well by
-DuckDB's own filters), and at 8 threads short queries can regress because the
-transfer phase's serial parts don't shrink with thread count.
+TPC-H/TPC-DS the gains are smaller because their fewer, larger joins are
+already served well by DuckDB's own filters.
 
 ### Reproducing
 
@@ -105,12 +68,12 @@ Build the runner (add the data generators for TPC-H / TPC-DS):
 CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j48
 ```
 
-Run a whole workload, RPT vs. baseline, at one or more thread counts:
+Run a whole workload, RPT vs. baseline, with one thread:
 
 ```bash
-python3 scripts/run_benchmark_suite.py --workload imdb --threads 1 8
-python3 scripts/run_benchmark_suite.py --workload tpch_sf10
-python3 scripts/run_benchmark_suite.py --workload tpcds_sf10
+python3 scripts/run_benchmark_suite.py --workload imdb --threads 1
+python3 scripts/run_benchmark_suite.py --workload tpch_sf10 --threads 1
+python3 scripts/run_benchmark_suite.py --workload tpcds_sf10 --threads 1
 ```
 
 It prints a total-time and speedup summary and writes raw per-run timings under
@@ -132,40 +95,31 @@ runner. Databases and sample caches persist under `.bench_cache/`. Provide a
 database with `--db`, or let the runner generate one via the `tpch`/`tpcds`
 extensions on first use.
 
-### CEB IMDB workloads
+## Roadmap
 
-Bloom also integrates the IMDB workloads from the
-[Cardinality Estimation Benchmark](https://github.com/learnedsystems/CEB):
+- **Improve multi-threaded execution.** Bloom currently separates predicate
+  transfer from the main query execution, which limits parallelism in the
+  transfer phase. Future work will focus on making transfer fully parallel and
+  better integrated with DuckDB's multi-threaded execution.
 
-- `ceb_imdb`: the recommended 3,133-query unique-plan subset.
-- `ceb_imdb_full`: the complete 13,646-query workload.
+## Configuration
 
-The first run automatically downloads the pinned SQL archive, verifies its
-SHA-256 checksum, and caches the extracted queries under `.bench_cache/ceb/`.
-If `imdb.duckdb` is absent, the runner also builds it automatically from
-DuckDB's JOB Parquet files. You can prepare the SQL without running it:
+Every setting can be changed at runtime with `SET <name> = <value>`; each also
+reads an `RPT_*` environment variable at load time. The two most useful are
+`enable_rpt` (turn RPT off for an A/B comparison) and
+`rpt_sample_cache_dir`.
 
-```bash
-python3 scripts/prepare_ceb.py --print-root
-```
+| Setting | Env var | Default | Meaning |
+|---|---|---|---|
+| `enable_rpt` | `RPT_ENABLE` | `true` | Master on/off switch for the optimizer. |
+| `rpt_sample_cache_dir` | `RPT_SAMPLE_CACHE_DIR` | `auto` | Where per-table samples are cached. `auto` uses `<database>.rpt_samples/`; set a path to share a cache, or `''` to disable disk caching. |
+| `rpt_sample_size` | `RPT_SAMPLE_SIZE` | `10000` | Target rows for the **on-disk per-table sample** used to estimate base-table cardinalities. |
+| `rpt_sample_rate` | `RPT_SAMPLE_RATE` | `0.01` | Chunk-sampling fraction for estimating cardinalities of **already-materialized intermediate data** during flooding. Distinct from `rpt_sample_size`. |
 
-Run the recommended workload or the full workload:
+Advanced / diagnostic:
 
-```bash
-python3 scripts/run_benchmark_suite.py --workload ceb_imdb --threads 1
-python3 scripts/run_benchmark_suite.py --workload ceb_imdb_full --threads 1
-```
-
-The full workload is substantially more expensive. For a smoke test, select
-one generated benchmark by its `<template>__<query-file-stem>` name:
-
-```bash
-python3 scripts/run_benchmark.py --workload ceb_imdb \
-  --pattern 'benchmark/ceb_imdb/1a__.*.benchmark' --timed-runs 1
-```
-
-CEB does not publish result-answer files with this SQL bundle, so these runs
-verify successful query execution and compare Bloom against the DuckDB
-baseline; they do not compare result values against golden files. Query
-provenance and the pinned source revision are documented in
-[`benchmark/ceb/README.md`](benchmark/ceb/README.md).
+| Setting | Env var | Default | Meaning |
+|---|---|---|---|
+| `rpt_sample_memory_cache` | `RPT_SAMPLE_MEMORY_CACHE` | `true` | Also keep samples in the process object cache to skip disk reloads across queries. |
+| `rpt_log_transfer_steps` | `RPT_LOG_TRANSFER_STEPS` | `false` | Print the transfer plan (cardinalities, rounds, timeline) to stderr. |
+| `rpt_late_materialize` | `RPT_LATE_MATERIALIZE` | `false` | **Experimental.** Rowid-based late materialization. Correct but currently a net slowdown (the rowid re-fetch beats column materialization only for very selective transfers on wide tables); left off by default. |

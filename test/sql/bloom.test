@@ -66,8 +66,8 @@ WHERE r.keep AND l.middle_col >= 0;
 statement ok
 SET threads = 8;
 
-# Materialized CTE lifting is temporarily disabled. RPT must leave the plan
-# intact so DuckDB executes the CTE using its normal query Executor.
+# A hash-join CTE is retained at 8 threads and executed by DuckDB's runtime
+# query Executor.
 query III
 WITH rpt_cte AS MATERIALIZED (
     SELECT l.id, l.payload, l.tail_col
@@ -80,6 +80,18 @@ FROM rpt_cte a
 JOIN rpt_cte b ON a.id = b.id;
 ----
 100	495000	296
+
+# Range joins create tasks through DuckDB's active query Executor, so this CTE
+# must remain intact for runtime execution even though its inputs are tiny.
+query I
+WITH range_cte AS MATERIALIZED (
+    SELECT count(*) AS n
+    FROM rpt_build b
+    JOIN rpt_probe p ON b.id < p.id
+)
+SELECT n FROM range_cte;
+----
+6
 
 statement ok
 SET threads = 1;

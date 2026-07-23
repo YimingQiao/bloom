@@ -9,8 +9,8 @@
 
 namespace duckdb {
 
-//! MaterializedCTELifter walks a logical plan top-down and lifts every
-//! LOGICAL_MATERIALIZED_CTE node out of the tree by:
+//! MaterializedCTELifter walks a logical plan top-down and lifts each
+//! optimizer-time-safe LOGICAL_MATERIALIZED_CTE node out of the tree by:
 //!   1. Running a fresh PredicateTransferOptimizer pass on the CTE definition
 //!      (children[0]) as its own scope.
 //!   2. Executing the optimized definition into a ColumnDataCollection.
@@ -34,8 +34,14 @@ public:
 	unique_ptr<LogicalOperator> Lift(unique_ptr<LogicalOperator> op);
 
 private:
-	//! Execute a logical plan and return the resulting ColumnDataCollection.
+	//! Execute a logical plan that has passed the logical safety preflight and
+	//! return the resulting ColumnDataCollection.
 	unique_ptr<ColumnDataCollection> ExecutePlan(unique_ptr<LogicalOperator> plan);
+
+	//! Reject a logical CTE definition before any child RPT or physical
+	//! planning when it contains a join that could require DuckDB's outer
+	//! query Executor.
+	bool IsSafeForOptimizerExecution(const LogicalOperator &op, string &unsafe_reason) const;
 
 	//! Replace every LOGICAL_CTE_REF whose cte_index matches `target_cte_index`
 	//! with a LogicalColumnDataGet that scans `shared_data`.

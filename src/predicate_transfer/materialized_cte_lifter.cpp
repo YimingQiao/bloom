@@ -7,7 +7,10 @@
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
@@ -55,6 +58,18 @@ static bool IsFilterOverAggregate(const LogicalOperator &op) {
 	return false;
 }
 
+static bool ContainsCTERef(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_CTE_REF) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsCTERef(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperator> op) {
 	if (!op) {
 		return op;
@@ -85,16 +100,45 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperat
 	auto &mat_cte = op->Cast<LogicalMaterializedCTE>();
 	auto cte_index = mat_cte.table_index;
 
-	// 1. Optionally run a fresh PT pass on the CTE definition. Skip when the
-	//    CTE is self-selective (filter-over-aggregate) — the agg already
-	//    compresses rows, RPT materialisation rarely pays off.
-	unique_ptr<LogicalOperator> cte_def = std::move(op->children[0]);
-	bool skip = (config.skip_cte_with_filter_agg && IsFilterOverAggregate(*cte_def)) ||
-	            (config.skip_cte_with_agg && ContainsAggregate(*cte_def));
-	if (!skip) {
-		PredicateTransferOptimizer sub_optimizer(optimizer, context, config);
-		cte_def = sub_optimizer.Optimize(std::move(cte_def));
+	// A definition that still refers to an earlier, retained CTE is not
+	// self-contained and cannot be executed during optimization.
+	if (ContainsCTERef(*op->children[0])) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: unresolved_cte_dependency\n",
+			        static_cast<unsigned long long>(cte_index.index));
+		}
+		op->children[1] = Lift(std::move(op->children[1]));
+		return op;
 	}
+
+	// Eagerly lifting aggregate CTEs can be much more expensive even when
+	// their operators are executor-safe. Keep them in DuckDB's runtime plan.
+	bool skip_for_aggregate = (config.skip_cte_with_filter_agg && IsFilterOverAggregate(*op->children[0])) ||
+	                          (config.skip_cte_with_agg && ContainsAggregate(*op->children[0]));
+	if (skip_for_aggregate) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: aggregate_cte_not_eagerly_lifted\n",
+			        static_cast<unsigned long long>(cte_index.index));
+		}
+		op->children[1] = Lift(std::move(op->children[1]));
+		return op;
+	}
+
+	// 1. Check the untouched logical definition before running child RPT or
+	//    constructing a physical plan.
+	string unsafe_reason;
+	if (!IsSafeForOptimizerExecution(*op->children[0], unsafe_reason)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: %s\n",
+			        static_cast<unsigned long long>(cte_index.index), unsafe_reason.c_str());
+		}
+		op->children[1] = Lift(std::move(op->children[1]));
+		return op;
+	}
+
+	unique_ptr<LogicalOperator> cte_def = std::move(op->children[0]);
+	PredicateTransferOptimizer sub_optimizer(optimizer, context, config);
+	cte_def = sub_optimizer.Optimize(std::move(cte_def));
 
 	// 2. Execute the (possibly optimized) definition.
 	auto collection = ExecutePlan(std::move(cte_def));
@@ -135,6 +179,56 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::ReplaceCTERefs(unique_ptr<Log
 		child = ReplaceCTERefs(std::move(child), target_cte_index, shared_data);
 	}
 	return op;
+}
+
+bool MaterializedCTELifter::IsSafeForOptimizerExecution(const LogicalOperator &op, string &unsafe_reason) const {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		bool has_equality = false;
+		idx_t range_count = 0;
+		for (auto &condition : join.conditions) {
+			if (!condition.IsComparison()) {
+				continue;
+			}
+			auto comparison = condition.GetComparisonType();
+			if (comparison == ExpressionType::COMPARE_EQUAL ||
+			    comparison == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+				has_equality = true;
+			} else if (comparison == ExpressionType::COMPARE_LESSTHAN ||
+			           comparison == ExpressionType::COMPARE_GREATERTHAN ||
+			           comparison == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
+			           comparison == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+				range_count++;
+			}
+		}
+
+		// A pure range comparison can become PIECEWISE_MERGE_JOIN / IE_JOIN.
+		// With prefer_range_joins enabled, a mixed join with at least two range
+		// keys can become IE_JOIN as well. Their materialization tasks always
+		// look up the active query Executor, even with one scheduler thread.
+		bool prefers_iejoin = range_count >= 2 && Settings::Get<PreferRangeJoinsSetting>(context);
+		if (range_count > 0 && (!has_equality || prefers_iejoin)) {
+			unsafe_reason = "logical_range_join_may_require_active_executor";
+			return false;
+		}
+
+		auto thread_count = TaskScheduler::GetScheduler(context).NumberOfThreads();
+		if (has_equality && (thread_count > 1 || context.config.verify_parallelism)) {
+			// Equality comparisons normally become PhysicalHashJoin. Its
+			// runtime build count can trigger parallel finalize regardless of
+			// the optimizer's cardinality estimate.
+			unsafe_reason = "logical_hash_join_may_require_active_executor";
+			return false;
+		}
+	}
+
+	for (auto &child : op.children) {
+		if (!IsSafeForOptimizerExecution(*child, unsafe_reason)) {
+			return false;
+		}
+	}
+	return true;
 }
 
 unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<LogicalOperator> plan) {

@@ -10,28 +10,27 @@ public:
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
 	//! These tables benefit from early termination; RPT materialisation would defeat it.
 	bool enable_table_protection = false;
-	//! Skip RPT entirely when the plan contains any inequality join condition
-	//! (<, >, <=, >=). Legacy behaviour — turn off to let RPT build edges on
-	//! the equality part and treat the inequality join as a boundary.
+	//! Skip RPT when the plan contains a pure range-inequality join
+	//! (<, >, <=, >=) with no equality key. Mixed joins that also contain an
+	//! equality condition remain eligible for RPT on their equality graph.
 	bool skip_on_inequality_join = true;
 	//! Skip RPT entirely when the plan contains any set operator
 	//! (UNION / UNION ALL / INTERSECT / EXCEPT). Those plans split into
 	//! independent sub-branches that don't benefit from cross-branch BF transfer.
 	bool skip_on_set_operator = true;
-	//! Skip RPT inside a CTE definition when it already contains a filter above
-	//! an aggregation. Such CTEs are self-selective; running RPT on their
-	//! internals materialises large intermediate tables for little gain.
+	//! Do not optimizer-time lift a CTE definition when it contains a filter
+	//! above an aggregation. Such CTEs are self-selective; eager execution and
+	//! RPT materialisation of their internals rarely pay off.
 	bool skip_cte_with_filter_agg = true;
-	//! Skip RPT inside any CTE definition that contains an aggregation, even
-	//! without a filter above it. Stronger than skip_cte_with_filter_agg —
-	//! the agg already compresses rows so RPT on the input rarely pays off.
+	//! Do not optimizer-time lift any CTE definition that contains an
+	//! aggregation, even without a filter above it. Stronger than
+	//! skip_cte_with_filter_agg: large aggregate CTEs can be safe to execute
+	//! but much more expensive when eagerly materialized.
 	bool skip_cte_with_agg = true;
-	//! Execute and lift MATERIALIZED CTE definitions during optimization.
-	//! Temporarily disabled: optimizer-time execution cannot safely schedule
-	//! parallel tasks because DuckDB has not installed the query Executor yet.
-	//! Keep the lifter implementation compiled so this can be re-enabled after
-	//! the executor-lifetime issue is resolved.
-	bool enable_materialized_cte_lifting = false;
+	//! Execute and lift optimizer-time-safe MATERIALIZED CTE definitions.
+	//! Definitions whose physical plans may schedule tasks through DuckDB's
+	//! not-yet-installed outer query Executor remain intact for runtime.
+	bool enable_materialized_cte_lifting = true;
 	//! Skip RPT when the scope's join tree is fully left-deep (every join's
 	//! right input is a base table / CTE scan). Such plans already get most of
 	//! their benefit from join-side filter pushdown; RPT's materialization
