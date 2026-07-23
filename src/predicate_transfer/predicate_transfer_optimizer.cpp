@@ -8,58 +8,27 @@
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
-#include "duckdb/planner/operator/logical_extension_operator.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/binder.hpp"
 
-#include "duckdb/execution/operator/scan/physical_column_data_scan.hpp"
-#include "duckdb/execution/physical_plan_generator.hpp"
+#include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/main/client_config.hpp"
 
 namespace duckdb {
 
-//! Extension-owned equivalent of LogicalColumnDataGet that can preserve
-//! non-contiguous bindings without patching DuckDB's logical operator.
-class LogicalRPTColumnDataGet final : public LogicalExtensionOperator {
-public:
-	LogicalRPTColumnDataGet(TableIndex table_index_p, vector<LogicalType> types_p,
-	                        unique_ptr<ColumnDataCollection> collection_p, vector<ColumnBinding> bindings_p)
-	    : table_index(table_index_p), chunk_types(std::move(types_p)), collection(std::move(collection_p)),
-	      bindings(std::move(bindings_p)) {
-		estimated_cardinality = collection->Count();
+static bool ContainsMaterializedCTE(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
+		return true;
 	}
-
-	PhysicalOperator &CreatePlan(ClientContext &, PhysicalPlanGenerator &planner) override {
-		D_ASSERT(children.empty());
-		D_ASSERT(collection);
-		return planner.Make<PhysicalColumnDataScan>(types, PhysicalOperatorType::COLUMN_DATA_SCAN,
-		                                            estimated_cardinality, std::move(collection));
+	for (auto &child : op.children) {
+		if (ContainsMaterializedCTE(*child)) {
+			return true;
+		}
 	}
-
-	vector<ColumnBinding> GetColumnBindings() override {
-		return bindings;
-	}
-
-	vector<TableIndex> GetTableIndex() const override {
-		return {table_index};
-	}
-
-	string GetExtensionName() const override {
-		return "LogicalRPTColumnDataGet";
-	}
-
-protected:
-	void ResolveTypes() override {
-		types = chunk_types;
-	}
-
-private:
-	TableIndex table_index;
-	vector<LogicalType> chunk_types;
-	optionally_owned_ptr<ColumnDataCollection> collection;
-	vector<ColumnBinding> bindings;
-};
+	return false;
+}
 
 //! Set operator at or below `op`, not descending into MATERIALIZED_CTE/RECURSIVE_CTE
 //! definitions (those are their own PT scope).
@@ -105,36 +74,6 @@ static bool HasInequalityJoin(const LogicalOperator &op) {
 	}
 	for (auto &child : op.children) {
 		if (HasInequalityJoin(*child)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-//! Disjunctive/arbitrary join predicate at or below `op` (same CTE-boundary
-//! behaviour). A JoinCondition with comparison == INVALID carries a whole
-//! non-equi expression (e.g. an OR of per-table conjunctions). RPT's MemoryScan
-//! rewrite replaces a materialized subtree with a flat scan, which cannot
-//! preserve the bindings such a predicate reads across the two join sides, so
-//! we skip the scope and let the query run on plain DuckDB.
-static bool HasComplexJoinCondition(const LogicalOperator &op) {
-	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
-	    op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
-		return op.children.size() > 1 && HasComplexJoinCondition(*op.children[1]);
-	}
-	if (op.type == LogicalOperatorType::LOGICAL_ANY_JOIN) {
-		return true;
-	}
-	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) {
-		auto &join = op.Cast<LogicalComparisonJoin>();
-		for (auto &cond : join.conditions) {
-			if (!cond.IsComparison()) {
-				return true;
-			}
-		}
-	}
-	for (auto &child : op.children) {
-		if (HasComplexJoinCondition(*child)) {
 			return true;
 		}
 	}
@@ -299,26 +238,37 @@ static unordered_set<idx_t> ComputeProtectedTables(const LogicalOperator &plan) 
 }
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
-	// Lift any LOGICAL_MATERIALIZED_CTE nodes out of the plan before building
-	// the PT graph. Each lifted CTE definition is PT-optimized as its own scope
-	// and executed; the result is shared into the main plan as a CHUNK_GET so
-	// it participates in the parent PT scope as an ordinary materialized table.
-	MaterializedCTELifter lifter(optimizer, optimizer.context, config);
-	plan = lifter.Lift(std::move(plan));
+	if (config.enable_materialized_cte_lifting) {
+		// Lift LOGICAL_MATERIALIZED_CTE nodes before building the PT graph.
+		// The implementation remains available, but is disabled by default
+		// until optimizer-time parallel execution has a valid query Executor.
+		MaterializedCTELifter lifter(optimizer, optimizer.context, config);
+		plan = lifter.Lift(std::move(plan));
+	} else if (ContainsMaterializedCTE(*plan)) {
+		// Without lifting, the CTE definition and its consumer are separate
+		// binding scopes. Do not let graph construction cross that boundary;
+		// leave the complete plan to DuckDB's normal runtime CTE executor.
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: materialized_cte_lifting_disabled\n");
+		}
+		return plan;
+	}
 
 	// Skip PT for the current scope when its main body contains set operators
 	// or inequality joins. CTE definitions have already been PT'd independently
 	// by the lifter above, so we don't lose their wins.
+	const char *skip_reason = nullptr;
 	if (config.skip_on_set_operator && HasSetOperator(*plan)) {
-		return plan;
+		skip_reason = "set_operator";
+	} else if (config.skip_on_inequality_join && HasInequalityJoin(*plan)) {
+		skip_reason = "inequality_join";
+	} else if (config.skip_left_deep_join_tree && IsLeftDeepJoinTree(*plan, optimizer.context)) {
+		skip_reason = "left_deep_join_tree";
 	}
-	if (config.skip_on_inequality_join && HasInequalityJoin(*plan)) {
-		return plan;
-	}
-	if (HasComplexJoinCondition(*plan)) {
-		return plan;
-	}
-	if (config.skip_left_deep_join_tree && IsLeftDeepJoinTree(*plan, optimizer.context)) {
+	if (skip_reason) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: %s\n", skip_reason);
+		}
 		return plan;
 	}
 
@@ -338,6 +288,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	// Clear table_operators: RewriteQueryPlan may have replaced LogicalGet
 	// nodes, making stored references dangling.
 	graph_manager->table_operator_manager.ClearTableOperators();
+
 	return plan;
 }
 
@@ -414,6 +365,20 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 	const auto &output_bindings = scanner.GetOutputBindings();
 	auto rowid_chunk_col = scanner.GetRowIdChunkCol();
 
+	if (getenv("RPT_DEBUG_BINDINGS")) {
+		fprintf(stderr, "[MemScan] new_table=%llu wanted_bindings=[", (unsigned long long)table_index.index);
+		for (auto &b : wanted_bindings) {
+			fprintf(stderr, "(%llu,%llu) ", (unsigned long long)b.table_index.index,
+			        (unsigned long long)b.column_index);
+		}
+		fprintf(stderr, "] output_bindings=[");
+		for (auto &b : output_bindings) {
+			fprintf(stderr, "(%llu,%llu) ", (unsigned long long)b.table_index.index,
+			        (unsigned long long)b.column_index);
+		}
+		fprintf(stderr, "]\n");
+	}
+
 	// Build lookup: output_binding → chunk column index (excluding rowid)
 	unordered_map<ColumnBinding, idx_t, ColumnBindingHashFunc> binding_to_col;
 	idx_t col_idx = 0;
@@ -451,11 +416,6 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 		}
 	}
 
-	for (auto &binding : wanted_bindings) {
-		if (binding.table_index != table_index) {
-			return nullptr;
-		}
-	}
 	auto data = scanner.TakeData();
 	if (!data) {
 		return nullptr;
@@ -474,9 +434,7 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 		final_data = SelectColumns(*data, combined);
 	}
 
-	auto mem_scan =
-	    make_uniq<LogicalRPTColumnDataGet>(table_index, wanted_types, std::move(final_data), wanted_bindings);
-	return std::move(mem_scan);
+	return make_uniq<LogicalColumnDataGet>(table_index, wanted_types, std::move(final_data));
 }
 
 static LogicalGet *FindLeafGet(LogicalOperator &op) {
@@ -533,6 +491,7 @@ static void InjectDefaultScanFilters(LogicalGet &get, const shared_ptr<RPTFilter
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_ptr<LogicalOperator> plan) {
 	auto &excitation_mgr = static_cast<ExcitationGraphManager &>(*graph_manager);
 	auto enable_profiler = ClientConfig::GetConfig(optimizer.context).enable_profiler || config.log_transfer_steps;
+	ColumnBindingReplacer binding_replacer;
 
 	std::function<unique_ptr<LogicalOperator>(unique_ptr<LogicalOperator>)> inject =
 	    [&](unique_ptr<LogicalOperator> op) -> unique_ptr<LogicalOperator> {
@@ -558,7 +517,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			}
 			return make_uniq<LogicalEmptyResult>(op->types, op->GetColumnBindings());
 
-		case TableTransferResult::Kind::MemoryScan:
+		case TableTransferResult::Kind::MemoryScan: {
 			// Pending expr filter never baked — the original op still holds
 			// the FILTER chain; MemoryScan would strip it.
 			if (result.scanner->HasPendingExprFilter()) {
@@ -577,8 +536,14 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			// disagrees with op->GetColumnBindings(), which produces a
 			// "inequal num bindings/types" failure in ColumnBindingResolver.
 			op->ResolveOperatorTypes();
-			if (auto scan =
-			        BuildMemoryScan(*result.scanner, op->GetColumnBindings(), op->types, TableIndex(table_id))) {
+			auto old_bindings = op->GetColumnBindings();
+			auto new_table_index = optimizer.binder.GenerateTableIndex();
+			if (auto scan = BuildMemoryScan(*result.scanner, old_bindings, op->types, new_table_index)) {
+				auto new_bindings = scan->GetColumnBindings();
+				D_ASSERT(old_bindings.size() == new_bindings.size());
+				for (idx_t i = 0; i < old_bindings.size(); i++) {
+					binding_replacer.replacement_bindings.emplace_back(old_bindings[i], new_bindings[i]);
+				}
 				return scan;
 			}
 			// A wanted binding is missing from the materialized data (seen with
@@ -589,6 +554,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 				        table_id);
 			}
 			return op;
+		}
 
 		case TableTransferResult::Kind::DefaultScan:
 			if (enable_profiler) {
@@ -603,6 +569,9 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 	};
 
 	plan = inject(std::move(plan));
+	if (!binding_replacer.replacement_bindings.empty()) {
+		binding_replacer.VisitOperator(*plan);
+	}
 	EmptyResultPullup empty_result_pullup;
 	plan = empty_result_pullup.Optimize(std::move(plan));
 	excitation_mgr.ClearMaterializedScanners();

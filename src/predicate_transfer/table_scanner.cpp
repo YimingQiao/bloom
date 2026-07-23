@@ -1,4 +1,7 @@
 #include "predicate_transfer/table_scanner.hpp"
+
+#include <chrono>
+#include <iostream>
 #include "predicate_transfer/filter/table_filter.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
@@ -12,6 +15,7 @@
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
+#include "duckdb/optimizer/expression_heuristics.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
@@ -23,6 +27,7 @@
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -74,6 +79,12 @@ static void ParallelCompactScan(ClientContext &context, const ColumnDataCollecti
 }
 
 } // namespace
+
+using MaterializeClock = std::chrono::steady_clock;
+
+static double MaterializeElapsedMs(MaterializeClock::time_point begin, MaterializeClock::time_point end) {
+	return std::chrono::duration<double, std::milli>(end - begin).count();
+}
 
 idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
 	static constexpr idx_t CHUNKS_PER_TASK = 8;
@@ -226,6 +237,8 @@ idx_t TableScanner::FindChunkCol(const ColumnBinding &binding) const {
 
 //! Helper: execute a plan via Executor and store the result in data_.
 bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
+	auto total_start = MaterializeClock::now();
+	auto log_timing = RptLogEnabled();
 	auto col_types = plan_copy->types;
 	if (col_types.empty()) {
 		return false;
@@ -233,6 +246,7 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 
 	PhysicalPlanGenerator generator(context_);
 	auto physical_plan = generator.Plan(std::move(plan_copy));
+	auto physical_plan_end = MaterializeClock::now();
 
 	PreparedStatementData stmt_data(StatementType::SELECT_STATEMENT);
 	stmt_data.physical_plan = std::move(physical_plan);
@@ -245,31 +259,66 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	for (idx_t i = 0; i < stmt_data.types.size(); i++) {
 		stmt_data.names[i] = Identifier("col" + std::to_string(i));
 	}
+	auto statement_end = MaterializeClock::now();
 
 	auto &client_data = ClientData::Get(context_);
 	auto saved_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context_);
+	auto log_operator_profile = log_timing && getenv("RPT_LOG_MATERIALIZE_PROFILE");
+	if (log_operator_profile) {
+		client_data.profiler->StartQuery("RPT materialize");
+	}
 
 	Executor executor(context_);
 	auto collector = PhysicalResultCollector::GetResultCollector(context_, stmt_data);
 	executor.Initialize(std::move(collector));
+	auto executor_init_end = MaterializeClock::now();
 
 	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
 	}
+	auto execute_tasks_end = MaterializeClock::now();
 
 	auto result = executor.GetResult();
 	D_ASSERT(result);
 	D_ASSERT(!result->HasError());
+	auto get_result_end = MaterializeClock::now();
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	data_ = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
 	if (!data_) {
 		data_ = shared_ptr<ColumnDataCollection>(make_uniq<ColumnDataCollection>(context_, mat_result.types).release());
 	}
+	auto take_collection_end = MaterializeClock::now();
+	if (log_operator_profile) {
+		client_data.profiler->EndQuery();
+		std::cerr << "      [MaterializeOperatorProfileBegin]\n"
+		          << client_data.profiler->QueryTreeToString()
+		          << "      [MaterializeOperatorProfileEnd]\n";
+	}
 
 	client_data.profiler = std::move(saved_profiler);
+	auto cleanup_end = MaterializeClock::now();
+
+	if (getenv("RPT_DEBUG_MAT")) {
+		fprintf(stderr, "[MatDebug] rows=%llu cols=%llu pending_expr_filter=%d filters=%llu\n",
+		        (unsigned long long)data_->Count(), (unsigned long long)data_->Types().size(),
+		        pending_expr_filter_ ? 1 : 0, (unsigned long long)filters_.size());
+	}
 
 	materialized_ = true;
 	data_->InitializeScan(scan_state_);
+	auto scan_init_end = MaterializeClock::now();
+	if (log_timing) {
+		std::cerr << "      [MaterializeExecuteTiming] physical_plan="
+		          << MaterializeElapsedMs(total_start, physical_plan_end)
+		          << "ms statement=" << MaterializeElapsedMs(physical_plan_end, statement_end)
+		          << "ms executor_init=" << MaterializeElapsedMs(statement_end, executor_init_end)
+		          << "ms execute_tasks=" << MaterializeElapsedMs(executor_init_end, execute_tasks_end)
+		          << "ms get_result=" << MaterializeElapsedMs(execute_tasks_end, get_result_end)
+		          << "ms take_collection=" << MaterializeElapsedMs(get_result_end, take_collection_end)
+		          << "ms cleanup=" << MaterializeElapsedMs(take_collection_end, cleanup_end)
+		          << "ms scan_init=" << MaterializeElapsedMs(cleanup_end, scan_init_end)
+		          << "ms total=" << MaterializeElapsedMs(total_start, scan_init_end) << "ms\n";
+	}
 	return true;
 }
 
@@ -290,7 +339,79 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 //      the result in data_, then resolve chunk_col for any remaining
 //      in-memory filters.
 
+static void CollectGetsByTableIndex(LogicalOperator &op, unordered_map<idx_t, LogicalGet *> &out);
+
+static void LogResidualFilters(LogicalOperator &op, const char *phase) {
+	if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
+		auto &filter = op.Cast<LogicalFilter>();
+		for (auto &expr : filter.expressions) {
+			std::cerr << "        [MaterializeResidualFilter] phase=" << phase << " expr=" << expr->ToString()
+			          << '\n';
+		}
+	}
+	for (auto &child : op.children) {
+		LogResidualFilters(*child, phase);
+	}
+}
+
+//! Log which storage columns each GET in the materialize subtree reads and the
+//! exact filters attached to each column. Logging both before and after RPT
+//! injection separates DuckDB's local predicates from transfer filters.
+static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
+	unordered_map<idx_t, LogicalGet *> gets;
+	CollectGetsByTableIndex(plan, gets);
+	for (auto &entry : gets) {
+		auto &get = *entry.second;
+		auto table = get.GetTable();
+		std::cerr << "      [MaterializePlan] phase=" << phase << " scan=" << (table ? table->name : "?")
+		          << " cols=(";
+		for (auto &col_id : get.GetColumnIds()) {
+			auto idx = col_id.GetPrimaryIndex();
+			bool named = table && idx < table->GetColumns().LogicalColumnCount();
+			std::cerr << (named ? table->GetColumns().GetColumn(LogicalIndex(idx)).Name() : "rowid") << " ";
+		}
+		std::cerr << ") filter_columns=" << get.table_filters.FilterCount() << '\n';
+		vector<string> filter_labels;
+		for (auto &filter_entry : get.table_filters) {
+			auto projection_idx = filter_entry.GetIndex().GetIndex();
+			string column_name = "?";
+			idx_t storage_idx = DConstants::INVALID_INDEX;
+			if (projection_idx < get.GetColumnIds().size()) {
+				auto &column_id = get.GetColumnIds()[projection_idx];
+				if (!column_id.IsVirtualColumn()) {
+					storage_idx = column_id.GetPrimaryIndex();
+					if (table && storage_idx < table->GetColumns().LogicalColumnCount()) {
+						column_name =
+						    table->GetColumns().GetColumn(LogicalIndex(storage_idx)).Name().GetIdentifierName();
+					}
+				}
+			}
+			auto &filter = filter_entry.Filter().Cast<ExpressionFilter>();
+			filter_labels.push_back(column_name + ":" + filter.ToString(column_name));
+			std::cerr << "        [MaterializeScanFilter] phase=" << phase << " projection=" << projection_idx
+			          << " storage=";
+			if (storage_idx == DConstants::INVALID_INDEX) {
+				std::cerr << "?";
+			} else {
+				std::cerr << storage_idx;
+			}
+			std::cerr << " column=" << column_name << " expr=" << filter.ToString(column_name) << '\n';
+		}
+		auto initial_order = ExpressionHeuristics::GetInitialOrder(get.table_filters);
+		std::cerr << "        [MaterializeInitialFilterOrder] phase=" << phase << " order=(";
+		for (auto filter_idx : initial_order) {
+			if (filter_idx < filter_labels.size()) {
+				std::cerr << filter_labels[filter_idx] << " ";
+			}
+		}
+		std::cerr << ")\n";
+	}
+	LogResidualFilters(plan, phase);
+}
+
 void TableScanner::Materialize() {
+	auto total_start = MaterializeClock::now();
+	auto log_timing = RptLogEnabled();
 	// Already-materialized CHUNK_GET leaves are set up in the constructor;
 	// nothing to do here.
 	if (materialized_) {
@@ -298,12 +419,18 @@ void TableScanner::Materialize() {
 	}
 
 	auto plan_copy = table_op_.Copy(context_);
+	auto copy_end = MaterializeClock::now();
+	if (log_timing) {
+		LogMaterializePlan(*plan_copy, "before_rpt");
+	}
+	auto before_log_end = MaterializeClock::now();
 
 	// Step 1: Push BF/Bitmap filters into any LogicalGet in the subtree whose
 	// table_index matches a filter binding. Removes pushed entries from
 	// filters_; remaining entries stay and will be applied in-memory by
 	// Scan() / Compact() after execution.
 	InjectTableFilters(*plan_copy);
+	auto inject_end = MaterializeClock::now();
 
 	// Step 2: Late materialization — only applies when the table operator
 	// reduces to a single FILTER/PROJ/COMPARISON_JOIN chain over a single
@@ -395,11 +522,24 @@ void TableScanner::Materialize() {
 		ColumnBinding rowid_binding(late_mat_get->table_index, ProjectionIndex(rowid_col_ids_pos));
 		rowid_chunk_col_ = FindChunkCol(rowid_binding);
 	}
+	auto late_materialization_end = MaterializeClock::now();
+
+	if (log_timing) {
+		LogMaterializePlan(*plan_copy, "after_rpt");
+	}
+	auto after_log_end = MaterializeClock::now();
 
 	// Step 3: Execute the (possibly modified) subtree.
 	if (!ExecutePlan(std::move(plan_copy))) {
 		return;
 	}
+	auto execute_plan_end = MaterializeClock::now();
+
+	if (log_timing) {
+		std::cerr << "      [Materialize] rows=" << (data_ ? data_->Count() : 0)
+		          << " out_cols=" << (data_ ? data_->Types().size() : 0) << '\n';
+	}
+	auto result_log_end = MaterializeClock::now();
 
 	// Resolve chunk_col for any filters that did NOT get pushed into a GET.
 	// They will be applied in-memory by Scan() / Compact().
@@ -407,6 +547,18 @@ void TableScanner::Materialize() {
 		for (idx_t i = 0; i < entry.bindings.size(); ++i) {
 			entry.chunk_cols[i] = FindChunkCol(entry.bindings[i]);
 		}
+	}
+	auto resolve_filters_end = MaterializeClock::now();
+	if (log_timing) {
+		std::cerr << "      [MaterializePhaseTiming] copy=" << MaterializeElapsedMs(total_start, copy_end)
+		          << "ms log_before=" << MaterializeElapsedMs(copy_end, before_log_end)
+		          << "ms inject_filters=" << MaterializeElapsedMs(before_log_end, inject_end)
+		          << "ms late_materialization=" << MaterializeElapsedMs(inject_end, late_materialization_end)
+		          << "ms log_after=" << MaterializeElapsedMs(late_materialization_end, after_log_end)
+		          << "ms execute_plan=" << MaterializeElapsedMs(after_log_end, execute_plan_end)
+		          << "ms result_log=" << MaterializeElapsedMs(execute_plan_end, result_log_end)
+		          << "ms resolve_deferred=" << MaterializeElapsedMs(result_log_end, resolve_filters_end)
+		          << "ms total=" << MaterializeElapsedMs(total_start, resolve_filters_end) << "ms\n";
 	}
 }
 

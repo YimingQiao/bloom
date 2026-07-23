@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 DUCKDB = ROOT / "duckdb"
 DATA_DIR = ROOT / ".bench_cache" / "data"
+CEB_QUERY_DIR = ROOT / ".bench_cache" / "ceb" / "queries" / "1f39e9aa85ee64249f60bfa59543e8707b228644"
 
 # Each workload: where its queries/answers live, the cached database name, the
 # SQL that can (re)generate the database, and required extensions.
@@ -26,6 +27,24 @@ WORKLOADS = {
         "answers": DUCKDB / "benchmark" / "imdb" / "answers",
         "load_file": DUCKDB / "benchmark" / "imdb" / "init" / "load.sql",
         "require": [],
+    },
+    "ceb_imdb": {
+        "cache": "imdb.duckdb",
+        "queries": CEB_QUERY_DIR / "ceb-imdb-3k",
+        "answers": None,
+        "load_file": DUCKDB / "benchmark" / "imdb" / "init" / "load.sql",
+        "require": [],
+        "recursive_queries": True,
+        "prepare_ceb": True,
+    },
+    "ceb_imdb_full": {
+        "cache": "imdb.duckdb",
+        "queries": CEB_QUERY_DIR / "ceb-imdb-13k",
+        "answers": None,
+        "load_file": DUCKDB / "benchmark" / "imdb" / "init" / "load.sql",
+        "require": [],
+        "recursive_queries": True,
+        "prepare_ceb": True,
     },
     "tpch_sf1": {
         "cache": "tpch_sf1.duckdb",
@@ -113,8 +132,17 @@ def write_benchmark_root(root: Path, workload: str, db: "Path | None"):
 
     db_exists = (DATA_DIR / spec["cache"]).exists()
     requires = ["bloom"] + ([] if db_exists else spec["require"])
-    for query_file in sorted(spec["queries"].glob("*.sql")):
-        query_id = query_file.stem
+    query_glob = (
+        spec["queries"].rglob("*.sql")
+        if spec.get("recursive_queries")
+        else spec["queries"].glob("*.sql")
+    )
+    for query_file in sorted(query_glob):
+        if spec.get("recursive_queries"):
+            relative = query_file.relative_to(spec["queries"])
+            query_id = "__".join(relative.with_suffix("").parts)
+        else:
+            query_id = query_file.stem
         lines = [
             f"# name: benchmark/{workload}/{query_id}.benchmark",
             f"# group: [{workload}]",
@@ -139,6 +167,11 @@ def main():
     db = args.db.resolve() if args.db else None
     if db is not None and not db.is_file():
         raise SystemExit(f"database not found: {db}")
+
+    if WORKLOADS[args.workload].get("prepare_ceb"):
+        from prepare_ceb import prepare
+
+        prepare()
 
     with tempfile.TemporaryDirectory(prefix=f"bloom-{args.workload}-") as temp:
         benchmark_root = Path(temp)

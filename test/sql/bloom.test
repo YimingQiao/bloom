@@ -43,6 +43,48 @@ ORDER BY b.id;
 2	two
 
 statement ok
+CREATE TABLE rpt_sparse_left AS
+SELECT i::INTEGER id,
+       (i * 2)::INTEGER middle_col,
+       ('payload_' || i)::VARCHAR payload,
+       (i % 7)::INTEGER tail_col
+FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_sparse_right AS
+SELECT i::INTEGER id, (i % 100 = 0) keep
+FROM range(10000) t(i);
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296
+
+statement ok
+SET threads = 8;
+
+# Materialized CTE lifting is temporarily disabled. RPT must leave the plan
+# intact so DuckDB executes the CTE using its normal query Executor.
+query III
+WITH rpt_cte AS MATERIALIZED (
+    SELECT l.id, l.payload, l.tail_col
+    FROM rpt_sparse_left l
+    JOIN rpt_sparse_right r ON l.id = r.id
+    WHERE r.keep
+)
+SELECT count(*), sum(a.id), sum(b.tail_col)
+FROM rpt_cte a
+JOIN rpt_cte b ON a.id = b.id;
+----
+100	495000	296
+
+statement ok
+SET threads = 1;
+
+statement ok
 SET enable_rpt = false;
 
 query II
@@ -53,3 +95,11 @@ WHERE p.keep
 ORDER BY b.id;
 ----
 2	two
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296

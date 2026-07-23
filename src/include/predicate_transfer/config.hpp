@@ -26,6 +26,12 @@ public:
 	//! without a filter above it. Stronger than skip_cte_with_filter_agg —
 	//! the agg already compresses rows so RPT on the input rarely pays off.
 	bool skip_cte_with_agg = true;
+	//! Execute and lift MATERIALIZED CTE definitions during optimization.
+	//! Temporarily disabled: optimizer-time execution cannot safely schedule
+	//! parallel tasks because DuckDB has not installed the query Executor yet.
+	//! Keep the lifter implementation compiled so this can be re-enabled after
+	//! the executor-lifetime issue is resolved.
+	bool enable_materialized_cte_lifting = false;
 	//! Skip RPT when the scope's join tree is fully left-deep (every join's
 	//! right input is a base table / CTE scan). Such plans already get most of
 	//! their benefit from join-side filter pushdown; RPT's materialization

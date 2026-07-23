@@ -74,7 +74,7 @@ static void RewriteRefsToPositions(unique_ptr<Expression> &expr, const vector<Co
 	    *expr, [&](unique_ptr<Expression> &child) { RewriteRefsToPositions(child, bindings, positions); });
 }
 
-// Stock DuckDB represents optional table filters as scalar-function wrappers.
+// DuckDB represents optional table filters as scalar-function wrappers.
 // Those wrappers are scan-only markers: the non-selectivity variant evaluates
 // to TRUE in a generic ExpressionExecutor, while the real predicate lives in
 // bind data. Sampling must execute that predicate, as the native fork's legacy

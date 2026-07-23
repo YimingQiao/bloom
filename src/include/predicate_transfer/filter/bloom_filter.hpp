@@ -231,7 +231,7 @@ private:
 	BloomFilter bf_; // DuckDB's built-in BloomFilter
 };
 
-//! Exact integral bitmap implemented through DuckDB's stock prefix-range
+//! Exact integral bitmap implemented through DuckDB's built-in prefix-range
 //! filter interface so ExpressionFilter can use its native fast executor.
 class DuckDBPrefixRangeFilterAdapter : public RPTFilter {
 public:
