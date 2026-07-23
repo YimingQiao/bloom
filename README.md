@@ -74,21 +74,21 @@ five-run DuckDB baseline.
 
 Single-thread:
 
-| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean | Faster |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.133 s | **1.530×** | **1.465×** | 82/113 |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.951 s | **1.409×** | **1.351×** | 81/113 |
-| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.785 s | **1.118×** | **1.077×** | 12/22 |
-| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 74.290 s | **1.033×** | **1.044×** | 50/99 |
+| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean |
+|---|---:|---:|---:|---:|---:|---:|
+| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.133 s | **1.530×** | **1.465×** |
+| IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.951 s | **1.409×** | **1.351×** |
+| TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.785 s | **1.118×** | **1.077×** |
+| TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 74.290 s | **1.033×** | **1.044×** |
 
 Eight threads:
 
-| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean | Faster |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 7.167 s | 5.170 s | **1.386×** | **1.296×** | 73/113 |
-| IMDB (JOB) | compressed, 2.05 GB | 113 | 8.123 s | 6.042 s | **1.344×** | **1.258×** | 72/113 |
-| TPC-H SF10 | 2.68 GB | 22 | 3.209 s | 3.291 s | 0.975× | 0.952× | 9/22 |
-| TPC-DS SF10 | 3.19 GB | 99 | 14.649 s | 14.660 s | 0.999× | 0.995× | 47/99 |
+| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup | Geomean |
+|---|---:|---:|---:|---:|---:|---:|
+| IMDB (JOB) | uncompressed, 4.12 GB | 113 | 7.167 s | 5.170 s | **1.386×** | **1.296×** |
+| IMDB (JOB) | compressed, 2.05 GB | 113 | 8.123 s | 6.042 s | **1.344×** | **1.258×** |
+| TPC-H SF10 | 2.68 GB | 22 | 3.209 s | 3.291 s | 0.975× | 0.952× |
+| TPC-DS SF10 | 3.19 GB | 99 | 14.649 s | 14.660 s | 0.999× | 0.995× |
 
 TPC-DS 8-thread execution is the post-CTE-lifter check: all 99 queries,
 including the eight queries that previously failed, completed correctly. The
