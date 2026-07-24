@@ -17,5 +17,7 @@ docs:
     LOAD bloom;
     SELECT current_setting('enable_rpt');
   extended_description: |
-    Bloom propagates filters bidirectionally across joins to prune rows before
-    join execution. It loads into unmodified DuckDB.
+    Bloom combines sampling-based estimates with execution-guided robust
+    predicate transfer. Sampling predicts useful transfers; Bloom applies one
+    Bloom or bitmap filter, observes the resulting cardinalities, and then
+    chooses the next step. This keeps transfer decisions adaptive and efficient.

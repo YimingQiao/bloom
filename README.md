@@ -1,12 +1,14 @@
 # Bloom
 
-[![Status: WIP](https://img.shields.io/badge/status-WIP-orange)](#)
 [![Version: 0.0.1](https://img.shields.io/badge/version-0.0.1-blue)](extension_config.cmake)
 [![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
 
-A DuckDB extension for **robust predicate transfer (RPT)**. It propagates Bloom
-and bitmap filters bidirectionally across a query's joins, pruning each table's
-rows before the joins run. It loads into **unmodified** DuckDB — no patched build.
+A DuckDB extension for **robust predicate transfer (RPT)**. Unlike approaches
+that design a complete transfer plan before executing it, Bloom combines
+sampling-based estimates with execution-guided decisions. Sampling predicts
+which transfers are likely to be effective; Bloom then executes one transfer,
+observes the result, and decides the next step using the updated cardinalities.
+This combination keeps predicate transfer both adaptive and efficient.
 
 DuckDB already pushes Bloom filters from selective hash joins into probe-side
 scans ([duckdb/duckdb#19502](https://github.com/duckdb/duckdb/pull/19502)).
@@ -15,15 +17,17 @@ predicate transfer across multiple joins.
 
 ## How it works
 
-- **Adaptive-excitation optimizer.** An optimizer extension rewrites the logical
-  plan: it samples each table, estimates cardinalities, and floods Bloom/bitmap
-  filters along join edges in rounds (smallest table first), re-estimating after
-  each transfer. Highly-filtered tables are materialized in memory and reused.
-- **Filter pushdown on unmodified DuckDB.** Each transfer filter is wrapped in a
-  DuckDB built-in `ExpressionFilter` and pushed into the base scan's table
-  filters, so it runs on the scan's fast path and also drives **row-group
-  statistics pruning**. This is why Bloom targets DuckDB `main` — it relies on
-  the extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633),
+- **Sampling-guided, execution-driven transfer.** Sampling estimates the
+  potential benefit of candidate transfers before they run. Bloom chooses one
+  Bloom/bitmap-filter transfer, executes it, and re-estimates the affected tables
+  before choosing again. Sampling avoids unproductive work, while execution
+  feedback prevents the plan from being locked to its initial estimates.
+  Highly-filtered tables are materialized in memory and reused.
+- **Scan-level filter pushdown.** Each transfer filter is wrapped in a DuckDB
+  built-in `ExpressionFilter` and pushed into the base scan's table filters, so
+  it runs on the scan's fast path and also drives **row-group statistics
+  pruning**. This is why Bloom targets DuckDB `main` — it relies on the
+  extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633),
   merged 2026-02-12), which is not in the v1.5.x stable line.
 
 **Target:** DuckDB `main`, pinned to commit `21aca042`. Bloom is preparing for
