@@ -292,8 +292,19 @@ void BaseGraphManager::ExtractEdgesInfo(const vector<reference<LogicalOperator>>
 				continue;
 			}
 
-			auto key_type =
+			auto left_key_type =
 			    ResolveSourceKeyType(left_expr.Binding(), left_binding, *left_node, cond.GetLHS().GetReturnType());
+			auto right_key_type =
+			    ResolveSourceKeyType(right_expr.Binding(), right_binding, *right_node, cond.GetRHS().GetReturnType());
+			// A per-column table filter hashes the scan column in its storage
+			// type. If the two resolved inputs differ (e.g. TINYINT projected
+			// as BIGINT and joined to a BIGINT column), one Bloom filter cannot
+			// represent both sides without an explicit cast expression. Leave
+			// this edge to DuckDB's native cast-aware join filter.
+			if (left_key_type != right_key_type) {
+				continue;
+			}
+			auto key_type = left_key_type;
 
 			auto &bucket = by_table_pair[left_binding.table_index.index][right_binding.table_index.index];
 			bucket.left_bindings.push_back(left_binding);

@@ -93,11 +93,143 @@ SELECT n FROM range_cte;
 ----
 6
 
+# RPT is fail-closed outside its validated domain. These plans must be left
+# untouched and retain DuckDB's native semantics.
+query I
+WITH RECURSIVE countdown(n) AS (
+    SELECT 3
+    UNION ALL
+    SELECT n - 1 FROM countdown WHERE n > 1
+)
+SELECT sum(n) FROM countdown;
+----
+6
+
+query II
+SELECT b.id, correlated.v
+FROM rpt_build b,
+LATERAL (
+    SELECT max(p.id) AS v
+    FROM rpt_probe p
+    WHERE p.id <= b.id
+) correlated
+ORDER BY b.id;
+----
+1	NULL
+2	2
+3	3
+
+# LIST keys exercise the nested hash path. HashColumns must preserve the
+# result vector's logical size so the Bloom build actually inserts every key.
+statement ok
+CREATE TABLE rpt_nested_left(k INTEGER[], payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_nested_left VALUES ([1], 'one'), ([2], 'two'), ([3], 'three');
+
+statement ok
+CREATE TABLE rpt_nested_right(k INTEGER[], keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_nested_right VALUES ([2], true), ([3], false), ([4], true);
+
+query TT
+SELECT l.k, l.payload
+FROM rpt_nested_left l
+JOIN rpt_nested_right r ON l.k = r.k
+WHERE r.keep
+ORDER BY l.k;
+----
+[2]	two
+
+# STRUCT keys exercise the other nested physical representation.
+statement ok
+CREATE TABLE rpt_struct_left(k STRUCT(a INTEGER), payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_struct_left VALUES ({'a': 1}, 'one'), ({'a': 2}, 'two'), ({'a': 3}, 'three');
+
+statement ok
+CREATE TABLE rpt_struct_right(k STRUCT(a INTEGER), keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_struct_right VALUES ({'a': 2}, true), ({'a': 3}, false), ({'a': 4}, true);
+
+query T
+SELECT l.payload
+FROM rpt_struct_left l
+JOIN rpt_struct_right r ON l.k = r.k
+WHERE r.keep
+ORDER BY l.payload;
+----
+two
+
+statement ok
+CREATE TABLE rpt_array_left(k INTEGER[2], payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_array_left VALUES ([1, 1], 'one'), ([2, 2], 'two'), ([3, 3], 'three');
+
+statement ok
+CREATE TABLE rpt_array_right(k INTEGER[2], keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_array_right VALUES ([2, 2], true), ([3, 3], false), ([4, 4], true);
+
+query T
+SELECT l.payload
+FROM rpt_array_left l
+JOIN rpt_array_right r ON l.k = r.k
+WHERE r.keep;
+----
+two
+
+statement ok
+CREATE TABLE rpt_map_left(k MAP(INTEGER, INTEGER), payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_map_left VALUES (map([1], [1]), 'one'), (map([2], [2]), 'two'), (map([3], [3]), 'three');
+
+statement ok
+CREATE TABLE rpt_map_right(k MAP(INTEGER, INTEGER), keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_map_right VALUES (map([2], [2]), true), (map([3], [3]), false), (map([4], [4]), true);
+
+query T
+SELECT l.payload
+FROM rpt_map_left l
+JOIN rpt_map_right r ON l.k = r.k
+WHERE r.keep;
+----
+two
+
+statement ok
+UPDATE rpt_probe
+SET keep = false
+FROM rpt_build
+WHERE rpt_probe.id = rpt_build.id AND rpt_build.id = 2;
+
+query II
+SELECT id, keep::INTEGER FROM rpt_probe ORDER BY id;
+----
+2	0
+3	0
+4	1
+
+statement ok
+UPDATE rpt_probe SET keep = true WHERE id = 2;
+
 statement ok
 SET threads = 1;
 
 statement ok
 SET enable_rpt = false;
+
+query I
+SELECT current_setting('enable_rpt');
+----
+false
 
 query II
 SELECT b.id, b.payload
@@ -115,3 +247,11 @@ JOIN rpt_sparse_right r ON l.id = r.id
 WHERE r.keep AND l.middle_col >= 0;
 ----
 100	495000	1188	296
+
+statement ok
+SET enable_rpt = true;
+
+query I
+SELECT current_setting('enable_rpt');
+----
+true

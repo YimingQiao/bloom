@@ -1,0 +1,16 @@
+{
+  "description": "Load Bloom for every DuckDB test database but keep RPT disabled.",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "bloom"
+  ],
+  "summarize_failures": true,
+  "skip_tests": [
+    {
+      "reason": "Bloom's extension self-test intentionally asserts that RPT is enabled by default.",
+      "paths": [
+        "test/sql/bloom.test"
+      ]
+    }
+  ]
+}

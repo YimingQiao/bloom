@@ -18,6 +18,54 @@
 
 namespace duckdb {
 
+static bool ContainsRecursiveCTE(const LogicalOperator &op) {
+	if (op.type == LogicalOperatorType::LOGICAL_RECURSIVE_CTE) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsRecursiveCTE(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! RPT executes selected subtrees during optimization. Keep that execution
+//! away from plan nodes that cannot be evaluated as a self-contained snapshot:
+//! recursive scopes and non-catalog table functions. DML/trigger plans are
+//! also outside the extension's analytical-query scope. Catalog table scans
+//! and in-memory data produced by a safely lifted CTE remain eligible.
+//!
+//! This check deliberately runs before MaterializedCTELifter. Once lifting has
+//! started, an unsafe CTE definition may already have been copied or executed,
+//! so detecting it afterwards is too late.
+static const char *FindUnsupportedPlanFeature(const LogicalOperator &op) {
+	switch (op.type) {
+	case LogicalOperatorType::LOGICAL_INSERT:
+	case LogicalOperatorType::LOGICAL_DELETE:
+	case LogicalOperatorType::LOGICAL_UPDATE:
+	case LogicalOperatorType::LOGICAL_MERGE_INTO:
+	case LogicalOperatorType::LOGICAL_TRIGGER:
+		return "dml_or_trigger";
+	case LogicalOperatorType::LOGICAL_GET:
+		// GetTable() is non-null for a catalog table scan. External and
+		// stateful table functions (read_csv, glob, replacement scans, etc.)
+		// are intentionally outside the initial safe domain.
+		if (!op.Cast<LogicalGet>().GetTable()) {
+			return "non_catalog_table_function";
+		}
+		break;
+	default:
+		break;
+	}
+	for (auto &child : op.children) {
+		if (auto reason = FindUnsupportedPlanFeature(*child)) {
+			return reason;
+		}
+	}
+	return nullptr;
+}
+
 static bool ContainsMaterializedCTE(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE) {
 		return true;
@@ -252,6 +300,31 @@ static unordered_set<idx_t> ComputeProtectedTables(const LogicalOperator &plan) 
 }
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
+	// RPT may introduce and then pull up LogicalEmptyResult nodes. Respect
+	// DuckDB's explicit optimizer setting: doing that rewrite when
+	// empty_result_pullup is disabled can suppress errors in unreachable
+	// branches and observably change query semantics.
+	if (optimizer.OptimizerDisabled(OptimizerType::EMPTY_RESULT_PULLUP)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: empty_result_pullup_disabled\n");
+		}
+		return plan;
+	}
+
+	if (ContainsRecursiveCTE(*plan)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: recursive_cte\n");
+		}
+		return plan;
+	}
+
+	if (auto reason = FindUnsupportedPlanFeature(*plan)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: %s\n", reason);
+		}
+		return plan;
+	}
+
 	if (config.enable_materialized_cte_lifting) {
 		// Lift optimizer-time-safe LOGICAL_MATERIALIZED_CTE nodes before
 		// building the PT graph. Unsafe definitions remain in the plan for

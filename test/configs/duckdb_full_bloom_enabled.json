@@ -1,0 +1,25 @@
+{
+  "description": "Load Bloom and enable RPT for every DuckDB test database.",
+  "statically_loaded_extensions": [
+    "core_functions",
+    "bloom"
+  ],
+  "summarize_failures": true,
+  "skip_tests": [
+    {
+      "reason": "These tests assert DuckDB's native optimizer plan shape. Bloom intentionally rewrites scans, CTEs, joins, and empty inputs when RPT is enabled; the same files remain covered by the RPT-disabled full-suite run.",
+      "paths": [
+        "test/optimizer/cte_inlining.test",
+        "test/optimizer/joins/delim_join_dont_explode.test_slow",
+        "test/optimizer/joins/wide_build_skinny_probe.test",
+        "test/optimizer/pullup_filters.test",
+        "test/optimizer/pushdown/pushdown_after_statistics.test",
+        "test/optimizer/unnest_rewriter.test_slow",
+        "test/sql/join/inner/test_prefix_range_filter_pushdown.test",
+        "test/sql/optimizer/plan/test_equivalent_filter_mirroring.test",
+        "test/sql/optimizer/table_filters.test",
+        "test/sql/optimizer/test_window_self_join.test"
+      ]
+    }
+  ]
+}

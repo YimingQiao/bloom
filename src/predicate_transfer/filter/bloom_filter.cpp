@@ -30,6 +30,10 @@ static Vector HashColumns(DataChunk &chunk, const vector<idx_t> &cols) {
 		VectorOperations::CombineHash(hashes, chunk.data[cols[j]], count);
 	}
 	hashes.Flatten();
+	// Nested hash implementations flatten the result but do not set its
+	// logical size. BloomFilter::InsertHashes iterates Vector::Values(), which
+	// uses that size; without this, LIST/ARRAY keys insert zero hashes.
+	FlatVector::SetSize(hashes, count_t(count));
 	return hashes;
 }
 } // namespace

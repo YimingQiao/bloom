@@ -1,0 +1,88 @@
+name: DuckDB Full Compatibility
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Bloom mode to exercise across the DuckDB test suite
+        required: true
+        default: both
+        type: choice
+        options:
+          - both
+          - disabled
+          - enabled
+
+permissions:
+  contents: read
+
+concurrency:
+  group: duckdb-full-compatibility-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-test:
+    name: Full DuckDB suite (${{ inputs.mode }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    env:
+      BUILD_DIR: build/fulltest
+      RPT_SAMPLE_CACHE_DIR: ${{ runner.temp }}/bloom-rpt-samples
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ninja-build
+
+      - name: Configure DuckDB full-test runner
+        run: |
+          cmake \
+            -G Ninja \
+            -S duckdb \
+            -B "$BUILD_DIR" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEXTENSION_STATIC_BUILD=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="$GITHUB_WORKSPACE/extension_config.cmake" \
+            -DBUILD_EXTENSIONS='core_functions;parquet' \
+            -DBUILD_UNITTESTS=TRUE \
+            -DENABLE_UNITTEST_CPP_TESTS=TRUE \
+            -DUNITTEST_ROOT_DIRECTORY="$GITHUB_WORKSPACE/duckdb" \
+            -DENABLE_EXTENSION_AUTOLOADING=0 \
+            -DENABLE_EXTENSION_AUTOINSTALL=0
+
+      - name: Build DuckDB and Bloom
+        run: cmake --build "$BUILD_DIR" --target all --parallel 48
+
+      - name: Verify full test discovery
+        run: |
+          "$BUILD_DIR/test/unittest" --list-tests '*' > "$RUNNER_TEMP/duckdb-tests.tsv"
+          test "$(wc -l < "$RUNNER_TEMP/duckdb-tests.tsv")" -gt 1000
+
+      - name: Run full suite with Bloom loaded and RPT disabled
+        if: inputs.mode == 'both' || inputs.mode == 'disabled'
+        env:
+          RPT_ENABLE: "0"
+        run: |
+          python3 duckdb/scripts/ci/run_tests.py \
+            --workers 4 \
+            --batch-timeout 600 \
+            --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_disabled.json" \
+            "$BUILD_DIR/test/unittest" \
+            '*'
+
+      - name: Run full suite with Bloom RPT enabled
+        if: inputs.mode == 'both' || inputs.mode == 'enabled'
+        env:
+          RPT_ENABLE: "1"
+        run: |
+          python3 duckdb/scripts/ci/run_tests.py \
+            --workers 4 \
+            --batch-timeout 600 \
+            --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_enabled.json" \
+            "$BUILD_DIR/test/unittest" \
+            '*'
