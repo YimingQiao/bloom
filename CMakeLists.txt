@@ -1,6 +1,5 @@
-cmake_minimum_required(VERSION 3.5)
+cmake_minimum_required(VERSION 3.10)
 
-# Set extension name here
 set(TARGET_NAME bloom)
 
 set(EXTENSION_NAME ${TARGET_NAME}_extension)

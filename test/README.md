@@ -1,11 +1,19 @@
-# Testing this extension
-This directory contains all the tests for this extension. The `sql` directory holds tests that are written as [SQLLogicTests](https://duckdb.org/dev/sqllogictest/intro.html). DuckDB aims to have most its tests in this format as SQL statements, so for the quack extension, this should probably be the goal too.
+# Testing Bloom
 
-The root makefile contains targets to build and run all of these tests. To run the SQLLogicTests:
+Bloom's extension tests are written as
+[SQLLogicTests](https://duckdb.org/dev/sqllogictest/intro.html) under `test/sql`.
+
+Build and run the extension test suite:
+
 ```bash
-make test
+make test -j"$(nproc)"
 ```
-or 
+
+For a debug build:
+
 ```bash
-make test_debug
+make test_debug -j"$(nproc)"
 ```
+
+The manual `DuckDB Full Compatibility` GitHub Actions workflow runs DuckDB's
+full SQL test suite with Bloom loaded, both with RPT disabled and enabled.

@@ -12,7 +12,7 @@ release.
    `.github/workflows/ReleaseCandidate.yml`.
 2. Update `EXTENSION_VERSION` in `extension_config.cmake`, the README version
    badge, and `community-extension-description.yml.template`.
-3. Build with `make release -j48` and run:
+3. Build with `make release -j"$(nproc)"` and run:
 
    ```bash
    make format-check

@@ -38,7 +38,7 @@ checklist.
 
 ```bash
 git submodule update --init --recursive
-make release -j48                 # or: GEN=ninja make release -j48
+make release -j"$(nproc)"         # or: GEN=ninja make release -j"$(nproc)"
 ```
 
 The extension is written to
@@ -78,7 +78,7 @@ The scripts use the same workloads and measurement procedure as the table
 above. First build the runner with the TPC-H and TPC-DS data generators:
 
 ```bash
-CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j48
+CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j"$(nproc)"
 ```
 
 Run a workload with Bloom and the baseline:
