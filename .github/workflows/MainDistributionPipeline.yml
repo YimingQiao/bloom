@@ -16,7 +16,7 @@ permissions:
 
 jobs:
   duckdb-next-build:
-    name: Build DuckDB 1.6 candidate binaries
+    name: Build DuckDB next-release candidate binaries
     uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
     with:
       duckdb_version: 21aca0424f1faf78b593b1e6fbfdd4846624c987

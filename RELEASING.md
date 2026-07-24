@@ -1,8 +1,9 @@
 # Release checklist
 
-Bloom targets its first supported release with DuckDB 1.6. Until that version
-is stable, `main` tracks a pinned DuckDB commit and release-candidate workflows
-only produce downloadable CI artifacts; they do not publish a GitHub release.
+Bloom will provide formal release support starting with DuckDB's next stable
+release. Until then, `main` tracks a pinned DuckDB commit and release-candidate
+workflows only produce downloadable CI artifacts; they do not publish a GitHub
+release.
 
 ## Before a release
 
@@ -36,18 +37,19 @@ only produce downloadable CI artifacts; they do not publish a GitHub release.
 7. Test at least one packaged artifact with the matching DuckDB binary using
    `-unsigned`, then run the Bloom SQL tests against the packaged extension.
 
-## DuckDB 1.6 publication
+## Next stable DuckDB release
 
 1. Replace the pinned development commit with the commit behind the final
-   `v1.6.x` tag and repeat every gate above. The packaging workflow detects the
-   stable tag and uses it as DuckDB's repository revision.
+   stable tag and repeat every gate above. The packaging workflow detects the
+   tag and uses it as DuckDB's repository revision.
 2. Copy `community-extension-description.yml.template` to
    `extensions/bloom/description.yml` in
    [duckdb/community-extensions](https://github.com/duckdb/community-extensions),
    replace `<release-commit>` with an immutable Bloom commit, and submit it.
 3. Create an immutable Bloom tag only after CI is green. Do not move an
    existing tag.
-4. After the community build passes, verify from an official DuckDB 1.6 binary:
+4. After the community build passes, verify from an official binary of that
+   DuckDB release:
 
    ```sql
    INSTALL bloom FROM community;

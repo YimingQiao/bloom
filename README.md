@@ -30,9 +30,9 @@ predicate transfer across multiple joins.
   extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633),
   merged 2026-02-12), which is not in the v1.5.x stable line.
 
-**Target:** DuckDB `main`, pinned to commit `21aca042`. Bloom is preparing for
-its first supported release with DuckDB 1.6; see [RELEASING.md](RELEASING.md)
-for the compatibility and release gates.
+**Target:** DuckDB `main`, pinned to commit `21aca042`. Bloom will provide
+formal release support starting with DuckDB's next stable release; see
+[RELEASING.md](RELEASING.md) for the compatibility and release gates.
 
 ## Build
 
@@ -50,9 +50,9 @@ LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
 SELECT current_setting('enable_rpt');
 ```
 
-Until the DuckDB 1.6 community release, the extension must be built and loaded
-against the exact pinned DuckDB commit above. DuckDB extensions are
-version-specific; a binary built for another DuckDB version is rejected.
+Until that release, Bloom must be built and loaded against the exact pinned
+DuckDB commit above. DuckDB extensions are version-specific; a binary built for
+another DuckDB version is rejected.
 
 ## Benchmarks
 
