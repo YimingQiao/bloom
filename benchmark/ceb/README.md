@@ -33,6 +33,17 @@ python3 scripts/run_benchmark_suite.py --workload ceb_imdb --threads 1
 python3 scripts/run_benchmark_suite.py --workload ceb_imdb_full --threads 1
 ```
 
+Before reporting a result, strictly check that both logs contain every query
+and all five timed runs:
+
+```bash
+python3 scripts/summarize_benchmark.py \
+  --rpt-log benchmark_results/ceb_imdb_rpt_t1.log \
+  --baseline-log benchmark_results/ceb_imdb_base_t1.log \
+  --expected-queries 3133 \
+  --timed-runs 5
+```
+
 Both workloads use the standard JOB/IMDB schema. When no `--db` is supplied,
 `scripts/run_benchmark.py` reuses `.bench_cache/data/imdb.duckdb`, creating it
 from DuckDB's published JOB Parquet files if necessary. Pass `--db` to use an
@@ -43,4 +54,15 @@ Generated benchmark names use `<template>__<query-file-stem>`, for example
 
 The SQL bundle has no golden result files. DuckDB's benchmark runner therefore
 checks that every statement binds and executes successfully, but it does not
-compare returned values with upstream answers.
+compare returned values with upstream answers. Run the separate multiset
+validator before publishing benchmark numbers:
+
+```bash
+python3 scripts/validate_ceb_results.py \
+  --db /path/to/imdb.duckdb \
+  --output benchmark_results/ceb_imdb_result_validation.jsonl
+```
+
+The validator runs every query in separate DuckDB processes with RPT disabled
+and enabled, then compares the CSV rows as multisets. Separate processes keep
+the two optimizer executions isolated. Its JSONL output is resumable.

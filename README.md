@@ -1,7 +1,8 @@
 # Bloom
 
 [![Status: WIP](https://img.shields.io/badge/status-WIP-orange)](#)
-[![Version: 0.0.1](https://img.shields.io/badge/version-0.0.1-blue)](https://github.com/YimingQiao/bloom/tree/v0.0.1)
+[![Version: 0.0.1](https://img.shields.io/badge/version-0.0.1-blue)](extension_config.cmake)
+[![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
 
 A DuckDB extension for **robust predicate transfer (RPT)**. It propagates Bloom
 and bitmap filters bidirectionally across a query's joins, pruning each table's
@@ -25,8 +26,9 @@ predicate transfer across multiple joins.
   the extensible table-filter API ([duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633),
   merged 2026-02-12), which is not in the v1.5.x stable line.
 
-**Target:** DuckDB `main`, pinned to commit `21aca042`. See
-[`docs/UPDATING.md`](docs/UPDATING.md) to move the pin forward.
+**Target:** DuckDB `main`, pinned to commit `21aca042`. Bloom is preparing for
+its first supported release with DuckDB 1.6; see [RELEASING.md](RELEASING.md)
+for the compatibility and release gates.
 
 ## Build
 
@@ -37,7 +39,16 @@ make release                 # or: GEN=ninja make release
 
 The loadable extension lands at
 `build/release/extension/bloom/bloom.duckdb_extension`. It is enabled by default
-once loaded.
+once loaded:
+
+```sql
+LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
+SELECT current_setting('enable_rpt');
+```
+
+Until the DuckDB 1.6 community release, the extension must be built and loaded
+against the exact pinned DuckDB commit above. DuckDB extensions are
+version-specific; a binary built for another DuckDB version is rejected.
 
 ## Benchmarks
 
@@ -51,14 +62,15 @@ The latest post-rewrite checks completed every reported query correctly.
 
 | Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
 |---|---:|---:|---:|---:|---:|
+| CEB | compressed, 2.05 GB | 3,133 | 1,625.939 s | 727.335 s | **2.235×** |
 | IMDB (JOB) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.047 s | **1.537×** |
 | IMDB (JOB) | compressed, 2.05 GB | 113 | 35.162 s | 24.511 s | **1.435×** |
 | TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.685 s | **1.124×** |
 | TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 73.393 s | **1.046×** |
 
-IMDB — a many-join workload — is where predicate transfer pays off most. On
-TPC-H/TPC-DS the gains are smaller because their fewer, larger joins are
-already served well by DuckDB's own filters.
+IMDB — especially CEB's larger collection of many-join queries — is where
+predicate transfer pays off most. On TPC-H/TPC-DS the gains are smaller because
+their fewer, larger joins are already served well by DuckDB's own filters.
 
 ### Reproducing
 
@@ -72,6 +84,7 @@ Run a whole workload, RPT vs. baseline, with one thread:
 
 ```bash
 python3 scripts/run_benchmark_suite.py --workload imdb --threads 1
+python3 scripts/run_benchmark_suite.py --workload ceb_imdb --threads 1
 python3 scripts/run_benchmark_suite.py --workload tpch_sf10 --threads 1
 python3 scripts/run_benchmark_suite.py --workload tpcds_sf10 --threads 1
 ```
@@ -93,7 +106,8 @@ Both scripts only synthesize temporary benchmark definitions that `require
 bloom`; execution, timing, and result verification stay in DuckDB's native
 runner. Databases and sample caches persist under `.bench_cache/`. Provide a
 database with `--db`, or let the runner generate one via the `tpch`/`tpcds`
-extensions on first use.
+extensions on first use. CEB SQL is downloaded and checksum-verified
+automatically.
 
 ## Roadmap
 

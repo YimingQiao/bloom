@@ -1,0 +1,21 @@
+extension:
+  name: bloom
+  description: Robust predicate transfer using Bloom and bitmap filters
+  version: 0.0.1
+  language: C++
+  build: cmake
+  license: MIT
+  maintainers:
+    - YimingQiao
+
+repo:
+  github: YimingQiao/bloom
+  ref: <release-commit>
+
+docs:
+  hello_world: |
+    LOAD bloom;
+    SELECT current_setting('enable_rpt');
+  extended_description: |
+    Bloom propagates filters bidirectionally across joins to prune rows before
+    join execution. It loads into unmodified DuckDB.

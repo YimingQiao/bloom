@@ -1,0 +1,102 @@
+name: Release Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      duckdb_version:
+        description: Full 40-character DuckDB commit used for compilation
+        required: true
+        default: 21aca0424f1faf78b593b1e6fbfdd4846624c987
+        type: string
+      extension_version:
+        description: Bloom version from extension_config.cmake (without v)
+        required: true
+        default: 0.0.1
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build native release matrix
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@main
+    with:
+      duckdb_version: ${{ inputs.duckdb_version }}
+      ci_tools_version: main
+      extension_name: bloom
+      reduced_ci_mode: disabled
+      exclude_archs: linux_amd64_musl;linux_arm64_musl;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
+      artifact_postfix: -release-candidate
+
+  package:
+    name: Package release candidate
+    needs: build
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+
+      - name: Validate release inputs
+        id: versions
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          grep --fixed-strings \
+            'EXTENSION_VERSION v${{ inputs.extension_version }}' \
+            extension_config.cmake
+
+          duckdb_ref='${{ inputs.duckdb_version }}'
+          duckdb_submodule="$(git rev-parse HEAD:duckdb)"
+          if [[ "${duckdb_ref}" != "${duckdb_submodule}" ]]; then
+            echo "::error::DuckDB input ${duckdb_ref} does not match submodule ${duckdb_submodule}"
+            exit 1
+          fi
+
+          if [[ ! "${duckdb_ref}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::DuckDB version must be a full 40-character commit"
+            exit 1
+          fi
+
+          revision="${duckdb_ref:0:10}"
+          tag_refs="$(
+            git ls-remote --tags https://github.com/duckdb/duckdb.git \
+              'v[0-9]*' 'v[0-9]*^{}'
+          )"
+          while read -r tag_commit tag_ref; do
+            tag="${tag_ref#refs/tags/}"
+            tag="${tag%^\{\}}"
+            if [[ "${tag_commit}" == "${duckdb_ref}" &&
+                  "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+              revision="${tag}"
+              break
+            fi
+          done <<< "${tag_refs}"
+          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          pattern: bloom-*-extension-*-release-candidate
+          path: downloaded
+
+      - name: Package custom repository and release assets
+        run: |
+          python3 scripts/package_release_artifacts.py \
+            --input-dir downloaded \
+            --output-dir dist \
+            --extension-version '${{ inputs.extension_version }}' \
+            --duckdb-revision '${{ steps.versions.outputs.revision }}' \
+            --duckdb-build-ref '${{ inputs.duckdb_version }}' \
+            --artifact-prefix 'bloom-${{ inputs.duckdb_version }}-extension-' \
+            --artifact-postfix=-release-candidate \
+            --expected-platforms \
+              linux_amd64,linux_arm64,osx_amd64,osx_arm64,windows_amd64
+
+      - name: Upload packaged release candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: bloom-${{ inputs.extension_version }}-release-candidate
+          if-no-files-found: error
+          path: dist
