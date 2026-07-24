@@ -304,15 +304,14 @@ void BaseGraphManager::ExtractEdgesInfo(const vector<reference<LogicalOperator>>
 			if (left_key_type != right_key_type) {
 				continue;
 			}
-			auto key_type = left_key_type;
 
 			auto &bucket = by_table_pair[left_binding.table_index.index][right_binding.table_index.index];
 			bucket.left_bindings.push_back(left_binding);
 			bucket.right_bindings.push_back(right_binding);
-			bucket.types.push_back(key_type);
+			bucket.types.push_back(left_key_type);
 
 			if (!protect_left && !protect_right) {
-				UnionBindings(left_binding, right_binding, key_type, binding_parents, group_map);
+				UnionBindings(left_binding, right_binding, left_key_type, binding_parents, group_map);
 			}
 		}
 
