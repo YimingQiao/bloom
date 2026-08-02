@@ -10,6 +10,7 @@ namespace duckdb {
 void LineageTracker::Clear() {
 	table_to_lineage_.clear();
 	per_lineage_.clear();
+	join_columns_.clear();
 	per_column_.clear();
 }
 
@@ -49,6 +50,7 @@ void LineageTracker::SeedColumn(ColumnBinding col) {
 		return;
 	}
 	auto canon = Canon(col);
+	join_columns_[canon.table_index.index].insert(canon);
 	per_column_[canon].insert(canon);
 }
 
@@ -122,8 +124,15 @@ void LineageTracker::Propagate(const GraphEdge &edge) {
 
 	if (kColumnGranular) {
 		ColumnSet src_union = UnionColumnLineage(edge.source_columns);
-		for (auto &dst_col : edge.dest_columns) {
-			auto &dst_set = per_column_[Canon(dst_col)];
+		// A transfer filters rows, not just the destination key vector. Every
+		// join key projected from the surviving destination rows therefore
+		// depends on the source keys. Without this rowset-level propagation, a
+		// previously used B.y -> C.y edge is incorrectly considered redundant
+		// after a later A.x -> B.x transfer shrinks B.
+		auto columns_it = join_columns_.find(dst_L);
+		D_ASSERT(columns_it != join_columns_.end());
+		for (auto &dst_col : columns_it->second) {
+			auto &dst_set = per_column_[dst_col];
 			dst_set.insert(src_union.begin(), src_union.end());
 		}
 	}

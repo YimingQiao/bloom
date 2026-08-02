@@ -21,9 +21,11 @@ namespace duckdb {
 //!   - Non-alias tables trivially map to their own table_id as lineage_id.
 //!
 //! Two compile-time modes:
-//!   - Column granularity (default): per-(lineage_id, column) lineage. Needed
-//!     to keep composite-key plans from pruning a legitimate edge as
-//!     "already covered" when only one of the join keys has been exchanged.
+//!   - Column granularity (default): per-(lineage_id, column) lineage. A
+//!     transfer changes the destination rowset, so every join-key column of
+//!     that destination inherits the source-key lineage. This lets a filter
+//!     arriving on one key make a subsequently stronger filter leave through
+//!     another key (for example A.x -> B.x, then B.y -> C.y).
 //!   - Table granularity: per-lineage_id only.
 //!
 //! Select via -DRPT_LINEAGE_TABLE_GRANULARITY at build time.
@@ -107,6 +109,9 @@ private:
 	//! Non-aliases have no entry here (LineageOf returns the table_id itself).
 	unordered_map<idx_t, idx_t> table_to_lineage_;
 	unordered_map<idx_t, LineageSet> per_lineage_;
+	//! Canonical join-key columns belonging to each lineage. Populated by
+	//! SeedColumn and used to mark every key when the table rowset changes.
+	unordered_map<idx_t, ColumnSet> join_columns_;
 	unordered_map<ColumnBinding, ColumnSet, ColumnBindingHashFunc> per_column_;
 };
 

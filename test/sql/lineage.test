@@ -1,0 +1,34 @@
+# name: test/sql/lineage.test
+# description: test rowset lineage propagation across join keys
+# group: [sql]
+
+require bloom
+
+# A filter arriving on one join key changes the whole rowset. After A.x ->
+# B.x shrinks B, the lineage tracker must allow a stronger B.y -> C.y even if
+# that edge was used before the A -> B transfer.
+statement ok
+CREATE TABLE rpt_lineage_a AS
+SELECT i::INTEGER x, i < 20 AS keep
+FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_lineage_b AS
+SELECT CASE WHEN i = 0 THEN 0 ELSE i + 99 END::INTEGER x,
+       i::INTEGER y,
+       i < 10 AS keep
+FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_lineage_c AS
+SELECT i::INTEGER y
+FROM range(1000) t(i);
+
+query I
+SELECT count(*)
+FROM rpt_lineage_a a
+JOIN rpt_lineage_b b ON a.x = b.x
+JOIN rpt_lineage_c c ON b.y = c.y
+WHERE a.keep AND b.keep;
+----
+1
