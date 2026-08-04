@@ -59,10 +59,10 @@ enabled. All reported queries completed correctly.
 | Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
 |---|---:|---:|---:|---:|---:|
 | [CEB IMDB](https://github.com/learnedsystems/ceb) | compressed, 2.05 GB | 3,133 | 1,625.939 s | 727.335 s | **2.235×** |
-| [CEB Stack](https://rmarcus.info/stack.html) | Stack Overflow, 51 GB | 6,191 | 4,295.507 s | 3,131.301 s | **1.372×** |
+| [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.047 s | **1.537×** |
+| [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | compressed, 2.05 GB | 113 | 35.162 s | 24.511 s | **1.435×** |
 | [STATS-CEB](https://github.com/Nathaniel-Han/End-to-End-CardEst-Benchmark) | simplified Stack Overflow, 22 MB | 146 | 359.363 s | 258.417 s | **1.391×** |
-| IMDB ([JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf)) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.047 s | **1.537×** |
-| IMDB ([JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf)) | compressed, 2.05 GB | 113 | 35.162 s | 24.511 s | **1.435×** |
+| [CEB Stack](https://rmarcus.info/stack.html) | Stack Overflow, 51 GB | 6,191 | 4,295.507 s | 3,131.301 s | **1.372×** |
 | TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.685 s | **1.124×** |
 | TPC-DS SF10 | 3.19 GB | 99 | 76.750 s | 73.393 s | **1.046×** |
 
