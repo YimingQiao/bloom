@@ -262,6 +262,8 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	auto result = executor.GetResult();
 	D_ASSERT(result);
 	D_ASSERT(!result->HasError());
+	// Drain the scheduler tasks before this stack Executor dies; see ExecutePlan.
+	executor.CancelTasks();
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	unique_ptr<ColumnDataCollection> result_data = mat_result.TakeCollection();
 

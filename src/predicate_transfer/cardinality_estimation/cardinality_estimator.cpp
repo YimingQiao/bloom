@@ -42,6 +42,8 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 		}
 
 		auto result = executor.GetResult();
+		// Drain the scheduler tasks before this stack Executor dies; see ExecutePlan.
+		executor.CancelTasks();
 		auto &mat_result = result->Cast<MaterializedQueryResult>();
 		result_cdc = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
 		if (!result_cdc) {

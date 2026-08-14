@@ -281,6 +281,10 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto result = executor.GetResult();
 	D_ASSERT(result);
 	D_ASSERT(!result->HasError());
+	// EXECUTION_FINISHED does not mean the scheduler threads have released their
+	// tasks yet, and ~ExecutorTask decrements a counter inside this Executor.
+	// ~Executor only asserts, so drain here like ClientContext does.
+	executor.CancelTasks();
 	auto get_result_end = MaterializeClock::now();
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	data_ = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
