@@ -131,6 +131,8 @@ def main():
         "protocol": {
             "query_threads": 1,
             "fresh_process_per_query": True,
+            "query_warmups": 0,
+            "duckdb_buffer_state": "fresh buffer manager for every measured execution",
             "normal_repetitions": {"warm": 2, "cold": 3},
             "large_ceb_repetitions": {"warm": 1, "cold": 1},
             "aggregation": "sum of per-query medians",

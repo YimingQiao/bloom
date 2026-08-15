@@ -1,6 +1,7 @@
 # End-to-end result
 
 Complete-query time includes optimization, adaptive excitation, materialization, and final execution. Each cell is the sum of per-query medians. Warm has two repetitions; cold SSD has three.
+Every execution starts in a fresh DuckDB process with no query warmup. Warm means complete OS page-cache residency, not a warm DuckDB buffer manager, so these absolute totals are not regression-comparable to the main README benchmark table.
 
 ## Warm base data
 

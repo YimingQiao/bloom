@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
-"""Run one benchmark workload through DuckDB's native benchmark_runner.
+"""Run one workload through DuckDB's same-process native benchmark runner.
 
 The Bloom extension is statically linked into the runner, so every query runs
 with predicate transfer enabled; pass --baseline to disable it (RPT_ENABLE=0).
 A temporary benchmark root is synthesized per run; databases and RPT sample
-caches persist in .bench_cache/data so repeated runs stay warm.
+caches persist in .bench_cache/data so repeated runs stay warm. The runner
+discards one query warmup before its timed runs; this protocol is distinct from
+the fresh-process prepared/instant experiments.
 """
 
 import argparse
@@ -145,6 +147,13 @@ def parse_args():
     )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--timed-runs", type=int, default=5)
+    parser.add_argument(
+        "--sampling-mode",
+        choices=("prepared", "instant"),
+        default="prepared",
+        help="Sampling path to benchmark (default: prepared)",
+    )
+    parser.add_argument("--sample-seed", type=int, default=2, help="Sampling seed (default: 2)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--baseline", action="store_true", help="Run with RPT_ENABLE=0")
@@ -282,8 +291,9 @@ def main():
         sample_dir = ROOT / ".bench_cache" / "rpt_samples"
         sample_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("RPT_SAMPLE_CACHE_DIR", str(sample_dir))
-        if args.baseline:
-            env["RPT_ENABLE"] = "0"
+        env["RPT_ENABLE"] = "0" if args.baseline else "1"
+        env["RPT_SAMPLE_MODE"] = args.sampling_mode
+        env["RPT_SAMPLE_SEED"] = str(args.sample_seed)
         return subprocess.run(command, env=env, check=False).returncode
 
 

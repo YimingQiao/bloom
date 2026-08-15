@@ -60,6 +60,11 @@ resident base-data bytes immediately before process launch. Warm runs require
 the complete file to be resident before every process, repairing residency if
 necessary without repeatedly evicting the file.
 
+Thus `warm` means OS page-cache residency, not a warmed DuckDB buffer manager:
+there is no query warmup in the new process. These absolute prepared totals are
+not regression-comparable to the same-process benchmark-runner totals in the
+main README; only same-protocol method ratios are compared here.
+
 ## Validation
 
 - All 2,145 measured executions succeeded.

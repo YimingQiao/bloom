@@ -78,15 +78,23 @@ Bloom sees its largest gains on the many-join CEB and JOB workloads. TPC-H and
 TPC-DS benefit less because DuckDB's built-in join filters already handle much
 of their filtering.
 
+The absolute times below are not a regression comparison with the table above.
+The main table discards a query warmup in the same DuckDB process. The sampling
+comparison intentionally starts a fresh DuckDB process for every measured
+execution; `warm` means that the database file is resident in the OS page cache,
+while DuckDB's buffer manager and decompression state still begin cold. Compare
+prepared with instant within this protocol, and use the native benchmark runner
+above when checking code regressions against the main table.
+
 ### Prepared and instant sampling
 
 Bloom supports maintained 10K-row samples and query-time sampling directly
 from storage. The table below compares the two paths with one DuckDB query
 thread and the same database files; instant sampling runs bounded tasks on
-DuckDB's asynchronous task pool. Warm runs use two repetitions per query;
-cold SSD runs use three. The two large CEB workloads use one complete pass per
-state. Prepared samples are loaded before timing; instant sampling is timed as
-part of the query.
+DuckDB's asynchronous task pool. Every measured execution starts in a fresh
+process. Warm runs use two repetitions per query; cold SSD runs use three. The
+two large CEB workloads use one complete pass per state. Prepared samples are
+loaded before timing; instant sampling is timed as part of the query.
 
 | Workload | Warm prepared | Warm instant | Warm ratio | Cold prepared | Cold instant | Cold ratio |
 |---|---:|---:|---:|---:|---:|---:|
@@ -110,8 +118,10 @@ and [individual run records](experiments/2026-08-prepared-instant-full-benchmark
 
 ### Running the benchmarks
 
-The scripts use the same workloads and measurement procedure as the table
-above. First build the runner with the TPC-H and TPC-DS data generators:
+The commands below use the same native benchmark-runner procedure as the main
+Bloom-versus-baseline table: one same-process warmup followed by timed runs.
+They do not reproduce the fresh-process prepared/instant table. First build the
+runner with the TPC-H and TPC-DS data generators:
 
 ```bash
 CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j"$(nproc)"
@@ -136,6 +146,8 @@ python3 scripts/run_benchmark.py --workload imdb --db /path/to/imdb.duckdb
 
 Databases and sample caches are kept under `.bench_cache/`. Pass `--db` to use
 an existing database. CEB SQL is downloaded and checksum-verified automatically.
+The prepared/instant matrix has its own cache-state gates and runner documented
+in [its experiment README](experiments/2026-08-prepared-instant-full-benchmark/README.md).
 
 ## Roadmap
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""End-to-end oracle/prepared/instant comparison with warm or cold base data."""
+"""Fresh-process oracle/prepared/instant comparison with warm or cold base data."""
 
 import argparse
 import gzip
@@ -269,6 +269,8 @@ def write_run_manifest(args, binary, db, query_dir, query_files, newest_source, 
         "workload": args.workload,
         "method": args.method,
         "state": args.state,
+        "fresh_process_per_query": True,
+        "query_warmups": 0,
         "repetitions": args.repetitions,
         "threads": args.threads,
         "sample_seed": args.sample_seed,

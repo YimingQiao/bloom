@@ -27,6 +27,13 @@ def parse_args():
     parser.add_argument("--threads", type=int, nargs="+", default=[1, 8])
     parser.add_argument("--timed-runs", type=int, default=5)
     parser.add_argument(
+        "--sampling-mode",
+        choices=("prepared", "instant"),
+        default="prepared",
+        help="Sampling path for Bloom runs (default: prepared)",
+    )
+    parser.add_argument("--sample-seed", type=int, default=2, help="Sampling seed (default: 2)")
+    parser.add_argument(
         "--out-dir",
         type=Path,
         default=ROOT / "benchmark_results",
@@ -37,7 +44,8 @@ def parse_args():
 
 def run_config(args, threads, baseline):
     """Run one configuration and return {query: median_seconds}."""
-    tag = f"{args.workload}_{'base' if baseline else 'rpt'}_t{threads}"
+    rpt_tag = "rpt" if args.sampling_mode == "prepared" else f"rpt_{args.sampling_mode}"
+    tag = f"{args.workload}_{'base' if baseline else rpt_tag}_t{threads}"
     command = [
         sys.executable,
         str(RUNNER),
@@ -47,6 +55,10 @@ def run_config(args, threads, baseline):
         str(threads),
         "--timed-runs",
         str(args.timed_runs),
+        "--sampling-mode",
+        args.sampling_mode,
+        "--sample-seed",
+        str(args.sample_seed),
     ]
     if args.db:
         command += ["--db", str(args.db)]

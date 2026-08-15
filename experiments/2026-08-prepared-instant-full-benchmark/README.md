@@ -32,6 +32,13 @@ every 50th, and final query of each large CEB cell; warm runs require the
 complete database file to be resident. Reported workload time is the sum of
 per-query medians (or the single observation for the large CEB workloads).
 
+Here `warm` describes only OS page-cache residency. A fresh DuckDB buffer
+manager is created for every execution and no query warmup is run. Absolute
+prepared totals from this experiment therefore must not be compared with the
+main README benchmark table, which discards one same-process query warmup. The
+prepared/instant ratios remain controlled because both methods use this same
+fresh-process protocol.
+
 The result-hash gate is causal and same-engine: prepared and instant must
 produce the same result bag for every state/query pair. Oracle is intentionally
 not synthesized for workloads without a complete exact-cardinality cache. Its

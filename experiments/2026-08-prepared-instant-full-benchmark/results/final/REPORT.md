@@ -1,6 +1,7 @@
 # Full prepared/instant benchmark result
 
 Complete-query time includes optimization, excitation, materialization, instant sampling, and final execution. Prepared sample loading happens before the timer. Normal workloads use two warm and three cold repetitions; CEB IMDB and CEB Stack use one repetition per state. Each cell is the sum of per-query medians.
+Every execution starts in a fresh DuckDB process with no query warmup. Warm means complete OS page-cache residency, not a warm DuckDB buffer manager, so these absolute totals are not regression-comparable to the main README benchmark table.
 
 ## Warm base data
 

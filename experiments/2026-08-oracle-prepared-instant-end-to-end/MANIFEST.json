@@ -16,6 +16,8 @@
   "protocol": {
     "query_threads": 1,
     "fresh_process_per_query": true,
+    "query_warmups": 0,
+    "duckdb_buffer_state": "fresh buffer manager for every measured execution",
     "warm_repetitions": 2,
     "cold_repetitions": 3,
     "aggregation": "sum of per-query medians",
