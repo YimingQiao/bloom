@@ -65,24 +65,24 @@ public:
 	uint32_t *blocks;
 
 private:
-	static constexpr const uint32_t MAX_NUM_SECTORS = (1ULL << 26);
+	static constexpr uint32_t MAX_NUM_SECTORS = 1U << 26U;
 	static constexpr const int32_t SIMD_BATCH_SIZE = 16;
 	static constexpr const uint32_t MIN_NUM_BITS = 512;
 	static constexpr const uint32_t LOG_SECTOR_SIZE = 5;
 
 	inline uint32_t GetMask1(uint32_t key_lo) const {
-		return (1u << ((key_lo >> 17) & 31)) | (1u << ((key_lo >> 22) & 31)) | (1u << ((key_lo >> 27) & 31));
+		return (1U << ((key_lo >> 17U) & 31U)) | (1U << ((key_lo >> 22U) & 31U)) | (1U << ((key_lo >> 27U) & 31U));
 	}
 	inline uint32_t GetMask2(uint32_t key_hi) const {
-		return (1u << ((key_hi >> 12) & 31)) | (1u << ((key_hi >> 17) & 31)) | (1u << ((key_hi >> 22) & 31)) |
-		       (1u << ((key_hi >> 27) & 31));
+		return (1U << ((key_hi >> 12U) & 31U)) | (1U << ((key_hi >> 17U) & 31U)) | (1U << ((key_hi >> 22U) & 31U)) |
+		       (1U << ((key_hi >> 27U) & 31U));
 	}
 
 	inline uint32_t GetSector1(uint32_t key_lo, uint32_t key_hi) const {
-		return ((key_lo & ((1 << 17) - 1)) + ((key_hi << 14) & (((1 << 9) - 1) << 17))) & (num_sectors - 1);
+		return ((key_lo & ((1U << 17U) - 1U)) + ((key_hi << 14U) & (((1U << 9U) - 1U) << 17U))) & (num_sectors - 1U);
 	}
 	inline uint32_t GetSector2(uint32_t key_hi, uint32_t block1) const {
-		return block1 ^ (8 + (key_hi & 7));
+		return block1 ^ (8U + (key_hi & 7U));
 	}
 
 	inline void InsertOne(uint32_t key_lo, uint32_t key_hi, uint32_t *BF_RESTRICT bf) const {
@@ -130,7 +130,7 @@ private:
 			}
 		}
 
-		for (int i = num & ~(SIMD_BATCH_SIZE - 1); i < num; i++) {
+		for (int i = num / SIMD_BATCH_SIZE * SIMD_BATCH_SIZE; i < num; i++) {
 			bool out = LookupOne(key[i + i], key[i + i + 1], bf);
 			results.set_index(result_count, i);
 			result_count += out;
@@ -164,7 +164,7 @@ private:
 			}
 		}
 
-		for (int i = num & ~(SIMD_BATCH_SIZE - 1); i < num; i++) {
+		for (int i = num / SIMD_BATCH_SIZE * SIMD_BATCH_SIZE; i < num; i++) {
 			bool out = LookupOne(key[i + i], key[i + i + 1], bf);
 			result_data[i] = out;
 			result_count += out;
@@ -197,7 +197,7 @@ private:
 			}
 		}
 
-		for (int i = num & ~(SIMD_BATCH_SIZE - 1); i < num; i++) {
+		for (int i = num / SIMD_BATCH_SIZE * SIMD_BATCH_SIZE; i < num; i++) {
 			InsertOne(key[i + i], key[i + i + 1], bf);
 		}
 	}

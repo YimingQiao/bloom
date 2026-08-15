@@ -13,11 +13,11 @@ static uint32_t CeilPowerOfTwo(uint32_t n) {
 		return 1;
 	}
 	n--;
-	n |= (n >> 1);
-	n |= (n >> 2);
-	n |= (n >> 4);
-	n |= (n >> 8);
-	n |= (n >> 16);
+	n |= n >> 1U;
+	n |= n >> 2U;
+	n |= n >> 4U;
+	n |= n >> 8U;
+	n |= n >> 16U;
 	return n + 1;
 }
 
@@ -84,7 +84,7 @@ void CacheSectorizedBF::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols
 
 size_t CacheSectorizedBF::Hash() const {
 	auto hash_combine = [](size_t h1, size_t h2) {
-		return h1 ^ (h2 * 0x9e3779b97f4a7c15ULL + (h1 << 6) + (h1 >> 2));
+		return h1 ^ (h2 * 0x9e3779b97f4a7c15ULL + (h1 << 6U) + (h1 >> 2U));
 	};
 	size_t hash = std::hash<uint32_t> {}(num_sectors);
 	hash = hash_combine(hash, std::hash<uint32_t> {}(num_sectors_log));
@@ -216,7 +216,7 @@ void DuckDBPrefixRangeFilterAdapter::SetValid() {
 
 size_t DuckDBPrefixRangeFilterAdapter::Hash() const {
 	auto hash = std::hash<int64_t> {}(lower_bound_);
-	return hash ^ (std::hash<int64_t> {}(upper_bound_) + 0x9e3779b97f4a7c15ULL + (hash << 6) + (hash >> 2));
+	return hash ^ (std::hash<int64_t> {}(upper_bound_) + 0x9e3779b97f4a7c15ULL + (hash << 6U) + (hash >> 2U));
 }
 
 string DuckDBPrefixRangeFilterAdapter::ToString() const {

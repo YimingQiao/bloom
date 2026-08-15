@@ -165,9 +165,9 @@ struct EdgeKey {
 
 	struct Hash {
 		size_t operator()(const EdgeKey &k) const {
-			size_t h = std::hash<idx_t> {}(k.lo_table) ^ (std::hash<idx_t> {}(k.hi_table) << 1);
+			size_t h = std::hash<idx_t> {}(k.lo_table) ^ (std::hash<idx_t> {}(k.hi_table) << 1U);
 			for (auto &p : k.key_cols) {
-				h ^= (std::hash<idx_t> {}(p.first) << 1) + std::hash<idx_t> {}(p.second);
+				h ^= (std::hash<idx_t> {}(p.first) << 1U) + std::hash<idx_t> {}(p.second);
 			}
 			return h;
 		}
@@ -364,8 +364,8 @@ struct CoveredColumnPair {
 struct CoveredColumnPairHash {
 	size_t operator()(const CoveredColumnPair &p) const {
 		ColumnBindingHashFunc ch;
-		return std::hash<idx_t> {}(p.lo_table) ^ (std::hash<idx_t> {}(p.hi_table) << 1) ^ (ch(p.lo_col) << 2) ^
-		       (ch(p.hi_col) << 3);
+		return std::hash<idx_t> {}(p.lo_table) ^ (std::hash<idx_t> {}(p.hi_table) << 1U) ^ (ch(p.lo_col) << 2U) ^
+		       (ch(p.hi_col) << 3U);
 	}
 };
 

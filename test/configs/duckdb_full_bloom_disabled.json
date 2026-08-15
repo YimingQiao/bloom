@@ -11,6 +11,13 @@
       "paths": [
         "test/sql/bloom.test"
       ]
+    },
+    {
+      "reason": "Prepared-cache persistence tests require enabled RPT queries to create their sample files.",
+      "paths": [
+        "test/sql/sampling/prepared_seed_cache.test",
+        "test/sql/sampling/prepared_target_cache.test"
+      ]
     }
   ]
 }

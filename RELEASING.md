@@ -16,18 +16,27 @@ release.
 
    ```bash
    make format-check
-   build/release/test/unittest 'test/sql/bloom.test'
+   make tidy-check
+   build/release/test/unittest 'test/sql/*'
    ```
 
 4. Run both `DuckDB Full Compatibility` configurations. RPT-disabled results
    must match the same pinned DuckDB build; RPT-enabled results must add no
    extension-specific failures.
-5. Run the one-thread IMDb and TPC-H SF10 regression gate. One warmup and two
-   timed runs are enough for the pre-release check:
+5. Run the one-thread IMDb and TPC-H SF10 regression gate with DuckDB's native
+   benchmark runner. This is the protocol used by the main README table: one
+   discarded warmup in the same process followed by five timed runs. Do not
+   compare those absolute totals with the fresh-process prepared/instant table,
+   whose `warm` state means OS page residency rather than a warmed DuckDB buffer
+   manager.
 
    ```bash
-   python3 scripts/run_benchmark.py --workload imdb --timed-runs 2
-   python3 scripts/run_benchmark.py --workload tpch_sf10 --timed-runs 2
+   python3 scripts/run_benchmark_suite.py \
+     --workload imdb --threads 1 --timed-runs 5 \
+     --sampling-mode prepared --sample-seed 2
+   python3 scripts/run_benchmark_suite.py \
+     --workload tpch_sf10 --threads 1 --timed-runs 5 \
+     --sampling-mode prepared --sample-seed 2
    ```
 
 6. Run `Release Candidate` manually. It builds the supported native platform

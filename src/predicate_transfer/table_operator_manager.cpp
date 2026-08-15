@@ -82,13 +82,29 @@ void TableOperatorManager::ComputeCDCAliasGroups() {
 		}
 		return cur ? &cur->Cast<LogicalColumnDataGet>() : nullptr;
 	};
-	unordered_map<const ColumnDataCollection *, vector<idx_t>> by_cdc;
-	for (auto &entry : table_operators) {
-		auto *cdg = find_chunk_get(entry.second.get());
+	vector<pair<const ColumnDataCollection *, vector<idx_t>>> by_cdc;
+	for (auto &operator_ref : table_dfs_order) {
+		auto &op = operator_ref.get();
+		auto table_id = GetScalarTableIndex(op);
+		auto canonical = table_operators.find(table_id);
+		if (canonical == table_operators.end() || &canonical->second.get() != &op) {
+			continue;
+		}
+		auto *cdg = find_chunk_get(op);
 		if (!cdg || !cdg->collection) {
 			continue;
 		}
-		by_cdc[cdg->collection.get()].push_back(entry.first);
+		idx_t group_index = by_cdc.size();
+		for (idx_t i = 0; i < by_cdc.size(); i++) {
+			if (by_cdc[i].first == cdg->collection.get()) {
+				group_index = i;
+				break;
+			}
+		}
+		if (group_index == by_cdc.size()) {
+			by_cdc.emplace_back(cdg->collection.get(), vector<idx_t> {});
+		}
+		by_cdc[group_index].second.push_back(table_id);
 	}
 	for (auto &grp : by_cdc) {
 		if (grp.second.size() < 2) {
