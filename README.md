@@ -80,34 +80,19 @@ of their filtering.
 
 ### Prepared and instant sampling
 
-Prepared sampling reuses a maintained 10K-row reservoir. The default resident-
-data instant policy instead reads 256 stratified access points of 32 contiguous
-rows directly from storage. The current comparison uses the same native runner
-as the main table: one discarded warmup per query, five timed runs, one query
-thread, a resident database file, and the sum of per-query medians. Instant
-sampling is part of every warmup and timed query.
+Prepared sampling is the default and reuses a maintained 10K-row reservoir.
+Instant sampling is an explicit option for deployments that prefer query-local
+sampling without maintaining that reservoir. With resident data, expect roughly
+5–20 ms of fixed overhead per query from the instant path.
 
-| Workload | Queries | Prepared | Instant | Instant/prepared | Per-query geomean | Instant faster |
-|---|---:|---:|---:|---:|---:|---:|
-| JOB (compressed) | 113 | 24.490 s | 25.621 s | 1.046× | 1.103× | 6/113 |
+| Workload | Queries | Prepared | Instant | Total overhead |
+|---|---:|---:|---:|---:|
+| JOB (compressed) | 113 | 24.490 s | 25.621 s | 4.6% |
 
-The two paths use different row-selection algorithms; the shared seed makes
-each path reproducible but does not make their sampled rows identical. In this
-run all 113 queries preserve the same directed transfer-edge set, while 48
-preserve the complete excitation sequence. Queries with a changed sequence are
-1.043× prepared time in aggregate, compared with 1.054× for queries whose
-sequence is identical, so the overall difference is dominated by physical
-instant-sampling work rather than a workload-level plan regression.
-
-The prepared total is the same measurement reported in the main benchmark
-table. A separate historical experiment covers eight workloads with explicit
-OS-warm and cold-SSD residency gates. It starts a fresh DuckDB process and does
-not run a query warmup, so its absolute times are intentionally kept in its
-[full methodology and validation](experiments/2026-08-prepared-instant-full-benchmark/README.md)
-rather than mixed with the query-warm results above. Its
-[per-query results](experiments/2026-08-prepared-instant-full-benchmark/results/final/QUERY_RESULTS.csv)
-and all 42,306 [individual run records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv)
-remain available.
+Both totals use one discarded warmup per query and five timed runs. The broader
+[warm/cold experiment](experiments/2026-08-prepared-instant-full-benchmark/README.md)
+and its [raw records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv)
+remain available separately.
 
 ### Running the benchmarks
 
