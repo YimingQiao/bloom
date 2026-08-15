@@ -78,6 +78,36 @@ Bloom sees its largest gains on the many-join CEB and JOB workloads. TPC-H and
 TPC-DS benefit less because DuckDB's built-in join filters already handle much
 of their filtering.
 
+### Prepared and instant sampling
+
+Bloom supports maintained 10K-row samples and query-time sampling directly
+from storage. The table below compares the two paths with one DuckDB query
+thread and the same database files; instant sampling runs bounded tasks on
+DuckDB's asynchronous task pool. Warm runs use two repetitions per query;
+cold SSD runs use three. The two large CEB workloads use one complete pass per
+state. Prepared samples are loaded before timing; instant sampling is timed as
+part of the query.
+
+| Workload | Warm prepared | Warm instant | Warm ratio | Cold prepared | Cold instant | Cold ratio |
+|---|---:|---:|---:|---:|---:|---:|
+| CEB IMDB | 1,071.752 s | 1,083.087 s | 1.011x | 1,687.834 s | 1,646.929 s | 0.976x |
+| JOB (uncompressed) | 36.849 s | 33.367 s | 0.906x | 95.293 s | 94.667 s | 0.993x |
+| JOB (compressed) | 33.214 s | 32.465 s | 0.977x | 50.723 s | 51.484 s | 1.015x |
+| STATS-CEB | 259.322 s | 258.909 s | 0.998x | 257.528 s | 257.326 s | 0.999x |
+| CEB Stack | 3,801.884 s | 3,815.170 s | 1.003x | 6,529.778 s | 6,634.349 s | 1.016x |
+| TPC-H SF10 | 23.613 s | 21.995 s | 0.932x | 40.585 s | 40.345 s | 0.994x |
+| TPC-DS SF10 | 84.493 s | 82.566 s | 0.977x | 120.805 s | 119.426 s | 0.989x |
+| Appian | 39.349 s | 40.279 s | 1.024x | 42.433 s | 42.006 s | 0.990x |
+
+Across the listed workload totals, instant/prepared is **1.003x** with warm
+data and **1.007x** from cold SSD. All 42,306 measured executions succeeded.
+Prepared and instant produce identical result bags for 19,533/19,650
+state/query pairs; the remaining 117 are verified non-total top-100 boundary
+ties in CEB Stack Q13. See the
+[full methodology and validation](experiments/2026-08-prepared-instant-full-benchmark/README.md),
+[per-query results](experiments/2026-08-prepared-instant-full-benchmark/results/final/QUERY_RESULTS.csv),
+and [individual run records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv).
+
 ### Running the benchmarks
 
 The scripts use the same workloads and measurement procedure as the table
@@ -114,14 +144,40 @@ an existing database. CEB SQL is downloaded and checksum-verified automatically.
 
 ## Configuration
 
-Bloom works without tuning. Two settings are useful in normal operation:
+Bloom works without tuning. Prepared sampling is the default: a 10K-row
+reservoir per table is persisted and reused across queries. Instant sampling
+reads a fresh, query-local sample directly from DuckDB storage or a single
+Parquet file and never creates or consumes a prepared sample.
+
+The main settings are:
 
 ```sql
 SET enable_rpt = false;
 SET rpt_sample_cache_dir = '/path/to/cache';
+SET rpt_sample_mode = 'instant';
 ```
 
 `enable_rpt` defaults to `true`; disable it for troubleshooting or an A/B
 comparison. `rpt_sample_cache_dir` defaults to `auto`, which stores samples
 under `<database>.rpt_samples/`. Set another directory to share a cache, or `''`
-to disable disk caching.
+to disable disk caching. Prepared samples are keyed by `rpt_sample_seed`, whose
+cross-workload-validated default is `2`; changing the seed creates an independent
+cache entry and never reuses the previous sample.
+
+`rpt_sample_mode` accepts `prepared` (the default) and `instant`. For resident
+native data, instant sampling reads 256 stratified access points x 32 contiguous
+rows with an internal task limit of eight. Its performance-first path reads
+narrow ranges directly from DuckDB base column segments.
+
+For cold native data, select the block-aligned prefetch policy:
+
+```sql
+SET rpt_sample_mode = 'instant';
+SET rpt_instant_access = 'block';
+```
+
+Parquet instant sampling automatically uses stratified row groups and supports
+one file per table. Advanced sample-size and access-shape budgets are exposed
+under the `rpt_instant_*` settings for reproducible experiments. Task fan-out is an
+internal bounded implementation detail and does not modify DuckDB's
+`async_threads` setting.

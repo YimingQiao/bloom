@@ -1,0 +1,63 @@
+{
+  "date": "2026-08-11",
+  "machine": {
+    "os": "Linux 6.1.0-45-amd64 x86_64",
+    "cpu": "2 x Intel Xeon Platinum 8474C, 48 cores/socket, 2 threads/core",
+    "logical_cpus": 192,
+    "memory_kib": 527821008
+  },
+  "source": {
+    "bloom_base_commit": "99a6c6729b85296c52c939dcded37a435f9a4525",
+    "bloom_cmake_src_test_sha256": "624be0f8144de43613d2c0a12c157ba9d6c04ed61c1811005e361a67d6890164",
+    "duckdb_commit": "21aca0424f1faf78b593b1e6fbfdd4846624c987",
+    "oracle_repository_commit": "8c0c9ddd8804568366bdfb1fbc7b46bd0aa931e6",
+    "oracle_duckdb_commit": "5228601299695d582678a5e442611925fe3afd8e"
+  },
+  "protocol": {
+    "query_threads": 1,
+    "fresh_process_per_query": true,
+    "warm_repetitions": 2,
+    "cold_repetitions": 3,
+    "aggregation": "sum of per-query medians",
+    "cold_gate": "POSIX_FADV_DONTNEED followed by zero-byte fincore residency",
+    "warm_gate": "complete base-file fincore residency",
+    "prepared": {
+      "target_rows": 10000,
+      "preloaded_before_timer": true
+    },
+    "instant_warm": {
+      "access": "scattered",
+      "access_points": 256,
+      "rows_per_access": 32,
+      "parallelism": 8,
+      "seed": 2
+    },
+    "instant_cold": {
+      "access": "block",
+      "windows": 16,
+      "parallelism": 4,
+      "target_rows": 10000,
+      "seed": 2
+    }
+  },
+  "workloads": {
+    "job": {
+      "queries": 113,
+      "database_bytes": 2051026944,
+      "database_sha256": "d31530c6aa0b924983633027fa39bb83d5b9506817066b47a384778a740212f7",
+      "query_set_sha256": "f9231cf4b5b2a94de481835515e6ac872cd1cbe3e8c45d737c69c81b76194ae7"
+    },
+    "tpch_sf10": {
+      "queries": 22,
+      "database_bytes": 2679123968,
+      "database_sha256": "5746c1fef45e9d16d8b418f24982765dfe18f9e2458f70d18ae49271cbd87a62",
+      "query_set_sha256": "7692abcb8bef61d880440ca75040e7fa0ca29c538e9356f38a9daf2f3c788237"
+    },
+    "appian": {
+      "queries": 8,
+      "database_bytes": 592982016,
+      "database_sha256": "7a0c3b617654c088632a19d267bd5c7232d510ac9c28373baec051168adf2e24",
+      "query_set_sha256": "a7ebe6aa6e44a85a22e05d927f5e33b6b3cf9d0cfcd54b6eda919502aed6b793"
+    }
+  }
+}

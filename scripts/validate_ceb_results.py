@@ -50,6 +50,11 @@ def parse_args():
     )
     parser.add_argument("--pattern", help="Regex matched against each relative query path")
     parser.add_argument("--limit", type=int)
+    parser.add_argument(
+        "--setup-sql",
+        default="",
+        help="SQL executed before each query, for example SET schema='public';",
+    )
     parser.add_argument("--fail-fast", action="store_true")
     parser.add_argument(
         "--no-resume",
@@ -63,16 +68,19 @@ def sql_string(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def query_sql(query_path, extension_path, enable_rpt):
+def query_sql(query_path, extension_path, enable_rpt, setup_sql):
     query = query_path.read_text(encoding="utf-8").strip()
     return f"""
 LOAD {sql_string(extension_path)};
 SET enable_rpt = {str(enable_rpt).lower()};
+{setup_sql}
 {query}
 """
 
 
-def execute_query(duckdb, db, extension, query_path, enable_rpt, env):
+def execute_query(
+    duckdb, db, extension, query_path, enable_rpt, setup_sql, env
+):
     return subprocess.run(
         [
             str(duckdb),
@@ -81,7 +89,7 @@ def execute_query(duckdb, db, extension, query_path, enable_rpt, env):
             "-noheader",
             str(db),
             "-c",
-            query_sql(query_path, extension, enable_rpt),
+            query_sql(query_path, extension, enable_rpt, setup_sql),
         ],
         text=True,
         capture_output=True,
@@ -149,8 +157,12 @@ def main():
     failures = 0
     for index, (relative, query_path) in enumerate(queries, 1):
         started = time.monotonic()
-        baseline = execute_query(duckdb, db, extension, query_path, False, env)
-        bloom = execute_query(duckdb, db, extension, query_path, True, env)
+        baseline = execute_query(
+            duckdb, db, extension, query_path, False, args.setup_sql, env
+        )
+        bloom = execute_query(
+            duckdb, db, extension, query_path, True, args.setup_sql, env
+        )
         both_succeeded = baseline.returncode == 0 and bloom.returncode == 0
         equal = both_succeeded and csv_multiset(baseline.stdout) == csv_multiset(bloom.stdout)
         record = {

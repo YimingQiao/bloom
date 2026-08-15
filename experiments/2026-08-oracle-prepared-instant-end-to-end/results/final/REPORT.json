@@ -1,0 +1,134 @@
+{
+  "validation": {
+    "total_runs": 2145,
+    "cold_runs": 1287,
+    "oracle_runs": 715,
+    "bloom_hash_matches": 286,
+    "oracle_hash_matches": 282,
+    "oracle_hash_comparable": 282
+  },
+  "states": {
+    "warm": {
+      "job": {
+        "time_ms": {
+          "oracle": 37950.5,
+          "prepared": 33213.5,
+          "instant": 32465.0
+        },
+        "input_bytes": {
+          "oracle": 0.0,
+          "prepared": 0.0,
+          "instant": 0.0
+        },
+        "instant_over_prepared": 0.9774639830189531
+      },
+      "tpch_sf10": {
+        "time_ms": {
+          "oracle": 25802.5,
+          "prepared": 23612.5,
+          "instant": 21995.5
+        },
+        "input_bytes": {
+          "oracle": 0.0,
+          "prepared": 0.0,
+          "instant": 0.0
+        },
+        "instant_over_prepared": 0.9315193223928004
+      },
+      "appian": {
+        "time_ms": {
+          "oracle": 40038.5,
+          "prepared": 39349.0,
+          "instant": 40278.5
+        },
+        "input_bytes": {
+          "oracle": 0.0,
+          "prepared": 0.0,
+          "instant": 0.0
+        },
+        "instant_over_prepared": 1.023621947190526
+      }
+    },
+    "cold": {
+      "job": {
+        "time_ms": {
+          "oracle": 52912.0,
+          "prepared": 50723.0,
+          "instant": 51484.0
+        },
+        "input_bytes": {
+          "oracle": 18337988608,
+          "prepared": 17514295296,
+          "instant": 19480940544
+        },
+        "instant_over_prepared": 1.0150030558129448
+      },
+      "tpch_sf10": {
+        "time_ms": {
+          "oracle": 42442.0,
+          "prepared": 40585.0,
+          "instant": 40345.0
+        },
+        "input_bytes": {
+          "oracle": 13987176448,
+          "prepared": 13987618816,
+          "instant": 13867483136
+        },
+        "instant_over_prepared": 0.9940864851546137
+      },
+      "appian": {
+        "time_ms": {
+          "oracle": 42201.0,
+          "prepared": 42433.0,
+          "instant": 42006.0
+        },
+        "input_bytes": {
+          "oracle": 1703718912,
+          "prepared": 1704378368,
+          "instant": 1684512768
+        },
+        "instant_over_prepared": 0.9899370772747625
+      }
+    }
+  },
+  "prepared_preload_audit": {
+    "job": {
+      "base_resident_bytes": 1933312,
+      "physical_input_bytes": 1933312
+    },
+    "tpch_sf10": {
+      "base_resident_bytes": 1671168,
+      "physical_input_bytes": 1671168
+    },
+    "appian": {
+      "base_resident_bytes": 1671168,
+      "physical_input_bytes": 1671168
+    }
+  },
+  "job_cold_buckets": [
+    {
+      "bucket": "<100 ms",
+      "queries": 17,
+      "prepared_ms": 1000.0,
+      "instant_ms": 1495.0,
+      "time_ratio": 1.495,
+      "io_ratio": 2.1995600288583224
+    },
+    {
+      "bucket": "100-500 ms",
+      "queries": 54,
+      "prepared_ms": 13989.0,
+      "instant_ms": 14331.0,
+      "time_ratio": 1.0244477803988847,
+      "io_ratio": 1.204219983566678
+    },
+    {
+      "bucket": ">=500 ms",
+      "queries": 42,
+      "prepared_ms": 35734.0,
+      "instant_ms": 35658.0,
+      "time_ratio": 0.9978731740079476,
+      "io_ratio": 1.049218486625316
+    }
+  ]
+}

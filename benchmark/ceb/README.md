@@ -1,12 +1,14 @@
-# CEB IMDB workloads
+# CEB workloads
 
-Bloom's benchmark runner supports the two IMDB query sets from the
+Bloom's benchmark runner supports the two IMDB query sets and the Stack
+workload from the
 [Cardinality Estimation Benchmark](https://github.com/learnedsystems/CEB):
 
 | Runner workload | Upstream name | Queries | Templates |
 |---|---|---:|---:|
 | `ceb_imdb` | CEB IMDB unique-plan subset / 3K | 3,133 | 16 |
 | `ceb_imdb_full` | CEB IMDB full / 13K | 13,646 | 16 |
+| `ceb_stack` | CEB Stack | 6,191 | 16 |
 
 The original CEB repository describes these workloads and is MIT licensed.
 Its historical Dropbox SQL links are no longer reliable, so
@@ -20,10 +22,20 @@ Queries are downloaded at runtime rather than vendored into this repository.
 Both extracted workloads and the source archive live under the gitignored
 `.bench_cache/ceb/` directory.
 
+The original CEB Stack Dropbox links have also expired. Ryan Marcus's
+[Stack dataset page](https://rmarcus.info/stack.html) still provides the same
+6,191-query workload and PostgreSQL 12 data archive used by Bao and CEB.
+`scripts/prepare_ceb_stack.py` downloads and checks those artifacts, restores
+the PostgreSQL custom-format dump in a user-owned cache cluster, and copies it
+to `.bench_cache/data/ceb_stack.duckdb` with DuckDB's official PostgreSQL
+extension. The source dump is about 20 GB, so the first preparation requires
+substantial download time and temporary disk space.
+
 Prepare the SQL:
 
 ```bash
 python3 scripts/prepare_ceb.py --print-root
+python3 scripts/prepare_ceb_stack.py --queries-only --print-root
 ```
 
 Run a Bloom-versus-baseline comparison:
@@ -31,10 +43,19 @@ Run a Bloom-versus-baseline comparison:
 ```bash
 python3 scripts/run_benchmark_suite.py --workload ceb_imdb --threads 1
 python3 scripts/run_benchmark_suite.py --workload ceb_imdb_full --threads 1
+python3 scripts/run_benchmark_suite.py \
+  --workload ceb_stack \
+  --threads 1 \
+  --timed-runs 1
 ```
 
+The IMDB workloads use one warmup and five timed runs per query, reporting the
+median. Because CEB Stack is substantially larger and slower, it uses one
+warmup and one timed run per query. CEB Stack results must be explicitly
+labeled as single-timed-run results.
+
 Before reporting a result, strictly check that both logs contain every query
-and all five timed runs:
+and the expected number of timed runs:
 
 ```bash
 python3 scripts/summarize_benchmark.py \
@@ -44,10 +65,14 @@ python3 scripts/summarize_benchmark.py \
   --timed-runs 5
 ```
 
-Both workloads use the standard JOB/IMDB schema. When no `--db` is supplied,
-`scripts/run_benchmark.py` reuses `.bench_cache/data/imdb.duckdb`, creating it
-from DuckDB's published JOB Parquet files if necessary. Pass `--db` to use an
-explicit compatible IMDB database.
+For CEB Stack, use `--expected-queries 6191 --timed-runs 1`.
+
+The two IMDB workloads use the standard JOB/IMDB schema. When no `--db` is
+supplied, `scripts/run_benchmark.py` reuses
+`.bench_cache/data/imdb.duckdb`, creating it from DuckDB's published JOB
+Parquet files if necessary. CEB Stack uses its own cached database at
+`.bench_cache/data/ceb_stack.duckdb`. Pass `--db` to use an explicit compatible
+database.
 
 Generated benchmark names use `<template>__<query-file-stem>`, for example
 `1a__1a1003`.

@@ -1,0 +1,101 @@
+{
+  "date": "2026-08-12",
+  "machine": {
+    "os": "Linux 6.1.0-45-amd64 x86_64",
+    "logical_cpus": 192
+  },
+  "source": {
+    "bloom_head_commit": "99a6c6729b85296c52c939dcded37a435f9a4525",
+    "bloom_source_tree_sha256": "6e01dc442f86a218d815ec4a74df219d01cfab8de8d1d3ad3d060aa747dfabd3",
+    "duckdb_commit": "21aca0424f1faf78b593b1e6fbfdd4846624c987",
+    "duckdb_binary_sha256": "9c36c9a489252a11bd13defba002923c1aec692e6f3d9837560d60ff89d2a69b",
+    "prepared_sample_cache_sha256": "9b212c9d4cd374f52a51a646e2f594e156b008b1bf6c910dfbd1931bdaf267b7",
+    "prepared_sample_files": 244
+  },
+  "protocol": {
+    "query_threads": 1,
+    "fresh_process_per_query": true,
+    "normal_repetitions": {
+      "warm": 2,
+      "cold": 3
+    },
+    "large_ceb_repetitions": {
+      "warm": 1,
+      "cold": 1
+    },
+    "aggregation": "sum of per-query medians",
+    "cold_state": "POSIX_FADV_DONTNEED before every query",
+    "residency_gate": {
+      "normal_workloads": "full-file fincore before every query",
+      "ceb_and_ceb_stack": "full-file fincore on first, every 50th, and final query"
+    },
+    "prepared": {
+      "target_rows": 10000,
+      "preloaded_before_timer": true
+    },
+    "instant_warm": {
+      "access": "scattered",
+      "access_points": 256,
+      "rows_per_access": 32,
+      "parallelism": 8,
+      "seed": 2
+    },
+    "instant_cold": {
+      "access": "block",
+      "windows": 16,
+      "parallelism": 4,
+      "target_rows": 10000,
+      "seed": 2
+    }
+  },
+  "workloads": {
+    "ceb": {
+      "queries": 3133,
+      "database_bytes": 2051026944,
+      "database_sha256": "d31530c6aa0b924983633027fa39bb83d5b9506817066b47a384778a740212f7",
+      "query_set_sha256": "b8aa6d36054f9fe7e508515a2fc5c6dc6acfb5b561facfdf98e396e1c100c489"
+    },
+    "job_uncompressed": {
+      "queries": 113,
+      "database_bytes": 4117770240,
+      "database_sha256": "332db61e25b8a5c64d903818d6026a226b836dc3ccbc01df5ef8ae47c364d6b6",
+      "query_set_sha256": "a6bb7611145f6101998281fd9492270dff9332afe9c71b7755b2ecedfb25b258"
+    },
+    "job": {
+      "queries": 113,
+      "database_bytes": 2051026944,
+      "database_sha256": "d31530c6aa0b924983633027fa39bb83d5b9506817066b47a384778a740212f7",
+      "query_set_sha256": "a6bb7611145f6101998281fd9492270dff9332afe9c71b7755b2ecedfb25b258"
+    },
+    "stats_ceb": {
+      "queries": 146,
+      "database_bytes": 22556672,
+      "database_sha256": "d66386402d7b49749069546ab525d402e9355d9c63d3190986fc333f10fff33b",
+      "query_set_sha256": "7b88e446eb89d35729350ce92aac7cce8ac5c4c5f49f35cb78767a119ce17ca3"
+    },
+    "ceb_stack": {
+      "queries": 6191,
+      "database_bytes": 54592548864,
+      "database_sha256": "6b1e0c61e4847ed95adbcb0360f822bc54c85ce3f087b5558a48165563f2cd26",
+      "query_set_sha256": "aab5df2baa5e7f46d2b0a178042a27d0e426b53fd0b75c67e4b7370ecf44123d"
+    },
+    "tpch_sf10": {
+      "queries": 22,
+      "database_bytes": 2679123968,
+      "database_sha256": "5746c1fef45e9d16d8b418f24982765dfe18f9e2458f70d18ae49271cbd87a62",
+      "query_set_sha256": "04d8bda9a9342d64d92b9d408099e2dc00f34d71cee9a0f9dd25200fd47a008b"
+    },
+    "tpcds_sf10": {
+      "queries": 99,
+      "database_bytes": 3194236928,
+      "database_sha256": "536cb83b27fc236df5b1235c95dad0488b46dd3ea5ec1db258521879cbf4e67a",
+      "query_set_sha256": "4d820fd6d698354cbe19a98b328cc39fe9e0b5a6ed98eca13ee9b79bf9ff9ae3"
+    },
+    "appian": {
+      "queries": 8,
+      "database_bytes": 592982016,
+      "database_sha256": "7a0c3b617654c088632a19d267bd5c7232d510ac9c28373baec051168adf2e24",
+      "query_set_sha256": "9251c469e4fa11342452c5a18d96a3c1e427cdc31f3161f29f5b587eb9bf3b07"
+    }
+  }
+}

@@ -1,0 +1,24 @@
+# Exploratory studies remain local until they are curated. The repository ships
+# only the two reviewable end-to-end experiment directories listed below.
+/*
+!/.gitignore
+!/README.md
+!/2026-08-oracle-prepared-instant-end-to-end/
+!/2026-08-prepared-instant-full-benchmark/
+
+# Local experiment products. Keep them on the machine that produced the run;
+# commit the runner, configuration, checksums, summaries, and curated reports.
+**/raw/
+**/parsed/
+**/reproduced/
+**/cache/
+**/oracle_workdir/
+**/*.log
+**/*.log.gz
+**/*.jsonl
+**/*.sample
+**/plan_differences.csv
+**/reference_regressions.csv
+
+# Interrupted or ad-hoc reproductions must not replace an archived result.
+**/*.tmp

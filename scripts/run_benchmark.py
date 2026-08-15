@@ -9,6 +9,7 @@ caches persist in .bench_cache/data so repeated runs stay warm.
 
 import argparse
 import os
+import re
 import subprocess
 import tempfile
 from pathlib import Path
@@ -17,6 +18,21 @@ ROOT = Path(__file__).resolve().parent.parent
 DUCKDB = ROOT / "duckdb"
 DATA_DIR = ROOT / ".bench_cache" / "data"
 CEB_QUERY_DIR = ROOT / ".bench_cache" / "ceb" / "queries" / "1f39e9aa85ee64249f60bfa59543e8707b228644"
+CEB_STACK_QUERY_DIR = (
+    ROOT
+    / ".bench_cache"
+    / "ceb_stack"
+    / "queries"
+    / "6dd6a8699046a61a365722bf28c90acbf7764a2baf206114012b9cf2c8b7b918"
+    / "stack"
+)
+STATS_CEB_ROOT = (
+    ROOT
+    / ".bench_cache"
+    / "stats_ceb"
+    / "assets"
+    / "670cb8d4bf4cbfa32f94fdf17f33973d3fd67d1b"
+)
 
 # Each workload: where its queries/answers live, the cached database name, the
 # SQL that can (re)generate the database, and required extensions.
@@ -45,6 +61,23 @@ WORKLOADS = {
         "require": [],
         "recursive_queries": True,
         "prepare_ceb": True,
+    },
+    "ceb_stack": {
+        "cache": "ceb_stack.duckdb",
+        "queries": CEB_STACK_QUERY_DIR,
+        "answers": None,
+        "load_sql": "SET schema='public';",
+        "require": [],
+        "recursive_queries": True,
+        "prepare_ceb_stack": True,
+    },
+    "stats_ceb": {
+        "cache": "stats_ceb.duckdb",
+        "queries": STATS_CEB_ROOT / "queries",
+        "answers": STATS_CEB_ROOT / "answers",
+        "load_sql": "SELECT 1;",
+        "require": [],
+        "prepare_stats_ceb": True,
     },
     "tpch_sf1": {
         "cache": "tpch_sf1.duckdb",
@@ -100,7 +133,16 @@ def parse_args():
     parser.add_argument("--workload", choices=sorted(WORKLOADS), default="imdb")
     parser.add_argument("--db", type=Path, help="Database file (default: .bench_cache/data/<cache>)")
     parser.add_argument("--runner", type=Path, default=ROOT / "build" / "release" / "benchmark" / "benchmark_runner")
+    parser.add_argument(
+        "--required-extension",
+        default="bloom",
+        help="Statically linked extension required by generated benchmarks",
+    )
     parser.add_argument("--pattern", help="Benchmark regex (default: the whole workload)")
+    parser.add_argument(
+        "--exclude-pattern",
+        help="Skip generated benchmark paths matching this regex",
+    )
     parser.add_argument("--threads", type=int, default=1)
     parser.add_argument("--timed-runs", type=int, default=5)
     parser.add_argument("--out", type=Path)
@@ -109,20 +151,25 @@ def parse_args():
     return parser.parse_args()
 
 
-def write_benchmark_root(root: Path, workload: str, db: "Path | None"):
+def write_benchmark_root(
+    root: Path,
+    workload: str,
+    db: "Path | None",
+    required_extension: str,
+    exclude_pattern: "re.Pattern | None" = None,
+):
     spec = WORKLOADS[workload]
     bench_dir = root / "benchmark" / workload
     bench_dir.mkdir(parents=True)
 
-    # The cache database lives in the persistent data dir; benchmark_runner
-    # resolves (and generates) it through this symlink.
+    # Keep the benchmark runner's cache path isolated. The individual database
+    # symlink points either to the persistent Bloom cache or to --db, so an
+    # external database never replaces a shared cache entry.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    (root / "duckdb_benchmark_data").symlink_to(DATA_DIR)
-    if db is not None:
-        target = DATA_DIR / spec["cache"]
-        if target.is_symlink() or target.exists():
-            target.unlink()
-        target.symlink_to(db)
+    benchmark_data = root / "duckdb_benchmark_data"
+    benchmark_data.mkdir()
+    database = db or (DATA_DIR / spec["cache"]).resolve()
+    (benchmark_data / spec["cache"]).symlink_to(database)
 
     if "load_sql" in spec:
         (bench_dir / "load.sql").write_text(spec["load_sql"] + "\n", encoding="utf-8")
@@ -130,8 +177,10 @@ def write_benchmark_root(root: Path, workload: str, db: "Path | None"):
     else:
         load_path = str(spec["load_file"])
 
-    db_exists = (DATA_DIR / spec["cache"]).exists()
-    requires = ["bloom"] + ([] if db_exists else spec["require"])
+    db_exists = database.exists()
+    requires = ([required_extension] if required_extension else []) + (
+        [] if db_exists else spec["require"]
+    )
     query_glob = (
         spec["queries"].rglob("*.sql")
         if spec.get("recursive_queries")
@@ -143,8 +192,11 @@ def write_benchmark_root(root: Path, workload: str, db: "Path | None"):
             query_id = "__".join(relative.with_suffix("").parts)
         else:
             query_id = query_file.stem
+        benchmark_name = f"benchmark/{workload}/{query_id}.benchmark"
+        if exclude_pattern and exclude_pattern.search(benchmark_name):
+            continue
         lines = [
-            f"# name: benchmark/{workload}/{query_id}.benchmark",
+            f"# name: {benchmark_name}",
             f"# group: [{workload}]",
             "",
             f"name Q{query_id}",
@@ -172,10 +224,30 @@ def main():
         from prepare_ceb import prepare
 
         prepare()
+    if WORKLOADS[args.workload].get("prepare_ceb_stack"):
+        from prepare_ceb_stack import prepare
+
+        prepare(
+            ROOT / "build" / "release" / "duckdb",
+            build_db=db is None,
+        )
+    if WORKLOADS[args.workload].get("prepare_stats_ceb"):
+        from prepare_stats_ceb import prepare
+
+        prepare(
+            ROOT / "build" / "release" / "duckdb",
+            build_db=db is None,
+        )
 
     with tempfile.TemporaryDirectory(prefix=f"bloom-{args.workload}-") as temp:
         benchmark_root = Path(temp)
-        write_benchmark_root(benchmark_root, args.workload, db)
+        write_benchmark_root(
+            benchmark_root,
+            args.workload,
+            db,
+            args.required_extension,
+            re.compile(args.exclude_pattern) if args.exclude_pattern else None,
+        )
 
         pattern = args.pattern or f"benchmark/{args.workload}/.*.benchmark"
         command = [
@@ -183,12 +255,27 @@ def main():
             "--root-dir", str(benchmark_root),
             pattern,
             f"--threads={args.threads}",
-            "--timed-runs", str(args.timed_runs),
             "--disable-timeout",
         ]
+        help_result = subprocess.run(
+            [str(runner), "--help"],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        runner_help = help_result.stdout + help_result.stderr
+        if "--timed-runs" in runner_help:
+            command += ["--timed-runs", str(args.timed_runs)]
+        elif args.timed_runs != 5:
+            print(
+                "warning: this benchmark_runner only supports its default "
+                "five timed runs; ignoring --timed-runs",
+            )
         if args.out:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
             command.append(f"--out={args.out.resolve()}")
         if args.log:
+            args.log.parent.mkdir(parents=True, exist_ok=True)
             command.append(f"--log={args.log.resolve()}")
 
         env = os.environ.copy()
