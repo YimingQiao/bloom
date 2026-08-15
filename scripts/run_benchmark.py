@@ -4,9 +4,10 @@
 The Bloom extension is statically linked into the runner, so every query runs
 with predicate transfer enabled; pass --baseline to disable it (RPT_ENABLE=0).
 A temporary benchmark root is synthesized per run; databases and RPT sample
-caches persist in .bench_cache/data so repeated runs stay warm. The runner
-discards one query warmup before its timed runs; this protocol is distinct from
-the fresh-process prepared/instant experiments.
+caches persist in .bench_cache/data. Existing databases are read sequentially
+into the OS page cache before the runner starts, then the runner discards one
+query warmup before its timed runs. This protocol is distinct from the
+fresh-process prepared/instant experiments.
 """
 
 import argparse
@@ -219,6 +220,17 @@ def write_benchmark_root(
             lines += ["", f"result {answer}"]
         (bench_dir / f"{query_id}.benchmark").write_text("\n".join(lines) + "\n", encoding="ascii")
 
+    return database
+
+
+def warm_page_cache(database: Path):
+    """Read an existing benchmark database before any measured process starts."""
+    if not database.is_file():
+        return
+    with database.open("rb", buffering=0) as source:
+        while source.read(16 * 1024 * 1024):
+            pass
+
 
 def main():
     args = parse_args()
@@ -250,13 +262,14 @@ def main():
 
     with tempfile.TemporaryDirectory(prefix=f"bloom-{args.workload}-") as temp:
         benchmark_root = Path(temp)
-        write_benchmark_root(
+        database = write_benchmark_root(
             benchmark_root,
             args.workload,
             db,
             args.required_extension,
             re.compile(args.exclude_pattern) if args.exclude_pattern else None,
         )
+        warm_page_cache(database)
 
         pattern = args.pattern or f"benchmark/{args.workload}/.*.benchmark"
         command = [
