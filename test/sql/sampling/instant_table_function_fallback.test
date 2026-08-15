@@ -1,0 +1,15 @@
+# name: test/sql/sampling/instant_table_function_fallback.test
+# description: leave unsupported table functions on DuckDB's estimator
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+query I
+SELECT count(*)
+FROM range(100) l(i)
+JOIN range(100) r(i) USING (i);
+----
+100

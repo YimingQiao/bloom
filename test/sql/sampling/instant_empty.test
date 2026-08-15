@@ -1,0 +1,49 @@
+# name: test/sql/sampling/instant_empty.test
+# description: handle empty inputs and samples with no survivors
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+CREATE TABLE rpt_empty_a(id INTEGER);
+
+statement ok
+CREATE TABLE rpt_empty_b AS
+SELECT i::INTEGER id, false AS keep FROM range(17) t(i);
+
+statement ok
+CREATE TABLE rpt_empty_c AS
+SELECT i::INTEGER id FROM range(17) t(i);
+
+query I
+SELECT count(*)
+FROM rpt_empty_a a
+JOIN rpt_empty_b b USING (id)
+JOIN rpt_empty_c c USING (id)
+WHERE b.keep;
+----
+0
+
+statement ok
+CREATE TABLE rpt_zero_a AS
+SELECT i::INTEGER id FROM range(257) t(i);
+
+statement ok
+CREATE TABLE rpt_zero_b AS
+SELECT i::INTEGER id, false AS keep FROM range(257) t(i);
+
+statement ok
+CREATE TABLE rpt_zero_c AS
+SELECT i::INTEGER id FROM range(257) t(i);
+
+query I
+SELECT count(*)
+FROM rpt_zero_a a
+JOIN rpt_zero_b b USING (id)
+JOIN rpt_zero_c c USING (id)
+WHERE b.keep;
+----
+0

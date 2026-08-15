@@ -1,0 +1,60 @@
+# name: test/sql/sampling/instant_parquet.test
+# description: exercise instant sampling for a single Parquet file
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_instant_parquet_row_groups = 4;
+
+statement ok
+SET threads = 8;
+
+statement ok
+COPY (
+    SELECT i AS id, i % 100 AS bucket, i * 2 AS payload
+    FROM range(200000) values_tbl(i)
+) TO '{TEST_DIR}/rpt_parquet_left.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 122880);
+
+statement ok
+COPY (
+    SELECT i AS id, i % 10 = 0 AS keep
+    FROM range(200000) values_tbl(i)
+) TO '{TEST_DIR}/rpt_parquet_right.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 122880);
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000
+
+# Queued Parquet work must also finish without background workers.
+statement ok
+SET async_threads = 0;
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000
+
+# A single row-group work unit follows the same executor path.
+statement ok
+SET rpt_instant_parquet_row_groups = 1;
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000

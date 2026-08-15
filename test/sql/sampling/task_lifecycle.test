@@ -1,0 +1,72 @@
+# name: test/sql/sampling/task_lifecycle.test
+# description: keep instant-sampling tasks within their executor lifetime
+# group: [sampling]
+
+require bloom
+
+statement ok
+CREATE TABLE rpt_lifecycle_a AS
+SELECT i::INTEGER id, (i * 3)::BIGINT payload
+FROM range(12000) t(i);
+
+statement ok
+CREATE TABLE rpt_lifecycle_b AS
+SELECT i::INTEGER id, (i % 5 = 0) keep
+FROM range(12000) t(i);
+
+statement ok
+CREATE TABLE rpt_lifecycle_c AS
+SELECT i::INTEGER id
+FROM range(12000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_instant_access = 'scattered';
+
+statement ok
+SET rpt_sample_size = 257;
+
+statement ok
+SET rpt_instant_access_points = 8;
+
+statement ok
+SET rpt_instant_rows_per_access = 257;
+
+# The caller must drain all queued work when no background worker exists.
+statement ok
+SET async_threads = 0;
+
+loop i 0 20
+
+query II
+SELECT count(*), sum(a.id)
+FROM rpt_lifecycle_a a
+JOIN rpt_lifecycle_b b USING (id)
+JOIN rpt_lifecycle_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2400	14394000
+
+endloop
+
+# Repetition with background workers exercises completion and cancellation.
+statement ok
+SET async_threads = 4;
+
+loop i 0 20
+
+query II
+SELECT count(*), sum(a.id)
+FROM rpt_lifecycle_a a
+JOIN rpt_lifecycle_b b USING (id)
+JOIN rpt_lifecycle_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2400	14394000
+
+endloop

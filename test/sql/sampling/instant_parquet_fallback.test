@@ -1,0 +1,46 @@
+# name: test/sql/sampling/instant_parquet_fallback.test
+# description: fall back cleanly for multi-file Parquet scans
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+# file_row_number is relative to each input file, so multi-file scans use the
+# estimator fallback.
+statement ok
+COPY (
+    SELECT i::INTEGER id FROM range(0, 1000) t(i)
+) TO '{TEST_DIR}/rpt_multi_left_0.parquet' (FORMAT PARQUET);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id FROM range(1000, 2000) t(i)
+) TO '{TEST_DIR}/rpt_multi_left_1.parquet' (FORMAT PARQUET);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 7 = 0) keep FROM range(0, 1000) t(i)
+) TO '{TEST_DIR}/rpt_multi_right_0.parquet' (FORMAT PARQUET);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 7 = 0) keep FROM range(1000, 2000) t(i)
+) TO '{TEST_DIR}/rpt_multi_right_1.parquet' (FORMAT PARQUET);
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet([
+    '{TEST_DIR}/rpt_multi_left_0.parquet',
+    '{TEST_DIR}/rpt_multi_left_1.parquet'
+]) l
+JOIN read_parquet([
+    '{TEST_DIR}/rpt_multi_right_0.parquet',
+    '{TEST_DIR}/rpt_multi_right_1.parquet'
+]) r USING (id)
+WHERE r.keep;
+----
+286	285285

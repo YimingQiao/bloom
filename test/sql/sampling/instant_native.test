@@ -1,0 +1,76 @@
+# name: test/sql/sampling/instant_native.test
+# description: compare prepared, scattered, and block sampling on native tables
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'prepared';
+
+statement ok
+CREATE TABLE rpt_native_left AS
+SELECT i::INTEGER id,
+       (i * 2)::INTEGER middle_col,
+       ('payload_' || i)::VARCHAR payload,
+       (i % 7)::INTEGER tail_col
+FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_native_right AS
+SELECT i::INTEGER id, (i % 100 = 0) keep
+FROM range(10000) t(i);
+
+statement ok
+CHECKPOINT;
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_native_left l
+JOIN rpt_native_right r USING (id)
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296
+
+statement ok
+SET rpt_sample_cache_dir = '{TEST_DIR}/instant_native_samples';
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_sample_size = 1000;
+
+statement ok
+SET rpt_instant_access_points = 1;
+
+# One access spans several DuckDB vectors.
+statement ok
+SET rpt_instant_rows_per_access = 4096;
+
+statement ok
+SET async_threads = 0;
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_native_left l
+JOIN rpt_native_right r USING (id)
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296
+
+# Instant mode must not create a prepared sample as a fallback.
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+statement ok
+SET rpt_instant_access = 'block';
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_native_left l
+JOIN rpt_native_right r USING (id)
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296

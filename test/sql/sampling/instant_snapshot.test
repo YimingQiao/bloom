@@ -1,0 +1,126 @@
+# name: test/sql/sampling/instant_snapshot.test
+# description: preserve query results across snapshot-visible table changes
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_instant_snapshot = true;
+
+statement ok
+CREATE TABLE rpt_snapshot_a AS
+SELECT i::INTEGER id, false AS keep FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_snapshot_b AS
+SELECT i::INTEGER id FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_snapshot_c AS
+SELECT i::INTEGER id FROM range(10000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+UPDATE rpt_snapshot_a SET keep = true WHERE id % 2 = 0;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+5000
+
+# The active transaction sees its own updates during optimization and execution.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+UPDATE rpt_snapshot_a SET keep = true WHERE id = 1;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+5001
+
+statement ok
+ROLLBACK;
+
+statement ok
+DELETE FROM rpt_snapshot_a WHERE id % 4 = 0;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+# A transaction-local append is unsupported by strict instant sampling, so the
+# optimizer falls back without changing the query result.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO rpt_snapshot_a VALUES (10000, true);
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+statement ok
+ROLLBACK;
+
+statement ok
+SET rpt_instant_snapshot = false;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+# Direct sampling does not interfere with normal transaction-local visibility.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO rpt_snapshot_a VALUES (10000, true);
+
+statement ok
+INSERT INTO rpt_snapshot_b VALUES (10000);
+
+statement ok
+INSERT INTO rpt_snapshot_c VALUES (10000);
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2501
+
+statement ok
+ROLLBACK;

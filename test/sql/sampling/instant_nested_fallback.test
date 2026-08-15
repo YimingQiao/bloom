@@ -1,0 +1,36 @@
+# name: test/sql/sampling/instant_nested_fallback.test
+# description: fall back cleanly for nested native columns
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+CREATE TABLE rpt_nested_a(k INTEGER[], payload VARCHAR);
+
+statement ok
+INSERT INTO rpt_nested_a VALUES ([1], 'one'), ([2], 'two'), ([3], 'three');
+
+statement ok
+CREATE TABLE rpt_nested_b(k INTEGER[], keep BOOLEAN);
+
+statement ok
+INSERT INTO rpt_nested_b VALUES ([2], true), ([3], false), ([4], true);
+
+statement ok
+CREATE TABLE rpt_nested_c(k INTEGER[]);
+
+statement ok
+INSERT INTO rpt_nested_c VALUES ([1]), ([2]), ([3]), ([4]);
+
+query T
+SELECT a.payload
+FROM rpt_nested_a a
+JOIN rpt_nested_b b USING (k)
+JOIN rpt_nested_c c USING (k)
+WHERE b.keep
+ORDER BY a.payload;
+----
+two

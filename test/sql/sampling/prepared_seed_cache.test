@@ -1,0 +1,84 @@
+# name: test/sql/sampling/prepared_seed_cache.test
+# description: isolate persistent prepared samples by seed
+# group: [sampling]
+
+require bloom
+
+statement ok
+SET rpt_sample_mode = 'prepared';
+
+statement ok
+SET rpt_sample_cache_dir = '{TEST_DIR}/prepared_seed_samples';
+
+statement ok
+SET rpt_sample_memory_cache = false;
+
+statement ok
+SET rpt_sample_size = 127;
+
+statement ok
+ATTACH '{TEST_DIR}/rpt_seed.db' AS rpt_seed_db;
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_a AS
+SELECT i::INTEGER id, (i * 3)::INTEGER payload FROM range(4096) t(i);
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_b AS
+SELECT i::INTEGER id, (i % 2 = 0) keep FROM range(4096) t(i);
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_c AS
+SELECT i::INTEGER id FROM range(4096) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET rpt_sample_seed = 41;
+
+query I
+SELECT count(*)
+FROM rpt_seed_db.rpt_seed_a a
+JOIN rpt_seed_db.rpt_seed_b b USING (id)
+JOIN rpt_seed_db.rpt_seed_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2048
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
+----
+3
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+3
+
+statement ok
+SET rpt_sample_seed = 42;
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+query I
+SELECT count(*)
+FROM rpt_seed_db.rpt_seed_a a
+JOIN rpt_seed_db.rpt_seed_b b USING (id)
+JOIN rpt_seed_db.rpt_seed_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2048
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
+----
+6
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+3

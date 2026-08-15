@@ -1,0 +1,84 @@
+# name: test/sql/sampling/config.test
+# description: validate sampling defaults and public settings
+# group: [sampling]
+
+require bloom
+
+query T
+SELECT current_setting('rpt_sample_cache_dir');
+----
+auto
+
+query TTIIII
+SELECT current_setting('rpt_sample_mode'),
+       current_setting('rpt_instant_access'),
+       current_setting('rpt_instant_snapshot'),
+       current_setting('rpt_instant_access_points'),
+       current_setting('rpt_instant_rows_per_access'),
+       current_setting('rpt_sample_seed');
+----
+prepared	scattered	false	256	32	2
+
+query III
+SELECT current_setting('rpt_sample_size'),
+       current_setting('rpt_sample_memory_cache'),
+       current_setting('rpt_late_materialize');
+----
+10000	true	false
+
+query II
+SELECT current_setting('rpt_instant_block_windows'),
+       current_setting('rpt_instant_parquet_row_groups');
+----
+16	8
+
+# Preloading must not build a missing prepared sample.
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+statement error
+SET rpt_sample_mode = 'unknown';
+----
+rpt_sample_mode must be 'prepared' or 'instant'
+
+statement error
+SET rpt_instant_access = 'unknown';
+----
+rpt_instant_access must be 'scattered' or 'block'
+
+statement error
+SET rpt_sample_size = 0;
+----
+rpt_sample_size must be between 1 and 1000000000
+
+statement error
+SET rpt_sample_rate = 1.5;
+----
+rpt_sample_rate must be finite and between 0 and 1
+
+statement error
+SET rpt_instant_access_points = 0;
+----
+rpt_instant_access_points must be between 1 and 1000000
+
+statement error
+SET rpt_instant_rows_per_access = 0;
+----
+rpt_instant_rows_per_access must be between 1 and 1000000
+
+statement error
+SET rpt_instant_block_windows = 0;
+----
+rpt_instant_block_windows must be between 1 and 1000000
+
+statement error
+SET rpt_instant_parquet_row_groups = 0;
+----
+rpt_instant_parquet_row_groups must be between 1 and 1000000
+
+statement error
+SET rpt_excitation_threshold = 1.1;
+----
+rpt_excitation_threshold must be finite and between 0 and 1
