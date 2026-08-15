@@ -89,8 +89,7 @@ InstantParquetSamplePlan PlanInstantParquetSample(ClientContext &context, Logica
 
 //! Execute a configured Parquet sample as bounded tasks on DuckDB's async scheduler.
 InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet &get,
-                                              const vector<LogicalType> &output_types,
-                                              const vector<InstantSampleRange> &sample_ranges, bool collect_timing,
+                                              const InstantParquetSamplePlan &plan, bool collect_timing,
                                               const Expression *local_predicate);
 
 //! Read many small stratified ranges. Intended for resident native storage.

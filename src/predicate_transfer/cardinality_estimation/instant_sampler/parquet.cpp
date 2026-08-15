@@ -87,21 +87,35 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 	// (file_index, row_number) composite filter instead of silently sampling the
 	// wrong row groups.
 	idx_t total_rows = 0;
-	for (auto &partition : partitions) {
+	vector<idx_t> sampleable_partitions;
+	for (idx_t partition_index = 0; partition_index < partitions.size(); partition_index++) {
+		auto &partition = partitions[partition_index];
 		if (!partition.row_start.IsValid() || partition.row_start.GetIndex() != total_rows ||
 		    partition.count_type != CountType::COUNT_EXACT) {
 			return false;
 		}
 		total_rows += partition.count;
+		if (partition.count > 0) {
+			sampleable_partitions.push_back(partition_index);
+		}
 	}
-	if (total_rows == 0) {
+	if (total_rows == 0 || sampleable_partitions.empty()) {
 		return false;
 	}
 	plan.source_rows = total_rows;
 
-	plan.selected_row_groups = MinValue<idx_t>(target_row_groups, plan.total_row_groups);
+	// Every selected row group must contribute at least one row. Besides
+	// avoiding zero-quota work, this bounds the filter expression when a caller
+	// requests more row groups than sample rows.
+	plan.selected_row_groups =
+	    MinValue<idx_t>(target_rows, MinValue<idx_t>(target_row_groups, sampleable_partitions.size()));
 	std::mt19937_64 random(seed);
-	auto selected = SelectStratifiedExactlyK(plan.total_row_groups, plan.selected_row_groups, random);
+	auto selected_positions = SelectStratifiedExactlyK(sampleable_partitions.size(), plan.selected_row_groups, random);
+	vector<idx_t> selected;
+	selected.reserve(selected_positions.size());
+	for (auto position : selected_positions) {
+		selected.push_back(sampleable_partitions[position]);
+	}
 	plan.candidate_rows = 0;
 	for (auto partition_index : selected) {
 		plan.candidate_rows += partitions[partition_index].count;
@@ -116,22 +130,41 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 	for (auto partition_index : selected) {
 		capacities.push_back(partitions[partition_index].count);
 	}
-	auto quotas = AllocateProportionalQuotas(capacities, actual_target);
+	vector<idx_t> quotas(selected.size(), 1);
+	if (actual_target > selected.size()) {
+		vector<idx_t> remaining_capacities;
+		remaining_capacities.reserve(capacities.size());
+		for (auto capacity : capacities) {
+			D_ASSERT(capacity > 0);
+			remaining_capacities.push_back(capacity - 1);
+		}
+		auto extra_quotas = AllocateProportionalQuotas(remaining_capacities, actual_target - selected.size());
+		for (idx_t i = 0; i < quotas.size(); i++) {
+			quotas[i] += extra_quotas[i];
+		}
+	}
 
 	vector<InstantSampleRange> ranges;
 	ranges.reserve(selected.size());
 	for (idx_t i = 0; i < selected.size(); i++) {
-		if (quotas[i] == 0) {
+		auto &partition = partitions[selected[i]];
+		D_ASSERT(quotas[i] > 0 && quotas[i] <= partition.count);
+		if (quotas[i] == partition.count) {
+			ranges.push_back({partition.row_start.GetIndex(), partition.count});
 			continue;
 		}
-		auto &partition = partitions[selected[i]];
-		// One contiguous prefix per row group minimizes page requests. The
-		// statistical sample is spread over the file by row-group stratification.
-		ranges.push_back({partition.row_start.GetIndex(), quotas[i]});
+		// A circular contiguous window gives every row the same inclusion
+		// probability while retaining page locality. Only a window crossing the
+		// row-group boundary needs a second physical range.
+		std::uniform_int_distribution<idx_t> offset_distribution(0, partition.count - 1);
+		auto window_offset = offset_distribution(random);
+		auto first_count = MinValue<idx_t>(quotas[i], partition.count - window_offset);
+		ranges.push_back({partition.row_start.GetIndex() + window_offset, first_count});
+		if (first_count < quotas[i]) {
+			ranges.push_back({partition.row_start.GetIndex(), quotas[i] - first_count});
+		}
 	}
-	if (ranges.empty()) {
-		return false;
-	}
+	D_ASSERT(!ranges.empty());
 
 	auto &column_ids = get.GetMutableColumnIds();
 	auto payload_count = column_ids.size();
@@ -324,23 +357,26 @@ private:
 } // namespace
 
 InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet &get,
-                                              const vector<LogicalType> &output_types,
-                                              const vector<InstantSampleRange> &sample_ranges, bool collect_timing,
+                                              const InstantParquetSamplePlan &plan, bool collect_timing,
                                               const Expression *local_predicate) {
 	InstantSampleResult result;
 	result.source = InstantSampleSource::PARQUET;
-	result.sample = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), output_types);
+	result.total_row_groups = plan.total_row_groups;
+	result.selected_row_groups = plan.selected_row_groups;
+	result.candidate_rows = plan.candidate_rows;
+	result.sample = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), plan.output_types);
 	D_ASSERT(get.function.function);
 	D_ASSERT(get.function.init_global);
 	D_ASSERT(get.function.init_local);
 	D_ASSERT(get.bind_data);
-	D_ASSERT(!output_types.empty());
-	if (!get.function.function || !get.function.init_global || !get.function.init_local || !get.bind_data ||
-	    output_types.empty()) {
+	D_ASSERT(plan);
+	D_ASSERT(!plan.output_types.empty());
+	if (!get.function.function || !get.function.init_global || !get.function.init_local || !get.bind_data || !plan ||
+	    plan.output_types.empty()) {
 		throw InternalException("Parquet instant sample is missing a required scan callback or bind data");
 	}
-	D_ASSERT(!sample_ranges.empty());
-	if (sample_ranges.empty()) {
+	D_ASSERT(!plan.ranges.empty());
+	if (plan.ranges.empty()) {
 		throw InternalException("Parquet instant sample has no row ranges");
 	}
 
@@ -351,22 +387,25 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 	}
 
 	auto scan_started = std::chrono::steady_clock::now();
-	auto row_filter = BuildRowNumberRangeFilter(sample_ranges);
+	auto row_filter = BuildRowNumberRangeFilter(plan.ranges);
 	D_ASSERT(row_filter);
 	auto filters = make_uniq<TableFilterSet>();
-	filters->PushFilter(ProjectionIndex(output_types.size()), make_uniq<ExpressionFilter>(std::move(row_filter)));
+	filters->PushFilter(ProjectionIndex(plan.output_types.size()), make_uniq<ExpressionFilter>(std::move(row_filter)));
 	auto bind_data = get.bind_data->Copy();
 	if (!bind_data) {
 		throw InternalException("Parquet instant sampler could not copy bind data");
 	}
-	auto shared_state =
-	    make_shared_ptr<DirectParquetSampleSharedState>(context, get.function, std::move(bind_data), get.GetColumnIds(),
-	                                                    std::move(projection_ids), std::move(filters), output_types);
+	auto shared_state = make_shared_ptr<DirectParquetSampleSharedState>(context, get.function, std::move(bind_data),
+	                                                                    get.GetColumnIds(), std::move(projection_ids),
+	                                                                    std::move(filters), plan.output_types);
 	if (!shared_state->Initialize()) {
 		throw InternalException("Parquet instant sample could not initialize its global scan state");
 	}
 
-	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, sample_ranges.size());
+	// Row-group initialization and positioning dominate tiny Parquet samples,
+	// so preserve one parallel work unit per selected group up to the bound.
+	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, plan.selected_row_groups);
+	D_ASSERT(task_count > 0);
 	result.task_count = task_count;
 	vector<unique_ptr<DirectParquetSampleWorker>> workers;
 	workers.reserve(task_count);
@@ -429,6 +468,7 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - combine_started).count();
 	}
 	result.scan_ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scan_started).count();
+	result.decoded_rows = result.sampled_rows;
 	result.status = InstantSampleStatus::SUCCESS;
 	return result;
 }

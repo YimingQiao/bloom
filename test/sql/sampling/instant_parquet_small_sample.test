@@ -1,0 +1,78 @@
+# name: test/sql/sampling/instant_parquet_small_sample.test
+# description: bound tiny Parquet samples and drain row-group tasks
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET threads = 8;
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i * 3)::BIGINT payload
+    FROM range(32768) t(i)
+) TO '{TEST_DIR}/rpt_parquet_tiny_left.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 4096);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 7 = 0) keep
+    FROM range(32768) t(i)
+) TO '{TEST_DIR}/rpt_parquet_tiny_right.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 4096);
+
+# More requested row groups than sample rows must not create zero-row work.
+statement ok
+SET rpt_sample_size = 1;
+
+statement ok
+SET rpt_instant_parquet_row_groups = 64;
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_tiny_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_tiny_right.parquet') r USING (id)
+WHERE r.keep AND l.payload >= 0;
+----
+4682	76707547
+
+# Exercise all eight row-group work units on the calling thread.
+statement ok
+SET rpt_sample_size = 64;
+
+statement ok
+SET rpt_instant_parquet_row_groups = 8;
+
+statement ok
+SET async_threads = 0;
+
+loop i 0 5
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_tiny_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_tiny_right.parquet') r USING (id)
+WHERE r.keep AND l.payload >= 0;
+----
+4682	76707547
+
+endloop
+
+# Repeat with background workers to cover completion before executor teardown.
+statement ok
+SET async_threads = 4;
+
+loop i 0 5
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_tiny_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_tiny_right.parquet') r USING (id)
+WHERE r.keep AND l.payload >= 0;
+----
+4682	76707547
+
+endloop

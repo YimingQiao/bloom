@@ -432,12 +432,8 @@ void TableSampleManager::BuildInstantSample(Entry &sample, const LogicalOperator
 	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - metadata_started).count();
 	idx_t predicate_count = 0;
 	auto local_predicate = BuildLocalPredicate(sample, op, plan.output_types, predicate_count, log);
-	auto result = BuildInstantParquetSample(context_, get, plan.output_types, plan.ranges, log, local_predicate.get());
-	result.total_row_groups = plan.total_row_groups;
-	result.selected_row_groups = plan.selected_row_groups;
-	result.candidate_rows = plan.candidate_rows;
+	auto result = BuildInstantParquetSample(context_, get, plan, log, local_predicate.get());
 	result.metadata_ms = metadata_ms;
-	result.decoded_rows = result.sampled_rows;
 	AdoptInstantSample(sample, std::move(result), predicate_count, table_seed);
 }
 

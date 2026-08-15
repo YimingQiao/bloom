@@ -1,0 +1,30 @@
+# name: test/sql/sampling/instant_parquet_empty.test
+# description: handle a valid empty Parquet source in instant mode
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+COPY (
+    SELECT i::INTEGER id
+    FROM range(0) t(i)
+) TO '{TEST_DIR}/rpt_parquet_empty.parquet' (FORMAT PARQUET);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, true keep
+    FROM range(100) t(i)
+) TO '{TEST_DIR}/rpt_parquet_nonempty.parquet' (FORMAT PARQUET);
+
+query I
+SELECT count(*)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_empty.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_nonempty.parquet') r USING (id)
+WHERE r.keep;
+----
+0
