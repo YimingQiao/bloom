@@ -194,6 +194,89 @@ struct StorageSampleJob {
 	bool snapshot_safe;
 };
 
+static void ExecuteStorageSampleTask(idx_t task_id, StorageSampleJob &job, unique_ptr<Expression> local_predicate) {
+	auto task_started = job.timings ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	auto timing = job.timings ? &(*job.timings)[task_id] : nullptr;
+	auto local = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), job.column_types);
+	ColumnDataAppendState append_state;
+	local->InitializeAppend(append_state);
+	TableScanState scan_state;
+	scan_state.Initialize(job.column_ids, job.context);
+	if (!job.snapshot_safe) {
+		// Direct scans initialize each selected column at the exact sampled
+		// offset. Build the stable child-state shape once per task instead of
+		// running RowGroup::InitializeScanWithOffset for every micro-range and
+		// immediately overwriting all of those states.
+		scan_state.table_state.Initialize(job.context, job.collection.GetTypes());
+	}
+	DataChunk scan_chunk;
+	scan_chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
+	DataChunk chunk;
+	chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
+	unique_ptr<ExpressionExecutor> filter_executor;
+	if (local_predicate) {
+		filter_executor = make_uniq<ExpressionExecutor>(job.context);
+		filter_executor->AddExpression(*local_predicate);
+	}
+	// Vectors are physically sorted. Give each task one contiguous slice so
+	// its vector scans retain physical locality.
+	auto vector_begin = task_id * job.sample_vectors.size() / job.task_count;
+	auto vector_end = (task_id + 1) * job.sample_vectors.size() / job.task_count;
+	idx_t task_sampled_rows = 0;
+	SelectionVector selection(STANDARD_VECTOR_SIZE);
+	auto flush = [&]() {
+		if (chunk.size() == 0) {
+			return;
+		}
+		if (filter_executor) {
+			auto filter_started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+			auto survivor_count = filter_executor->SelectExpression(chunk, selection);
+			if (timing) {
+				timing->filter_ms +=
+				    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filter_started)
+				        .count();
+			}
+			if (survivor_count == 0) {
+				chunk.Reset();
+				return;
+			}
+			if (survivor_count < chunk.size()) {
+				chunk.Slice(selection, survivor_count);
+				chunk.Flatten();
+			}
+		}
+		auto append_started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+		local->Append(append_state, chunk);
+		if (timing) {
+			timing->append_ms +=
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - append_started).count();
+		}
+		chunk.Reset();
+	};
+	for (idx_t index = vector_begin; index < vector_end; index++) {
+		auto &sample_vector = job.sample_vectors[index];
+		auto candidate_count = sample_vector.sample_offsets.size();
+		D_ASSERT(candidate_count <= STANDARD_VECTOR_SIZE);
+		if (candidate_count > STANDARD_VECTOR_SIZE - chunk.size()) {
+			flush();
+		}
+		InstantSampleRange range {sample_vector.row_start, sample_vector.row_count};
+		task_sampled_rows += ScanDirectRange(job.context, job.collection, job.row_group_tree, job.transaction,
+		                                     job.column_ids, scan_state, scan_chunk, chunk, range, chunk.size(),
+		                                     job.snapshot_safe, timing, &sample_vector.sample_offsets);
+		if (chunk.size() == STANDARD_VECTOR_SIZE) {
+			flush();
+		}
+	}
+	flush();
+	job.sampled_rows[task_id] = task_sampled_rows;
+	if (timing) {
+		timing->task_wall_ms =
+		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - task_started).count();
+	}
+	job.outputs[task_id] = std::move(local);
+}
+
 class StorageSampleTask : public BaseExecutorTask {
 public:
 	StorageSampleTask(TaskExecutor &executor, idx_t task_id, StorageSampleJob &job,
@@ -202,88 +285,7 @@ public:
 	}
 
 	void ExecuteTask() override {
-		auto task_started = job.timings ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-		auto timing = job.timings ? &(*job.timings)[task_id] : nullptr;
-		auto local = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), job.column_types);
-		ColumnDataAppendState append_state;
-		local->InitializeAppend(append_state);
-		TableScanState scan_state;
-		scan_state.Initialize(job.column_ids, job.context);
-		if (!job.snapshot_safe) {
-			// Direct scans initialize each selected column at the exact sampled
-			// offset. Build the stable child-state shape once per task instead of
-			// running RowGroup::InitializeScanWithOffset for every micro-range and
-			// immediately overwriting all of those states.
-			scan_state.table_state.Initialize(job.context, job.collection.GetTypes());
-		}
-		DataChunk scan_chunk;
-		scan_chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
-		DataChunk chunk;
-		chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
-		unique_ptr<ExpressionExecutor> filter_executor;
-		if (local_predicate) {
-			filter_executor = make_uniq<ExpressionExecutor>(job.context);
-			filter_executor->AddExpression(*local_predicate);
-		}
-		// Vectors are physically sorted. Give each task one contiguous slice so
-		// its vector scans retain physical locality.
-		auto vector_begin = task_id * job.sample_vectors.size() / job.task_count;
-		auto vector_end = (task_id + 1) * job.sample_vectors.size() / job.task_count;
-		idx_t task_sampled_rows = 0;
-		SelectionVector selection(STANDARD_VECTOR_SIZE);
-		auto flush = [&]() {
-			if (chunk.size() == 0) {
-				return;
-			}
-			if (filter_executor) {
-				auto filter_started =
-				    timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-				auto survivor_count = filter_executor->SelectExpression(chunk, selection);
-				if (timing) {
-					timing->filter_ms +=
-					    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filter_started)
-					        .count();
-				}
-				if (survivor_count == 0) {
-					chunk.Reset();
-					return;
-				}
-				if (survivor_count < chunk.size()) {
-					chunk.Slice(selection, survivor_count);
-					chunk.Flatten();
-				}
-			}
-			auto append_started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-			local->Append(append_state, chunk);
-			if (timing) {
-				timing->append_ms +=
-				    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - append_started)
-				        .count();
-			}
-			chunk.Reset();
-		};
-		for (idx_t index = vector_begin; index < vector_end; index++) {
-			auto &sample_vector = job.sample_vectors[index];
-			auto candidate_count = sample_vector.sample_offsets.size();
-			D_ASSERT(candidate_count <= STANDARD_VECTOR_SIZE);
-			if (candidate_count > STANDARD_VECTOR_SIZE - chunk.size()) {
-				flush();
-			}
-			InstantSampleRange range {sample_vector.row_start, sample_vector.row_count};
-			task_sampled_rows += ScanDirectRange(job.context, job.collection, job.row_group_tree, job.transaction,
-			                                     job.column_ids, scan_state, scan_chunk, chunk, range, chunk.size(),
-			                                     job.snapshot_safe, timing, &sample_vector.sample_offsets);
-			if (chunk.size() == STANDARD_VECTOR_SIZE) {
-				flush();
-			}
-		}
-		flush();
-		job.sampled_rows[task_id] = task_sampled_rows;
-		if (timing) {
-			timing->task_wall_ms =
-			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - task_started).count();
-		}
-		job.outputs[task_id] = std::move(local);
+		ExecuteStorageSampleTask(task_id, job, std::move(local_predicate));
 	}
 
 	string TaskType() const override {
@@ -423,7 +425,17 @@ void ExecuteStorageScan(ClientContext &context, RowGroupCollection &collection, 
 		return;
 	}
 	D_ASSERT(task_limit > 0);
-	auto task_count = MinValue<idx_t>(task_limit, sample_vectors.size());
+	idx_t decoded_rows = 0;
+	for (auto &sample_vector : sample_vectors) {
+		decoded_rows += sample_vector.row_count;
+	}
+	D_ASSERT(decoded_rows > 0);
+	// Tiny dimensions do not contain enough decoding work to repay task
+	// scheduling. Keep at least half a DuckDB vector of physical input per
+	// worker; the normal 8K scattered sample still uses all eight workers.
+	auto useful_tasks = CeilDivide(decoded_rows, STANDARD_VECTOR_SIZE / 2);
+	auto task_count = MinValue<idx_t>(task_limit, MinValue<idx_t>(sample_vectors.size(), useful_tasks));
+	D_ASSERT(task_count > 0);
 	result.task_count = task_count;
 	vector<shared_ptr<ColumnDataCollection>> task_outputs(task_count);
 	vector<idx_t> task_sampled_rows(task_count, 0);
@@ -441,27 +453,38 @@ void ExecuteStorageScan(ClientContext &context, RowGroupCollection &collection, 
 	    context,      collection,     row_group_tree, transaction,       column_ids,
 	    column_types, sample_vectors, task_outputs,   task_sampled_rows, collect_timing ? &task_timings : nullptr,
 	    task_count,   snapshot_safe};
-	// Every object borrowed by a task remains alive until WorkOnTasks returns.
-	auto scheduler_setup_started = std::chrono::steady_clock::now();
-	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-	if (collect_timing) {
-		result.scheduler_setup_ms =
-		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scheduler_setup_started)
-		        .count();
+	if (task_count == 1) {
+		auto wait_started = std::chrono::steady_clock::now();
+		ExecuteStorageSampleTask(0, job, std::move(local_predicates[0]));
+		if (collect_timing) {
+			result.wait_ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_started).count();
+		}
+	} else {
+		// Every object borrowed by a task remains alive until WorkOnTasks returns.
+		auto scheduler_setup_started = std::chrono::steady_clock::now();
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		if (collect_timing) {
+			result.scheduler_setup_ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scheduler_setup_started)
+			        .count();
+		}
+		auto schedule_started = std::chrono::steady_clock::now();
+		for (idx_t task = 0; task < task_count; task++) {
+			executor.ScheduleTask(make_uniq<StorageSampleTask>(executor, task, job, std::move(local_predicates[task])));
+		}
+		if (collect_timing) {
+			result.schedule_ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedule_started).count();
+		}
+		auto wait_started = std::chrono::steady_clock::now();
+		executor.WorkOnTasks();
+		if (collect_timing) {
+			result.wait_ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_started).count();
+		}
 	}
-	auto schedule_started = std::chrono::steady_clock::now();
-	for (idx_t task = 0; task < task_count; task++) {
-		executor.ScheduleTask(make_uniq<StorageSampleTask>(executor, task, job, std::move(local_predicates[task])));
-	}
 	if (collect_timing) {
-		result.schedule_ms =
-		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - schedule_started).count();
-	}
-	auto wait_started = std::chrono::steady_clock::now();
-	executor.WorkOnTasks();
-	if (collect_timing) {
-		result.wait_ms =
-		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - wait_started).count();
 		for (auto &timing : task_timings) {
 			result.locate_ms += timing.locate_ms;
 			result.decode_ms += timing.decode_ms;
