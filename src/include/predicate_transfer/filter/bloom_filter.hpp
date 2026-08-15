@@ -227,7 +227,6 @@ public:
 	}
 
 private:
-	ClientContext *context;
 	BloomFilter bf_; // DuckDB's built-in BloomFilter
 };
 
@@ -244,8 +243,7 @@ public:
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) override;
 	unique_ptr<PrefixRangeFilter::BuildState> InitializeLocalBuildState(ClientContext &context) const;
 	idx_t GetLocalBuildStateSize() const;
-	void InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols, PrefixRangeFilter::BuildState &state,
-	                 bool parallel) const;
+	void InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols, PrefixRangeFilter::BuildState &state) const;
 	void MergeLocalBuildState(PrefixRangeFilter::BuildState &state);
 	void SetValid() override;
 	size_t Hash() const override;
@@ -256,7 +254,7 @@ public:
 	}
 
 private:
-	LogicalType key_type_;
+	ClientContext &context_;
 	int64_t lower_bound_;
 	int64_t upper_bound_;
 	unique_ptr<PrefixRangeFilter> filter_;

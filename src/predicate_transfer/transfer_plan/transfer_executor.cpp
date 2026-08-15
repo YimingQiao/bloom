@@ -1,10 +1,14 @@
 #include "predicate_transfer/transfer_plan/transfer_executor.hpp"
 
 #include "duckdb/common/vector_operations/vector_operations.hpp"
+#include "duckdb/main/client_config.hpp"
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "predicate_transfer/filter/bitmap_filter.hpp"
 #include "predicate_transfer/filter/bloom_filter.hpp"
+
+#include <chrono>
+#include <iostream>
 
 namespace duckdb {
 namespace {
@@ -42,6 +46,45 @@ private:
 	idx_t task_id;
 	ScanFunction &function;
 };
+
+class IndexedExecutorTask final : public BaseExecutorTask {
+public:
+	using Function = std::function<void(idx_t)>;
+
+	IndexedExecutorTask(TaskExecutor &executor, idx_t task_id, const char *task_type, Function &function)
+	    : BaseExecutorTask(executor), task_id(task_id), task_type(task_type), function(function) {
+	}
+
+	void ExecuteTask() override {
+		function(task_id);
+	}
+
+	string TaskType() const override {
+		return task_type;
+	}
+
+private:
+	idx_t task_id;
+	const char *task_type;
+	Function &function;
+};
+
+static void ExecuteIndexedTasks(ClientContext &context, idx_t task_count, const char *task_type,
+                                IndexedExecutorTask::Function function) {
+	D_ASSERT(task_count > 0);
+	if (task_count == 1 || TaskScheduler::GetScheduler(context).NumberOfThreads() <= 1) {
+		for (idx_t task_id = 0; task_id < task_count; task_id++) {
+			function(task_id);
+		}
+		return;
+	}
+
+	TaskExecutor executor(context);
+	for (idx_t task_id = 0; task_id < task_count; task_id++) {
+		executor.ScheduleTask(make_uniq<IndexedExecutorTask>(executor, task_id, task_type, function));
+	}
+	executor.WorkOnTasks();
+}
 
 static void ScanCollection(ClientContext &context, const ColumnDataCollection &collection, idx_t task_count,
                            ParallelCollectionScanTask::ScanFunction function) {
@@ -117,6 +160,9 @@ void TransferExecutor::AttachFilterToScanner(LogicalOperator &op, const vector<C
 
 vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOperator &op,
                                                                      const vector<FilterBuildSpec> &specs) {
+	using Clock = std::chrono::steady_clock;
+	auto started = Clock::now();
+	auto log_timing = ClientConfig::GetConfig(context_).enable_profiler || config_.log_transfer_steps;
 	vector<shared_ptr<RPTFilter>> result(specs.size());
 	if (specs.empty()) {
 		return result;
@@ -138,6 +184,7 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 	vector<bool> integral_key(specs.size(), false);
 	vector<idx_t> stats_request_indices(specs.size(), DConstants::INVALID_INDEX);
 	vector<TableScanner::StatsRequest> stats_requests;
+	vector<DuckDBPrefixRangeFilterAdapter *> prefix_filters(specs.size(), nullptr);
 	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 		auto &spec = specs[spec_idx];
 		if (spec.key_bindings.empty() || spec.key_bindings.size() != spec.key_types.size()) {
@@ -152,6 +199,7 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			chunk_cols[spec_idx].push_back(chunk_col);
 		}
 		integral_key[spec_idx] = chunk_cols[spec_idx].size() == 1 && spec.key_types.front().IsIntegral() &&
+		                         spec.key_types.front() != LogicalType::UBIGINT &&
 		                         spec.key_types.front() != LogicalType::HUGEINT &&
 		                         spec.key_types.front() != LogicalType::UHUGEINT;
 		if (integral_key[spec_idx]) {
@@ -159,9 +207,11 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			stats_requests.push_back({chunk_cols[spec_idx][0], spec.key_types.front()});
 		}
 	}
+	auto setup_finished = Clock::now();
 
 	// Apply deferred filters and collect all integral-key ranges in one scan.
 	auto compact_result = scanner.Compact(stats_requests);
+	auto compact_finished = Clock::now();
 	collection = scanner.GetData();
 	D_ASSERT(collection);
 	auto task_count = RPTScanTaskCount(context_, *collection);
@@ -173,19 +223,28 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 		bool use_bitmap = false;
 		int64_t stats_min = 0, stats_max = 0;
 		auto stats_idx = stats_request_indices[spec_idx];
-		if (stats_idx != DConstants::INVALID_INDEX && compact_result.column_stats[stats_idx].has_min_max) {
+		const auto has_min_max =
+		    stats_idx != DConstants::INVALID_INDEX && compact_result.column_stats[stats_idx].has_min_max;
+		if (has_min_max) {
 			stats_min = compact_result.column_stats[stats_idx].observed_min;
 			stats_max = compact_result.column_stats[stats_idx].observed_max;
-			auto range = stats_max - stats_min;
-			use_bitmap = range >= 0 && (range <= static_cast<int64_t>(128 * total_rows) || range <= 8000000);
+		}
+		if (has_min_max && stats_min <= stats_max) {
+			auto range = static_cast<uint64_t>(stats_max) - static_cast<uint64_t>(stats_min);
+			auto row_budget = total_rows > std::numeric_limits<uint64_t>::max() / 128
+			                      ? std::numeric_limits<uint64_t>::max()
+			                      : static_cast<uint64_t>(total_rows) * 128;
+			use_bitmap = range <= row_budget || range <= 8000000;
 		} else if (integral_key[spec_idx] && total_rows == 0) {
 			use_bitmap = true;
 			stats_min = 1;
 			stats_max = 0;
 		}
 		if (use_bitmap && total_rows > 0) {
-			result[spec_idx] = make_shared_ptr<DuckDBPrefixRangeFilterAdapter>(
-			    context_, specs[spec_idx].key_types.front(), stats_min, stats_max, total_rows);
+			auto filter = make_shared_ptr<DuckDBPrefixRangeFilterAdapter>(context_, specs[spec_idx].key_types.front(),
+			                                                              stats_min, stats_max, total_rows);
+			prefix_filters[spec_idx] = filter.get();
+			result[spec_idx] = std::move(filter);
 		} else if (use_bitmap) {
 			result[spec_idx] = make_shared_ptr<BitmapFilter>(context_, BitmapFilterConfig(stats_min, stats_max));
 		} else {
@@ -193,48 +252,75 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			    make_shared_ptr<ActiveBloomFilter>(context_, BloomFilterConfig(), static_cast<uint32_t>(total_rows));
 		}
 	}
-	vector<DuckDBPrefixRangeFilterAdapter *> prefix_filters(specs.size(), nullptr);
 	vector<vector<unique_ptr<PrefixRangeFilter::BuildState>>> local_prefix_states(specs.size());
-	vector<bool> shared_prefix_lanes(specs.size(), false);
 	static constexpr idx_t MAX_PREFIX_RANGE_BUILD_MEMORY = 16ULL * 1024ULL * 1024ULL;
 	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 		if (!result[spec_idx]) {
 			continue;
 		}
-		prefix_filters[spec_idx] = dynamic_cast<DuckDBPrefixRangeFilterAdapter *>(result[spec_idx].get());
 		if (prefix_filters[spec_idx] && task_count > 1) {
 			auto state_size = prefix_filters[spec_idx]->GetLocalBuildStateSize();
 			D_ASSERT(state_size > 0);
-			auto lane_count =
-			    MinValue<idx_t>(task_count, MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1));
-			shared_prefix_lanes[spec_idx] = lane_count < task_count;
-			for (idx_t lane_id = 0; lane_id < lane_count; lane_id++) {
-				local_prefix_states[spec_idx].push_back(prefix_filters[spec_idx]->InitializeLocalBuildState(context_));
+			task_count = MinValue<idx_t>(task_count, MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1));
+		}
+	}
+	idx_t parallel_prefix_filter_count = 0;
+	if (task_count > 1) {
+		for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
+			if (prefix_filters[spec_idx]) {
+				local_prefix_states[spec_idx].resize(task_count);
+				parallel_prefix_filter_count++;
 			}
 		}
 	}
+	auto initialize_finished = Clock::now();
 	ScanCollection(context_, *collection, task_count, [&](idx_t task_id, DataChunk &chunk) {
 		for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 			if (!result[spec_idx]) {
 				continue;
 			}
 			if (!local_prefix_states[spec_idx].empty()) {
-				auto lane_id = task_id % local_prefix_states[spec_idx].size();
-				prefix_filters[spec_idx]->InsertLocal(chunk, chunk_cols[spec_idx],
-				                                      *local_prefix_states[spec_idx][lane_id],
-				                                      shared_prefix_lanes[spec_idx]);
+				D_ASSERT(task_id < local_prefix_states[spec_idx].size());
+				auto &local_state = local_prefix_states[spec_idx][task_id];
+				if (!local_state) {
+					local_state = prefix_filters[spec_idx]->InitializeLocalBuildState(context_);
+				}
+				prefix_filters[spec_idx]->InsertLocal(chunk, chunk_cols[spec_idx], *local_state);
 			} else {
 				result[spec_idx]->Insert(chunk, chunk_cols[spec_idx]);
 			}
 		}
 	});
-	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
+	auto insert_finished = Clock::now();
+	IndexedExecutorTask::Function finalize_filter = [&](idx_t spec_idx) {
 		for (auto &state : local_prefix_states[spec_idx]) {
-			prefix_filters[spec_idx]->MergeLocalBuildState(*state);
+			if (state) {
+				prefix_filters[spec_idx]->MergeLocalBuildState(*state);
+			}
 		}
 		if (result[spec_idx]) {
 			result[spec_idx]->SetValid();
 		}
+	};
+	if (parallel_prefix_filter_count > 1) {
+		ExecuteIndexedTasks(context_, specs.size(), "RPTFilterFinalize", finalize_filter);
+	} else {
+		for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
+			finalize_filter(spec_idx);
+		}
+	}
+	if (log_timing) {
+		auto elapsed = [](Clock::time_point begin, Clock::time_point end) {
+			return std::chrono::duration<double, std::milli>(end - begin).count();
+		};
+		auto finished = Clock::now();
+		std::cerr << "    [RPT-FilterBuildTiming] rows=" << total_rows << " specs=" << specs.size()
+		          << " tasks=" << task_count << " setup=" << elapsed(started, setup_finished)
+		          << "ms compact=" << elapsed(setup_finished, compact_finished)
+		          << "ms initialize=" << elapsed(compact_finished, initialize_finished)
+		          << "ms insert=" << elapsed(initialize_finished, insert_finished)
+		          << "ms merge=" << elapsed(insert_finished, finished) << "ms total=" << elapsed(started, finished)
+		          << "ms\n";
 	}
 	return result;
 }
@@ -262,6 +348,8 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 
 	auto task_count = RPTScanTaskCount(context_, *collection);
 	vector<vector<int64_t>> local_rids(task_count);
+	vector<int64_t> local_min_rids(task_count, std::numeric_limits<int64_t>::max());
+	vector<int64_t> local_max_rids(task_count, std::numeric_limits<int64_t>::min());
 	for (auto &rids : local_rids) {
 		rids.reserve(scanner.Count() / task_count + STANDARD_VECTOR_SIZE);
 	}
@@ -272,15 +360,17 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 		auto rid_data = FlatVector::GetData<int64_t>(rid_vec);
 		auto &rids = local_rids[task_id];
 		rids.insert(rids.end(), rid_data, rid_data + chunk.size());
+		for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
+			local_min_rids[task_id] = MinValue(local_min_rids[task_id], rid_data[row_idx]);
+			local_max_rids[task_id] = MaxValue(local_max_rids[task_id], rid_data[row_idx]);
+		}
 	});
 
 	int64_t min_rid = std::numeric_limits<int64_t>::max();
 	int64_t max_rid = std::numeric_limits<int64_t>::min();
-	for (auto &rids : local_rids) {
-		for (auto rid : rids) {
-			min_rid = MinValue(min_rid, rid);
-			max_rid = MaxValue(max_rid, rid);
-		}
+	for (idx_t task_id = 0; task_id < task_count; task_id++) {
+		min_rid = MinValue(min_rid, local_min_rids[task_id]);
+		max_rid = MaxValue(max_rid, local_max_rids[task_id]);
 	}
 	if (scanner.Count() == 0) {
 		min_rid = 1;
@@ -288,7 +378,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 	}
 
 	auto bitmap = make_shared_ptr<BitmapFilter>(context_, BitmapFilterConfig(min_rid, max_rid));
-	ParallelCollectionScanTask::ScanFunction insert_rids = [&](idx_t task_id, DataChunk &) {
+	IndexedExecutorTask::Function insert_rids = [&](idx_t task_id) {
 		DataChunk tmp_chunk;
 		tmp_chunk.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
 		auto &rids = local_rids[task_id];
@@ -302,35 +392,7 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 			bitmap->Insert(tmp_chunk, rid_insert_cols);
 		}
 	};
-	// Reuse one task per local vector. The dummy collection scan gives each
-	// task a stable id, while the callback performs the corresponding insert.
-	if (task_count == 1) {
-		DataChunk dummy;
-		insert_rids(0, dummy);
-	} else {
-		TaskExecutor executor(context_);
-		class RowIDInsertTask final : public BaseExecutorTask {
-		public:
-			RowIDInsertTask(TaskExecutor &executor, idx_t task_id, ParallelCollectionScanTask::ScanFunction &function)
-			    : BaseExecutorTask(executor), task_id(task_id), function(function) {
-			}
-			void ExecuteTask() override {
-				DataChunk dummy;
-				function(task_id, dummy);
-			}
-			string TaskType() const override {
-				return "RPTRowIDBitmapInsert";
-			}
-
-		private:
-			idx_t task_id;
-			ParallelCollectionScanTask::ScanFunction &function;
-		};
-		for (idx_t task_id = 0; task_id < task_count; task_id++) {
-			executor.ScheduleTask(make_uniq<RowIDInsertTask>(executor, task_id, insert_rids));
-		}
-		executor.WorkOnTasks();
-	}
+	ExecuteIndexedTasks(context_, task_count, "RPTRowIDBitmapInsert", insert_rids);
 	bitmap->SetValid();
 	return bitmap;
 }

@@ -5,6 +5,7 @@
 #include "duckdb/common/vector_operations/vector_operations.hpp"
 
 #include <cmath>
+#include <limits>
 
 namespace duckdb {
 namespace {
@@ -100,8 +101,7 @@ size_t CacheSectorizedBF::Hash() const {
 //===----------------------------------------------------------------------===//
 
 DuckDBBloomFilterAdapter::DuckDBBloomFilterAdapter(ClientContext &context_p, const BloomFilterConfig &config,
-                                                   uint32_t est_num_rows)
-    : context(&context_p) {
+                                                   uint32_t est_num_rows) {
 	bf_.Initialize(context_p, static_cast<idx_t>(est_num_rows));
 }
 
@@ -131,7 +131,6 @@ int DuckDBBloomFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &boun
 }
 
 void DuckDBBloomFilterAdapter::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built) {
-	int count = static_cast<int>(chunk.size());
 	Vector hashes = HashColumns(chunk, bound_cols_built);
 	bf_.InsertHashes(hashes);
 }
@@ -143,16 +142,19 @@ size_t DuckDBBloomFilterAdapter::Hash() const {
 DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &context, const LogicalType &key_type,
                                                                int64_t lower_bound, int64_t upper_bound,
                                                                idx_t row_count)
-    : key_type_(key_type), lower_bound_(lower_bound), upper_bound_(upper_bound),
+    : context_(context), lower_bound_(lower_bound), upper_bound_(upper_bound),
       filter_(PrefixRangeFilter::CreatePrefixRangeFilter(key_type)) {
 	if (!filter_) {
 		throw InternalException("RPT: DuckDB prefix-range filter does not support type %s", key_type.ToString());
 	}
+	D_ASSERT(lower_bound <= upper_bound);
 	auto min_value = Value::BIGINT(lower_bound).DefaultCastAs(key_type);
 	auto max_value = Value::BIGINT(upper_bound).DefaultCastAs(key_type);
-	auto width = lower_bound <= upper_bound ? static_cast<idx_t>(upper_bound - lower_bound + 1) : idx_t(1);
+	const auto span = static_cast<uint64_t>(upper_bound) - static_cast<uint64_t>(lower_bound);
+	const auto max_width = std::numeric_limits<idx_t>::max();
+	D_ASSERT(span < max_width);
+	auto width = static_cast<idx_t>(span + 1);
 	filter_->Initialize(context, row_count, min_value, max_value, width);
-	build_state_ = filter_->InitializeBuildState(context);
 }
 
 int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, SelectionVector &results,
@@ -180,6 +182,9 @@ void DuckDBPrefixRangeFilterAdapter::Insert(DataChunk &chunk, const vector<idx_t
 	if (bound_cols.size() != 1) {
 		throw InternalException("RPT: prefix-range filter requires one key column");
 	}
+	if (!build_state_) {
+		build_state_ = filter_->InitializeBuildState(context_);
+	}
 	filter_->InsertKeys(chunk.data[bound_cols[0]], *build_state_);
 }
 
@@ -193,15 +198,11 @@ idx_t DuckDBPrefixRangeFilterAdapter::GetLocalBuildStateSize() const {
 }
 
 void DuckDBPrefixRangeFilterAdapter::InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols,
-                                                 PrefixRangeFilter::BuildState &state, bool parallel) const {
+                                                 PrefixRangeFilter::BuildState &state) const {
 	if (bound_cols.size() != 1) {
 		throw InternalException("RPT: prefix-range filter requires one key column");
 	}
-	if (parallel) {
-		filter_->InsertKeysParallel(chunk.data[bound_cols[0]], state);
-	} else {
-		filter_->InsertKeys(chunk.data[bound_cols[0]], state);
-	}
+	filter_->InsertKeys(chunk.data[bound_cols[0]], state);
 }
 
 void DuckDBPrefixRangeFilterAdapter::MergeLocalBuildState(PrefixRangeFilter::BuildState &state) {
@@ -209,8 +210,10 @@ void DuckDBPrefixRangeFilterAdapter::MergeLocalBuildState(PrefixRangeFilter::Bui
 }
 
 void DuckDBPrefixRangeFilterAdapter::SetValid() {
-	filter_->MergeBuildState(*build_state_);
-	build_state_.reset();
+	if (build_state_) {
+		filter_->MergeBuildState(*build_state_);
+		build_state_.reset();
+	}
 	RPTFilter::SetValid();
 }
 

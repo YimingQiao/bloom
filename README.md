@@ -133,11 +133,6 @@ an existing database. CEB SQL is downloaded and checksum-verified automatically.
 The prepared/instant matrix has its own cache-state gates and runner documented
 in [its experiment README](experiments/2026-08-prepared-instant-full-benchmark/README.md).
 
-## Roadmap
-
-- **Improve multi-threaded execution.** Bloom currently runs filter transfer
-  separately from the main query, which limits parallelism during that phase.
-
 ## Configuration
 
 Bloom works without tuning. Prepared sampling is the default: a 10K-row

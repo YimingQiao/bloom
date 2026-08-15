@@ -1,0 +1,47 @@
+# name: test/sql/transfer/bigint_range_filter.test
+# description: transfer handles signed key ranges whose span exceeds BIGINT
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE rpt_bigint_source AS
+SELECT CASE WHEN i % 2 = 0
+            THEN (-9223372036854775807::BIGINT - 1) + i // 2
+            ELSE 9223372036854775807::BIGINT - i // 2
+       END k,
+       i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_bigint_probe AS
+SELECT CASE WHEN i % 2 = 0
+            THEN (-9223372036854775807::BIGINT - 1) + i // 2
+            ELSE 9223372036854775807::BIGINT - i // 2
+       END k
+FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_bigint_anchor AS
+SELECT i::INTEGER bridge
+FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_bigint_edge AS
+SELECT i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(1000) t(i);
+
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_bigint_probe p
+JOIN rpt_bigint_source s ON p.k = s.k
+JOIN rpt_bigint_anchor a ON s.bridge = a.bridge
+JOIN rpt_bigint_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+750	374250

@@ -1,0 +1,45 @@
+# name: test/sql/transfer/parallel_rowid_finalize.test
+# description: parallel late-materialization finalization preserves surviving row ids
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET rpt_late_materialize = true;
+
+statement ok
+CREATE TABLE rpt_rowid_source AS
+SELECT i::INTEGER k,
+       i::INTEGER bridge,
+       (i * 2)::BIGINT payload,
+       (i % 4 != 3) keep
+FROM range(100000) t(i);
+
+statement ok
+CREATE TABLE rpt_rowid_probe AS
+SELECT i::INTEGER k
+FROM range(100000) t(i);
+
+statement ok
+CREATE TABLE rpt_rowid_anchor AS
+SELECT i::INTEGER bridge
+FROM range(100000) t(i);
+
+statement ok
+CREATE TABLE rpt_rowid_edge AS
+SELECT i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(100000) t(i);
+
+query III
+SELECT count(*), sum(s.bridge), sum(s.payload)
+FROM rpt_rowid_probe p
+JOIN rpt_rowid_source s ON p.k = s.k
+JOIN rpt_rowid_anchor a ON s.bridge = a.bridge
+JOIN rpt_rowid_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+75000	3749925000	7499850000

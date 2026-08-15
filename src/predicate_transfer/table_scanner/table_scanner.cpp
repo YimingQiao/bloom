@@ -115,7 +115,8 @@ static void ParallelCompactScan(ClientContext &context, const ColumnDataCollecti
 
 idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
 	static constexpr idx_t CHUNKS_PER_TASK = 8;
-	auto tasks = MaxValue<idx_t>(collection.ChunkCount() / CHUNKS_PER_TASK, 1);
+	auto chunk_count = collection.ChunkCount();
+	auto tasks = MaxValue<idx_t>(chunk_count / CHUNKS_PER_TASK + (chunk_count % CHUNKS_PER_TASK != 0), 1);
 	return MinValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), tasks);
 }
 

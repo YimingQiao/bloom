@@ -1,0 +1,45 @@
+# name: test/sql/transfer/prefix_memory_budget.test
+# description: prefix filter concurrency respects its private-state memory budget
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 32;
+
+statement ok
+CREATE TABLE rpt_budget_source AS
+SELECT ((i * 8000000) / 599999)::INTEGER sparse_key,
+       i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(600000) t(i);
+
+statement ok
+CREATE TABLE rpt_budget_probe AS
+SELECT ((i * 8000000) / 599999)::INTEGER sparse_key
+FROM range(600000) t(i);
+
+statement ok
+CREATE TABLE rpt_budget_anchor AS
+SELECT i::INTEGER bridge
+FROM range(600000) t(i);
+
+statement ok
+CREATE TABLE rpt_budget_edge AS
+SELECT i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(600000) t(i);
+
+# The sparse key creates an approximately 1 MB PrefixRange build state. The
+# source has enough chunks to request more lanes than fit in the 16 MB budget;
+# the build must reduce its task count instead of sharing atomically written
+# states between workers.
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_budget_probe p
+JOIN rpt_budget_source s ON p.sparse_key = s.sparse_key
+JOIN rpt_budget_anchor a ON s.bridge = a.bridge
+JOIN rpt_budget_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+450000	134999550000

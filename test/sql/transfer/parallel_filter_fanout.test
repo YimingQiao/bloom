@@ -1,0 +1,44 @@
+# name: test/sql/transfer/parallel_filter_fanout.test
+# description: parallel transfer builds independent prefix filters for one source
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 8;
+
+statement ok
+CREATE TABLE rpt_parallel_source AS
+SELECT i::INTEGER k1,
+       ((i * 7) % 200003)::INTEGER k2,
+       (i % 4 != 3) keep
+FROM range(200000) t(i);
+
+statement ok
+CREATE TABLE rpt_parallel_left AS
+SELECT i::INTEGER k1
+FROM range(200000) t(i);
+
+statement ok
+CREATE TABLE rpt_parallel_right AS
+SELECT ((i * 7) % 200003)::INTEGER k2,
+       i::INTEGER k3
+FROM range(200000) t(i);
+
+statement ok
+CREATE TABLE rpt_parallel_edge AS
+SELECT i::INTEGER k3,
+       (i % 4 != 3) keep
+FROM range(200000) t(i);
+
+# The chain has selective endpoints, so the optimizer builds both outgoing
+# prefix filters of the source in one parallel collection scan.
+query II
+SELECT count(*), sum(s.k1)
+FROM rpt_parallel_left l
+JOIN rpt_parallel_source s ON l.k1 = s.k1
+JOIN rpt_parallel_right r ON s.k2 = r.k2
+JOIN rpt_parallel_edge e ON r.k3 = e.k3
+WHERE s.keep AND e.keep;
+----
+150000	14999850000
