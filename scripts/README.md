@@ -5,7 +5,9 @@ belongs under the dated directory in `experiments/`.
 
 ## Build and benchmark
 
-- `run_benchmark_suite.py`: prepare and compare Bloom with the DuckDB baseline.
+- `run_benchmark_suite.py`: compare Bloom with the DuckDB baseline, or compare
+  prepared with instant sampling under the same query-warm protocol. Select the
+  latter with `--comparison sampling`.
 - `run_benchmark.py`: lower-level workload runner used by the suite and
   research experiments.
 - `summarize_benchmark.py`: aggregate benchmark timing files.

@@ -264,8 +264,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("rpt_sample_cache_dir",
 	                          "Prepared-sample cache directory ('auto' stores it beside the database)",
 	                          LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_CACHE_DIR", "auto")));
-	config.AddExtensionOption("rpt_sample_size", "Target rows per sampled base table", LogicalType::UBIGINT,
-	                          Value::UBIGINT(EnvUBigIntDefault("RPT_SAMPLE_SIZE", 10000)), ValidateSampleSize);
+	config.AddExtensionOption("rpt_sample_size", "Target rows for prepared, block, and Parquet sampling",
+	                          LogicalType::UBIGINT, Value::UBIGINT(EnvUBigIntDefault("RPT_SAMPLE_SIZE", 10000)),
+	                          ValidateSampleSize);
 	config.AddExtensionOption("rpt_sample_rate",
 	                          "Chunk-sampling fraction for estimating cardinalities of already-materialized "
 	                          "intermediate data",

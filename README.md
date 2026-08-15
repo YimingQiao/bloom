@@ -60,7 +60,7 @@ enabled. All reported queries completed correctly.
 |---|---:|---:|---:|---:|---:|
 | [CEB IMDB](https://github.com/learnedsystems/ceb) | compressed, 2.05 GB | 3,133 | 1,625.939 s | 727.335 s | **2.235×** |
 | [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | uncompressed, 4.12 GB | 113 | 29.277 s | 19.047 s | **1.537×** |
-| [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | compressed, 2.05 GB | 113 | 35.162 s | 24.511 s | **1.435×** |
+| [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | compressed, 2.05 GB | 113 | 34.951 s | 24.490 s | **1.427×** |
 | [STATS-CEB](https://github.com/Nathaniel-Han/End-to-End-CardEst-Benchmark) | simplified Stack Overflow, 22 MB | 146 | 359.363 s | 258.417 s | **1.391×** |
 | [CEB Stack](https://rmarcus.info/stack.html) | Stack Overflow, 51 GB | 6,191 | 4,295.507 s | 3,131.301 s | **1.372×** |
 | TPC-H SF10 | 2.68 GB | 22 | 19.885 s | 17.685 s | **1.124×** |
@@ -78,49 +78,41 @@ Bloom sees its largest gains on the many-join CEB and JOB workloads. TPC-H and
 TPC-DS benefit less because DuckDB's built-in join filters already handle much
 of their filtering.
 
-The absolute times below are not a regression comparison with the table above.
-The main table discards a query warmup in the same DuckDB process. The sampling
-comparison intentionally starts a fresh DuckDB process for every measured
-execution; `warm` means that the database file is resident in the OS page cache,
-while DuckDB's buffer manager and decompression state still begin cold. Compare
-prepared with instant within this protocol, and use the native benchmark runner
-above when checking code regressions against the main table.
-
 ### Prepared and instant sampling
 
-Bloom supports maintained 10K-row samples and query-time sampling directly
-from storage. The table below compares the two paths with one DuckDB query
-thread and the same database files; instant sampling runs bounded tasks on
-DuckDB's asynchronous task pool. Every measured execution starts in a fresh
-process. Warm runs use two repetitions per query; cold SSD runs use three. The
-two large CEB workloads use one complete pass per state. Prepared samples are
-loaded before timing; instant sampling is timed as part of the query.
+Prepared sampling reuses a maintained 10K-row reservoir. The default resident-
+data instant policy instead reads 256 stratified access points of 32 contiguous
+rows directly from storage. The current comparison uses the same native runner
+as the main table: one discarded warmup per query, five timed runs, one query
+thread, a resident database file, and the sum of per-query medians. Instant
+sampling is part of every warmup and timed query.
 
-| Workload | Warm prepared | Warm instant | Warm ratio | Cold prepared | Cold instant | Cold ratio |
+| Workload | Queries | Prepared | Instant | Instant/prepared | Per-query geomean | Instant faster |
 |---|---:|---:|---:|---:|---:|---:|
-| CEB IMDB | 1,071.752 s | 1,083.087 s | 1.011x | 1,687.834 s | 1,646.929 s | 0.976x |
-| JOB (uncompressed) | 36.849 s | 33.367 s | 0.906x | 95.293 s | 94.667 s | 0.993x |
-| JOB (compressed) | 33.214 s | 32.465 s | 0.977x | 50.723 s | 51.484 s | 1.015x |
-| STATS-CEB | 259.322 s | 258.909 s | 0.998x | 257.528 s | 257.326 s | 0.999x |
-| CEB Stack | 3,801.884 s | 3,815.170 s | 1.003x | 6,529.778 s | 6,634.349 s | 1.016x |
-| TPC-H SF10 | 23.613 s | 21.995 s | 0.932x | 40.585 s | 40.345 s | 0.994x |
-| TPC-DS SF10 | 84.493 s | 82.566 s | 0.977x | 120.805 s | 119.426 s | 0.989x |
-| Appian | 39.349 s | 40.279 s | 1.024x | 42.433 s | 42.006 s | 0.990x |
+| JOB (compressed) | 113 | 24.490 s | 25.621 s | 1.046× | 1.103× | 6/113 |
 
-Across the listed workload totals, instant/prepared is **1.003x** with warm
-data and **1.007x** from cold SSD. All 42,306 measured executions succeeded.
-Prepared and instant produce identical result bags for 19,533/19,650
-state/query pairs; the remaining 117 are verified non-total top-100 boundary
-ties in CEB Stack Q13. See the
-[full methodology and validation](experiments/2026-08-prepared-instant-full-benchmark/README.md),
-[per-query results](experiments/2026-08-prepared-instant-full-benchmark/results/final/QUERY_RESULTS.csv),
-and [individual run records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv).
+The two paths use different row-selection algorithms; the shared seed makes
+each path reproducible but does not make their sampled rows identical. In this
+run all 113 queries preserve the same directed transfer-edge set, while 48
+preserve the complete excitation sequence. Queries with a changed sequence are
+1.043× prepared time in aggregate, compared with 1.054× for queries whose
+sequence is identical, so the overall difference is dominated by physical
+instant-sampling work rather than a workload-level plan regression.
+
+The prepared total is the same measurement reported in the main benchmark
+table. A separate historical experiment covers eight workloads with explicit
+OS-warm and cold-SSD residency gates. It starts a fresh DuckDB process and does
+not run a query warmup, so its absolute times are intentionally kept in its
+[full methodology and validation](experiments/2026-08-prepared-instant-full-benchmark/README.md)
+rather than mixed with the query-warm results above. Its
+[per-query results](experiments/2026-08-prepared-instant-full-benchmark/results/final/QUERY_RESULTS.csv)
+and all 42,306 [individual run records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv)
+remain available.
 
 ### Running the benchmarks
 
-The commands below use the same native benchmark-runner procedure as the main
-Bloom-versus-baseline table: one same-process warmup followed by timed runs.
-They do not reproduce the fresh-process prepared/instant table. First build the
+The commands below use the same native benchmark-runner procedure as both
+tables above: one same-process warmup followed by timed runs. First build the
 runner with the TPC-H and TPC-DS data generators:
 
 ```bash
@@ -134,6 +126,13 @@ python3 scripts/run_benchmark_suite.py --workload imdb --threads 1
 python3 scripts/run_benchmark_suite.py --workload ceb_imdb --threads 1
 python3 scripts/run_benchmark_suite.py --workload tpch_sf10 --threads 1
 python3 scripts/run_benchmark_suite.py --workload tpcds_sf10 --threads 1
+```
+
+Compare prepared and instant sampling with the identical procedure:
+
+```bash
+python3 scripts/run_benchmark_suite.py \
+  --workload imdb --threads 1 --comparison sampling
 ```
 
 Results and raw timings are written under `benchmark_results/`. For a quick
@@ -189,7 +188,8 @@ SET rpt_instant_access = 'block';
 ```
 
 Parquet instant sampling automatically uses stratified row groups and supports
-one file per table. Advanced sample-size and access-shape budgets are exposed
-under the `rpt_instant_*` settings for reproducible experiments. Task fan-out is an
-internal bounded implementation detail and does not modify DuckDB's
-`async_threads` setting.
+one file per table. `rpt_sample_size` controls prepared reservoirs and the
+target row count for block and Parquet instant sampling. Scattered sampling has
+an explicit physical shape: `rpt_instant_access_points` multiplied by
+`rpt_instant_rows_per_access`. Task fan-out is an internal bounded
+implementation detail and does not modify DuckDB's `async_threads` setting.

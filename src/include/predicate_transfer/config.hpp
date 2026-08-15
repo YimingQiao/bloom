@@ -18,7 +18,8 @@ enum class RPTInstantAccessMode : uint8_t {
 struct RPTSamplingConfig {
 	//! Sampling fraction for already-materialized intermediate relations.
 	double intermediate_rate = 0.01;
-	//! Statistical sample budget per base table.
+	//! Target rows for prepared, block, and Parquet samples. Scattered instant
+	//! sampling uses its explicit access-point shape below.
 	idx_t target_rows = 10000;
 	//! Prepared samples are the stable default. Instant sampling is explicitly
 	//! selected when sample maintenance is undesirable.
