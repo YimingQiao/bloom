@@ -6,7 +6,7 @@
 
 #include "predicate_transfer/config.hpp"
 #include "predicate_transfer/filter/filter.hpp"
-#include "predicate_transfer/table_scanner.hpp"
+#include "predicate_transfer/table_scanner/table_scanner.hpp"
 #include "transfer_types.hpp"
 
 namespace duckdb {
@@ -32,8 +32,7 @@ public:
 	//! Register + materialize, pruning to `required`. Idempotent. Callers
 	//! must attach cascade filters via AttachFilterToScanner *before*
 	//! calling this so they can be pushed into the underlying Get.
-	TableScanner *EnsureMaterialized(LogicalOperator &op,
-	                                 const unordered_set<ColumnBinding, ColumnBindingHashFunc> &required);
+	TableScanner *EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required);
 
 	//! Registered AND materialized. Use this over Has() when the caller
 	//! needs actual in-memory data.

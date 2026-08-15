@@ -94,9 +94,7 @@ bool TransferExecutor::IsMaterialized(LogicalOperator &op) const {
 	return s && s->IsMaterialized();
 }
 
-TableScanner *
-TransferExecutor::EnsureMaterialized(LogicalOperator &op,
-                                     const unordered_set<ColumnBinding, ColumnBindingHashFunc> &required) {
+TableScanner *TransferExecutor::EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required) {
 	auto *scanner = Register(op);
 	if (scanner->IsMaterialized()) {
 		return scanner;
@@ -195,7 +193,6 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			    make_shared_ptr<ActiveBloomFilter>(context_, BloomFilterConfig(), static_cast<uint32_t>(total_rows));
 		}
 	}
-
 	vector<DuckDBPrefixRangeFilterAdapter *> prefix_filters(specs.size(), nullptr);
 	vector<vector<unique_ptr<PrefixRangeFilter::BuildState>>> local_prefix_states(specs.size());
 	vector<bool> shared_prefix_lanes(specs.size(), false);

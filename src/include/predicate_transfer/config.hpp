@@ -1,8 +1,51 @@
 #pragma once
 
+#include "duckdb/common/common.hpp"
+
 #include <string>
 
 namespace duckdb {
+
+enum class RPTSamplingMode : uint8_t { PREPARED, INSTANT };
+
+enum class RPTInstantAccessMode : uint8_t {
+	//! Many small, stratified reads. Best when the base table is already resident.
+	SCATTERED,
+	//! A few block-aligned windows with explicit prefetch. Best for cold storage.
+	BLOCK
+};
+
+struct RPTSamplingConfig {
+	//! Sampling fraction for already-materialized intermediate relations.
+	double intermediate_rate = 0.01;
+	//! Statistical sample budget per base table.
+	idx_t target_rows = 10000;
+	//! Prepared samples are the stable default. Instant sampling is explicitly
+	//! selected when sample maintenance is undesirable.
+	RPTSamplingMode mode = RPTSamplingMode::PREPARED;
+
+	//! Prepared-sample persistence. "auto" stores the cache beside the database.
+	std::string prepared_cache_dir = "auto";
+	//! Keep prepared samples in DuckDB's ObjectCache after loading them.
+	bool prepared_memory_cache = true;
+
+	//! Physical access policy used by instant sampling for native DuckDB storage.
+	RPTInstantAccessMode instant_access = RPTInstantAccessMode::SCATTERED;
+	//! Read the active transaction snapshot instead of narrow base-column ranges.
+	//! Direct reads deliberately ignore update/delete overlays and transaction-local
+	//! rows because samples guide only optimization; formal execution still uses MVCC.
+	bool instant_snapshot = false;
+	//! The scattered policy reads 256 stratified points x 32 contiguous rows.
+	idx_t instant_access_points = 256;
+	idx_t instant_rows_per_access = 32;
+	//! The block policy reads a small number of aligned windows and samples rows
+	//! inside each window after I/O. Parquet is always sampled by row group.
+	idx_t instant_block_windows = 16;
+	idx_t instant_parquet_row_groups = 8;
+	//! Reproducible seed mixed with stable table identity. Seed 2 is the
+	//! cross-workload-validated release configuration.
+	idx_t seed = 2;
+};
 
 class RPTOptimizerConfig {
 public:
@@ -49,20 +92,7 @@ public:
 	//! lifted CTE) share a single built BF instead of each rebuilding it.
 	bool enable_filter_cache = true;
 
-	//! Sampling rate for adaptive excitation (default 1%) — used for CDC chunk sampling
-	double sample_rate = 0.01;
-	//! Target row count for the per-table raw-data sample (disk tables).
-	idx_t sample_materialization_size = 10000;
-	//! Directory for the on-disk per-table sample cache. Samples are keyed by
-	//! database path, table identity, schema fingerprint, row count, method, and
-	//! N, then reused across queries/runs so the (potentially full-table)
-	//! generation cost is paid only once. Empty string disables disk persistence
-	//! (samples are then rebuilt per query).
-	std::string sample_cache_dir = "auto";
-	//! Also keep loaded/generated samples in the DatabaseInstance ObjectCache
-	//! (LRU, buffer-pool accounted) so later optimizations in the same process
-	//! skip the per-PREPARE disk deserialization entirely.
-	bool sample_memory_cache = true;
+	RPTSamplingConfig sampling;
 	//! Log transfer-plan generation to stderr: initial cardinalities, each
 	//! flooding round (source pick, estimates, filter-cache hits) and the final
 	//! ExcitationTimeline. Works for both the oracle and the sampling estimator

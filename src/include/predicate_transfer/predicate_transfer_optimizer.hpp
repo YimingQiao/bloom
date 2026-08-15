@@ -1,7 +1,7 @@
 #pragma once
 
 #include "predicate_transfer/transfer_plan/base_graph_manager.hpp"
-#include "predicate_transfer/transfer_plan/excitation_graph_manager.hpp"
+#include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/config.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 

@@ -1,13 +1,14 @@
 #pragma once
 
-#include "base_graph_manager.hpp"
+#include "predicate_transfer/transfer_plan/base_graph_manager.hpp"
 #include "predicate_transfer/cardinality_estimation/cardinality_estimator.hpp"
-#include "predicate_transfer/table_scanner.hpp"
+#include "predicate_transfer/table_scanner/table_scanner.hpp"
+#include "predicate_transfer/transfer_plan/excitation_graph/working_set.hpp"
 #include "predicate_transfer/transfer_plan/rpt_filter_cache.hpp"
-#include "predicate_transfer/transfer_plan/lineage_tracker.hpp"
 #include "predicate_transfer/transfer_plan/transfer_executor.hpp"
 
 #include <functional>
+#include <sstream>
 #include <unordered_map>
 #include <string>
 
@@ -49,12 +50,12 @@ protected:
 	void ExecuteTransfer() override;
 
 private:
+	static void AppendEdgeSignature(std::stringstream &canonical, idx_t source_id, const GraphEdge &edge);
 	void InitEstimator();
 
 	// Phase 1: flooding
 	void InitializeWorkingSet();
 	void PruneRedundantSteps(vector<TransferStep> &steps);
-	idx_t SelectSmallestActiveTable() const;
 	idx_t ComputeBaseTableRows(const LogicalOperator &op) const;
 
 	// Edge construction
@@ -78,29 +79,7 @@ private:
 		LineageTracker::Snapshot lineage; // for subsumption + oracle cache key
 	};
 
-	//! Flooding state — rebuilt per ExecuteTransfer() by InitializeWorkingSet.
-	struct FloodingState {
-		unordered_map<idx_t, double> cardinality;
-		unordered_map<idx_t, double> cardinality_baseline;
-		LineageTracker lineage_tracker;
-		unordered_set<idx_t> active_nodes;
-		unordered_map<idx_t, vector<idx_t>> dependencies;
-		idx_t next_step_id = 0;
-		//! dest_id → src_id → edges pointing TO dest_id. O(neighbors) incoming lookup.
-		unordered_map<idx_t, unordered_map<idx_t, vector<const EdgeInfo *>>> reverse_neighbor_matrix;
-
-		void Reset() {
-			cardinality.clear();
-			cardinality_baseline.clear();
-			lineage_tracker.Clear();
-			active_nodes.clear();
-			dependencies.clear();
-			reverse_neighbor_matrix.clear();
-			next_step_id = 0;
-		}
-	};
-
-	FloodingState state_;
+	ExcitationWorkingSet state_;
 	unordered_set<idx_t> protected_tables_; // survives Reset (external config)
 
 	unique_ptr<RPTCardinalityEstimator> estimator_;
@@ -111,6 +90,12 @@ private:
 	unordered_map<idx_t, shared_ptr<RPTFilter>> row_id_filters_;
 	unordered_map<idx_t, vector<DirectFilterInfo>> direct_filters_;
 	RPTFilterCache filter_cache_;
+	//! Every excitation round before final-plan pruning. This distinguishes
+	//! identical final edge sets that were reached through different (and
+	//! potentially much more expensive) materialization schedules.
+	string execution_history_;
+	idx_t execution_action_count_ = 0;
+	idx_t execution_round_count_ = 0;
 };
 
 } // namespace duckdb

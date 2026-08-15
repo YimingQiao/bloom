@@ -29,32 +29,28 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 	}
 
 	auto &client_data = ClientData::Get(context);
-	auto saved_profiler = client_data.profiler;
+	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context);
-
 	Executor executor(context);
 	auto collector = PhysicalResultCollector::GetResultCollector(context, data);
 	executor.Initialize(std::move(collector));
 
-	shared_ptr<ColumnDataCollection> result_cdc;
-	try {
-		while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
-		}
-
-		auto result = executor.GetResult();
-		// Drain the scheduler tasks before this stack Executor dies; see ExecutePlan.
-		executor.CancelTasks();
-		auto &mat_result = result->Cast<MaterializedQueryResult>();
-		result_cdc = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
-		if (!result_cdc) {
-			result_cdc = make_shared_ptr<ColumnDataCollection>(context, col_types);
-		}
-	} catch (...) {
-		client_data.profiler = std::move(saved_profiler);
-		throw;
+	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
 	}
 
-	client_data.profiler = std::move(saved_profiler);
+	auto result = executor.GetResult();
+	D_ASSERT(result);
+	executor.CancelTasks();
+	if (result->HasError()) {
+		client_data.profiler = std::move(previous_profiler);
+		result->ThrowError();
+	}
+	auto &mat_result = result->Cast<MaterializedQueryResult>();
+	auto result_cdc = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
+	if (!result_cdc) {
+		result_cdc = make_shared_ptr<ColumnDataCollection>(context, col_types);
+	}
+	client_data.profiler = std::move(previous_profiler);
 	return result_cdc;
 }
 

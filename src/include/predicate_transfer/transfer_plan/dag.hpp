@@ -43,6 +43,9 @@ public:
 	vector<ColumnBinding> dest_columns;
 	vector<LogicalType> return_types;
 	vector<shared_ptr<FilterPlan>> filter_plan;
+	//! Concrete filter selected when this edge is activated. Kept for
+	//! reproducible transfer-plan diagnostics; it does not affect execution.
+	string filter_type;
 };
 
 //! A directed graph with explicit node set and edge list.

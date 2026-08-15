@@ -12,20 +12,33 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include_directories(src/include)
 
+set(INSTANT_SAMPLER_SOURCES
+    src/predicate_transfer/cardinality_estimation/instant_sampler/common.cpp
+    src/predicate_transfer/cardinality_estimation/instant_sampler/native.cpp
+    src/predicate_transfer/cardinality_estimation/instant_sampler/parquet.cpp)
+
 set(EXTENSION_SOURCES
     src/bloom_extension.cpp
     src/predicate_transfer/cardinality_estimation/cardinality_estimator.cpp
-    src/predicate_transfer/cardinality_estimation/sampling_estimator.cpp
+    ${INSTANT_SAMPLER_SOURCES}
+    src/predicate_transfer/cardinality_estimation/prepared_sampler.cpp
+    src/predicate_transfer/cardinality_estimation/sampling_estimator/sampling_estimator.cpp
+    src/predicate_transfer/cardinality_estimation/sampling_estimator/table_sample_manager.cpp
     src/predicate_transfer/filter/bitmap_filter.cpp
     src/predicate_transfer/filter/bloom_filter.cpp
     src/predicate_transfer/filter/table_filter.cpp
     src/predicate_transfer/materialized_cte_lifter.cpp
     src/predicate_transfer/predicate_transfer_optimizer.cpp
     src/predicate_transfer/table_operator_manager.cpp
-    src/predicate_transfer/table_scanner.cpp
+    src/predicate_transfer/table_scanner/filter_set.cpp
+    src/predicate_transfer/table_scanner/materialize.cpp
+    src/predicate_transfer/table_scanner/table_scanner.cpp
     src/predicate_transfer/transfer_plan/base_graph_manager.cpp
     src/predicate_transfer/transfer_plan/dag.cpp
-    src/predicate_transfer/transfer_plan/excitation_graph_manager.cpp
+    src/predicate_transfer/transfer_plan/excitation_graph/flooding.cpp
+    src/predicate_transfer/transfer_plan/excitation_graph/format.cpp
+    src/predicate_transfer/transfer_plan/excitation_graph/materialize.cpp
+    src/predicate_transfer/transfer_plan/excitation_graph/working_set.cpp
     src/predicate_transfer/transfer_plan/lineage_tracker.cpp
     src/predicate_transfer/transfer_plan/rpt_filter_cache.cpp
     src/predicate_transfer/transfer_plan/transfer_executor.cpp)

@@ -1,7 +1,7 @@
 #pragma once
 
 #include "predicate_transfer/filter/filter.hpp"
-#include "predicate_transfer/table_scanner.hpp"
+#include "predicate_transfer/table_scanner/table_scanner.hpp"
 
 #include <unordered_set>
 

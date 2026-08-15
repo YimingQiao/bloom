@@ -1,84 +1,35 @@
-#include "predicate_transfer/table_scanner.hpp"
+#include "predicate_transfer/table_scanner/materialization.hpp"
+#include "predicate_transfer/table_scanner/filter_set.hpp"
 
-#include <chrono>
-#include <iostream>
-#include "predicate_transfer/filter/table_filter.hpp"
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/operator/helper/physical_result_collector.hpp"
-#include "duckdb/execution/operator/aggregate/ungrouped_aggregate_state.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
-#include "duckdb/function/aggregate/distributive_function_utils.hpp"
-#include "duckdb/function/function_binder.hpp"
+#include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/expression_heuristics.hpp"
-#include "duckdb/planner/expression/bound_reference_expression.hpp"
-#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
-#include "duckdb/planner/operator/logical_column_data_get.hpp"
-#include "duckdb/planner/operator/logical_filter.hpp"
-#include "duckdb/planner/operator/logical_get.hpp"
-#include "duckdb/planner/operator/logical_comparison_join.hpp"
-#include "duckdb/planner/operator/logical_projection.hpp"
-
-#include "duckdb/main/client_config.hpp"
+#include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
+#include "duckdb/planner/expression/bound_conjunction_expression.hpp"
+#include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
-#include "duckdb/optimizer/remove_unused_columns.hpp"
-#include "duckdb/parallel/task_executor.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/planner/operator/logical_column_data_get.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
+
+#include <chrono>
+#include <cstdio>
+#include <functional>
+#include <iostream>
 
 namespace duckdb {
-namespace {
-
-class ParallelCompactScanTask : public BaseExecutorTask {
-public:
-	using ScanFunction = std::function<void(idx_t, DataChunk &)>;
-
-	ParallelCompactScanTask(TaskExecutor &executor, const ColumnDataCollection &collection,
-	                        ColumnDataParallelScanState &scan_state, idx_t task_id, ScanFunction &function)
-	    : BaseExecutorTask(executor), collection(collection), scan_state(scan_state), task_id(task_id),
-	      function(function) {
-	}
-
-	void ExecuteTask() override {
-		ColumnDataLocalScanState local_state;
-		DataChunk chunk;
-		collection.InitializeScanChunk(chunk);
-		while (collection.Scan(scan_state, local_state, chunk)) {
-			if (chunk.size() > 0) {
-				function(task_id, chunk);
-			}
-		}
-	}
-
-	string TaskType() const override {
-		return "RPTParallelCompactScan";
-	}
-
-private:
-	const ColumnDataCollection &collection;
-	ColumnDataParallelScanState &scan_state;
-	idx_t task_id;
-	ScanFunction &function;
-};
-
-static void ParallelCompactScan(ClientContext &context, const ColumnDataCollection &collection, idx_t task_count,
-                                ParallelCompactScanTask::ScanFunction function) {
-	ColumnDataParallelScanState scan_state;
-	collection.InitializeScan(scan_state);
-	TaskExecutor executor(context);
-	for (idx_t task_id = 0; task_id < task_count; task_id++) {
-		executor.ScheduleTask(make_uniq<ParallelCompactScanTask>(executor, collection, scan_state, task_id, function));
-	}
-	executor.WorkOnTasks();
-}
-
-} // namespace
 
 using MaterializeClock = std::chrono::steady_clock;
 
@@ -86,13 +37,7 @@ static double MaterializeElapsedMs(MaterializeClock::time_point begin, Materiali
 	return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
-idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
-	static constexpr idx_t CHUNKS_PER_TASK = 8;
-	auto tasks = MaxValue<idx_t>(collection.ChunkCount() / CHUNKS_PER_TASK, 1);
-	return MinValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), tasks);
-}
-
-bool TableScanner::RptLogEnabled() const {
+bool TableMaterialization::LogEnabled() const {
 	if (ClientConfig::GetConfig(context_).enable_profiler) {
 		return true;
 	}
@@ -104,8 +49,8 @@ bool TableScanner::RptLogEnabled() const {
 // Construction
 //===--------------------------------------------------------------------===//
 
-TableScanner::TableScanner(Optimizer &optimizer, ClientContext &context, LogicalOperator &table_op,
-                           bool enable_late_materialization)
+TableMaterialization::TableMaterialization(Optimizer &optimizer, ClientContext &context, LogicalOperator &table_op,
+                                           bool enable_late_materialization)
     : optimizer_(optimizer), context_(context), table_op_(table_op),
       enable_late_materialization_(enable_late_materialization) {
 	// Step 1: walk down any FILTER chain to find the leaf.
@@ -196,7 +141,7 @@ TableScanner::TableScanner(Optimizer &optimizer, ClientContext &context, Logical
 		}
 	}
 
-	pending_expr_filter_ = make_uniq<PendingExprFilter>();
+	pending_expression_ = make_uniq<PendingExpression>();
 	if (!rewritten.empty()) {
 		unique_ptr<Expression> final_expr;
 		if (rewritten.size() == 1) {
@@ -208,27 +153,14 @@ TableScanner::TableScanner(Optimizer &optimizer, ClientContext &context, Logical
 			}
 			final_expr = std::move(conj);
 		}
-		pending_expr_filter_->executor = make_uniq<ExpressionExecutor>(context_);
-		pending_expr_filter_->executor->AddExpression(*final_expr);
-		pending_expr_filter_->exprs_holder.push_back(std::move(final_expr));
+		pending_expression_->executor = make_uniq<ExpressionExecutor>(context_);
+		pending_expression_->executor->AddExpression(*final_expr);
+		pending_expression_->expressions.push_back(std::move(final_expr));
 	}
 	if (needs_projection) {
-		pending_expr_filter_->projection_map = std::move(current_positions);
+		pending_expression_->projection_map = std::move(current_positions);
 	}
-	pending_expr_filter_->scratch.Initialize(Allocator::DefaultAllocator(), data_->Types());
-}
-
-//===--------------------------------------------------------------------===//
-// FindChunkCol — resolve ColumnBinding to chunk position via output_bindings_
-//===--------------------------------------------------------------------===//
-
-idx_t TableScanner::FindChunkCol(const ColumnBinding &binding) const {
-	for (idx_t i = 0; i < output_bindings_.size(); i++) {
-		if (output_bindings_[i] == binding) {
-			return i;
-		}
-	}
-	return DConstants::INVALID_INDEX;
+	pending_expression_->scratch.Initialize(Allocator::DefaultAllocator(), data_->Types());
 }
 
 //===--------------------------------------------------------------------===//
@@ -236,9 +168,9 @@ idx_t TableScanner::FindChunkCol(const ColumnBinding &binding) const {
 //===--------------------------------------------------------------------===//
 
 //! Helper: execute a plan via Executor and store the result in data_.
-bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
+bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto total_start = MaterializeClock::now();
-	auto log_timing = RptLogEnabled();
+	auto log_timing = LogEnabled();
 	auto col_types = plan_copy->types;
 	if (col_types.empty()) {
 		return false;
@@ -262,13 +194,8 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto statement_end = MaterializeClock::now();
 
 	auto &client_data = ClientData::Get(context_);
-	auto saved_profiler = client_data.profiler;
+	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context_);
-	auto log_operator_profile = log_timing && getenv("RPT_LOG_MATERIALIZE_PROFILE");
-	if (log_operator_profile) {
-		client_data.profiler->StartQuery("RPT materialize");
-	}
-
 	Executor executor(context_);
 	auto collector = PhysicalResultCollector::GetResultCollector(context_, stmt_data);
 	executor.Initialize(std::move(collector));
@@ -280,11 +207,11 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 
 	auto result = executor.GetResult();
 	D_ASSERT(result);
-	D_ASSERT(!result->HasError());
-	// EXECUTION_FINISHED does not mean the scheduler threads have released their
-	// tasks yet, and ~ExecutorTask decrements a counter inside this Executor.
-	// ~Executor only asserts, so drain here like ClientContext does.
 	executor.CancelTasks();
+	if (result->HasError()) {
+		client_data.profiler = std::move(previous_profiler);
+		result->ThrowError();
+	}
 	auto get_result_end = MaterializeClock::now();
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	data_ = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
@@ -292,20 +219,8 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 		data_ = shared_ptr<ColumnDataCollection>(make_uniq<ColumnDataCollection>(context_, mat_result.types).release());
 	}
 	auto take_collection_end = MaterializeClock::now();
-	if (log_operator_profile) {
-		client_data.profiler->EndQuery();
-		std::cerr << "      [MaterializeOperatorProfileBegin]\n"
-		          << client_data.profiler->QueryTreeToString() << "      [MaterializeOperatorProfileEnd]\n";
-	}
-
-	client_data.profiler = std::move(saved_profiler);
+	client_data.profiler = std::move(previous_profiler);
 	auto cleanup_end = MaterializeClock::now();
-
-	if (getenv("RPT_DEBUG_MAT")) {
-		fprintf(stderr, "[MatDebug] rows=%llu cols=%llu pending_expr_filter=%d filters=%llu\n",
-		        (unsigned long long)data_->Count(), (unsigned long long)data_->Types().size(),
-		        pending_expr_filter_ ? 1 : 0, (unsigned long long)filters_.size());
-	}
 
 	materialized_ = true;
 	data_->InitializeScan(scan_state_);
@@ -332,7 +247,7 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 // Three-step pipeline applied to every table operator subtree:
 //   1. Filter pushdown — DFS the subtree, push each pending BF/Bitmap filter
 //      into the matching LogicalGet's table_filters (matching by table_index).
-//      Pushed filters are removed from filters_; un-pushed ones (e.g. on
+//      Pushed filters are removed from the set; un-pushed ones (e.g. on
 //      grouped-AGG output, on CHUNK_GET, on virtual columns) stay and will
 //      be applied in-memory by Scan() / Compact() after execution.
 //   2. Late materialization — only when the leaf is a single LogicalGet:
@@ -341,8 +256,6 @@ bool TableScanner::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 //   3. Execute — run the (possibly modified) subtree via Executor, store
 //      the result in data_, then resolve chunk_col for any remaining
 //      in-memory filters.
-
-static void CollectGetsByTableIndex(LogicalOperator &op, unordered_map<idx_t, LogicalGet *> &out);
 
 static void LogResidualFilters(LogicalOperator &op, const char *phase) {
 	if (op.type == LogicalOperatorType::LOGICAL_FILTER) {
@@ -356,12 +269,22 @@ static void LogResidualFilters(LogicalOperator &op, const char *phase) {
 	}
 }
 
+static void CollectMaterializeGets(LogicalOperator &op, unordered_map<idx_t, LogicalGet *> &result) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		result.emplace(get.table_index.index, &get);
+	}
+	for (auto &child : op.children) {
+		CollectMaterializeGets(*child, result);
+	}
+}
+
 //! Log which storage columns each GET in the materialize subtree reads and the
 //! exact filters attached to each column. Logging both before and after RPT
 //! injection separates DuckDB's local predicates from transfer filters.
 static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 	unordered_map<idx_t, LogicalGet *> gets;
-	CollectGetsByTableIndex(plan, gets);
+	CollectMaterializeGets(plan, gets);
 	for (auto &entry : gets) {
 		auto &get = *entry.second;
 		auto table = get.GetTable();
@@ -410,9 +333,9 @@ static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 	LogResidualFilters(plan, phase);
 }
 
-void TableScanner::Materialize() {
+void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	auto total_start = MaterializeClock::now();
-	auto log_timing = RptLogEnabled();
+	auto log_timing = LogEnabled();
 	// Already-materialized CHUNK_GET leaves are set up in the constructor;
 	// nothing to do here.
 	if (materialized_) {
@@ -428,9 +351,9 @@ void TableScanner::Materialize() {
 
 	// Step 1: Push BF/Bitmap filters into any LogicalGet in the subtree whose
 	// table_index matches a filter binding. Removes pushed entries from
-	// filters_; remaining entries stay and will be applied in-memory by
+	// the filter set; remaining entries stay and will be applied in-memory by
 	// Scan() / Compact() after execution.
-	InjectTableFilters(*plan_copy);
+	filters.Pushdown(*plan_copy);
 	auto inject_end = MaterializeClock::now();
 
 	// Step 2: Late materialization — only applies when the table operator
@@ -494,7 +417,7 @@ void TableScanner::Materialize() {
 				cur = cur->children[0].get();
 			}
 
-			if (RptLogEnabled()) {
+			if (LogEnabled()) {
 				fprintf(stderr, "  [LateMat] %s: pruned to %lu/%lu cols (+rowid)\n",
 				        late_mat_get->GetTable() ? late_mat_get->GetTable()->name.c_str() : "?", new_col_ids.size(),
 				        col_count_before);
@@ -512,7 +435,7 @@ void TableScanner::Materialize() {
 	// MemoryScan rewrite — mark pruned so GetTableResult takes DefaultScan.
 	if (late_mat_get && !is_pruned_ && output_bindings_ != pre_prune_bindings) {
 		is_pruned_ = true;
-		if (RptLogEnabled()) {
+		if (LogEnabled()) {
 			fprintf(stderr, "  [LateMat] %s: subtree narrowed via projection_map (%lu -> %lu bindings)\n",
 			        late_mat_get->GetTable() ? late_mat_get->GetTable()->name.c_str() : "?", pre_prune_bindings.size(),
 			        output_bindings_.size());
@@ -542,13 +465,8 @@ void TableScanner::Materialize() {
 	}
 	auto result_log_end = MaterializeClock::now();
 
-	// Resolve chunk_col for any filters that did NOT get pushed into a GET.
-	// They will be applied in-memory by Scan() / Compact().
-	for (auto &entry : filters_) {
-		for (idx_t i = 0; i < entry.bindings.size(); ++i) {
-			entry.chunk_cols[i] = FindChunkCol(entry.bindings[i]);
-		}
-	}
+	// Filters that could not be pushed into a GET remain in-memory.
+	filters.Resolve(output_bindings_);
 	auto resolve_filters_end = MaterializeClock::now();
 	if (log_timing) {
 		std::cerr << "      [MaterializePhaseTiming] copy=" << MaterializeElapsedMs(total_start, copy_end)
@@ -567,116 +485,35 @@ void TableScanner::Materialize() {
 // Column pruning
 //===--------------------------------------------------------------------===//
 
-void TableScanner::SetRequiredColumns(const unordered_set<ColumnBinding, ColumnBindingHashFunc> &bindings) {
+void TableMaterialization::SetRequiredColumns(const column_binding_set_t &bindings) {
 	required_bindings_ = bindings;
 }
 
 //===--------------------------------------------------------------------===//
-// Filter management
+// FindChunkCol — resolve ColumnBinding to chunk position via output_bindings_
 //===--------------------------------------------------------------------===//
 
-void TableScanner::AddFilter(ColumnBinding binding, shared_ptr<RPTFilter> filter, size_t identity_hash) {
-	AddFilter(vector<ColumnBinding> {binding}, std::move(filter), identity_hash);
-}
-
-void TableScanner::AddFilter(const vector<ColumnBinding> &bindings, shared_ptr<RPTFilter> filter,
-                             size_t identity_hash) {
-	FilterEntry entry;
-	entry.filter = std::move(filter);
-	entry.bindings = bindings;
-	entry.identity_hash = identity_hash;
-	entry.chunk_cols.reserve(bindings.size());
-	for (const auto &bind : entry.bindings) {
-		entry.chunk_cols.push_back(materialized_ ? FindChunkCol(bind) : DConstants::INVALID_INDEX);
-	}
-	filters_.push_back(std::move(entry));
-}
-
-size_t TableScanner::FilterStateFingerprint() const {
-	size_t fp = 0;
-	for (auto &entry : filters_) {
-		size_t h = entry.identity_hash;
-		for (auto &b : entry.bindings) {
-			h = h * 1315423911u + (std::hash<idx_t> {}(b.table_index.index) * 3 + std::hash<idx_t> {}(b.column_index));
+idx_t TableMaterialization::FindChunkCol(const ColumnBinding &binding) const {
+	for (idx_t i = 0; i < output_bindings_.size(); i++) {
+		if (output_bindings_[i] == binding) {
+			return i;
 		}
-		fp ^= h; // XOR: attach order must not matter across runs
 	}
-	return fp;
-}
-
-//===--------------------------------------------------------------------===//
-// InjectTableFilters — DFS the subtree, push filters into matching GETs
-//===--------------------------------------------------------------------===//
-//
-// For each pending filter in filters_, find the LogicalGet in the subtree
-// whose table_index matches the filter's binding and push the filter into
-// that GET's table_filters. Filters that match are removed from filters_;
-// filters that don't match (binding refers to a CHUNK_GET, a grouped-AGG
-// output, a virtual column, or has no GET in the subtree) stay in filters_
-// and will be applied in-memory by Scan() / Compact() after execution.
-
-static void CollectGetsByTableIndex(LogicalOperator &op, unordered_map<idx_t, LogicalGet *> &out) {
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		out.emplace(get.table_index.index, &get);
-	}
-	for (auto &child : op.children) {
-		CollectGetsByTableIndex(*child, out);
-	}
-}
-
-void TableScanner::InjectTableFilters(LogicalOperator &plan_copy) {
-	if (filters_.empty()) {
-		return;
-	}
-
-	unordered_map<idx_t, LogicalGet *> gets_by_table_index;
-	CollectGetsByTableIndex(plan_copy, gets_by_table_index);
-	if (gets_by_table_index.empty()) {
-		return;
-	}
-
-	auto pushed_end = std::remove_if(filters_.begin(), filters_.end(), [&](FilterEntry &entry) {
-		if (!entry.filter) {
-			return false;
-		}
-		// Composite-key filters cannot be pushed down as per-column TableFilters.
-		if (entry.bindings.size() != 1) {
-			return false;
-		}
-		auto &binding = entry.bindings.front();
-
-		auto get_it = gets_by_table_index.find(binding.table_index.index);
-		if (get_it == gets_by_table_index.end()) {
-			return false;
-		}
-		auto &get = *get_it->second;
-		auto &column_ids = get.GetMutableColumnIds();
-
-		idx_t pos = binding.column_index;
-		if (pos >= column_ids.size() || column_ids[pos].IsVirtualColumn()) {
-			return false;
-		}
-		auto col_id = column_ids[pos].GetPrimaryIndex();
-		auto key_type = (col_id < get.returned_types.size()) ? get.returned_types[col_id] : LogicalType::BIGINT;
-		get.table_filters.PushFilter(ProjectionIndex(pos), RPTTableFilter::MakeOptional(entry.filter, key_type));
-		return true;
-	});
-	filters_.erase(pushed_end, filters_.end());
+	return DConstants::INVALID_INDEX;
 }
 
 //===--------------------------------------------------------------------===//
 // InitScanChunk
 //===--------------------------------------------------------------------===//
 
-void TableScanner::InitScanChunk(DataChunk &chunk) const {
+void TableMaterialization::InitScanChunk(DataChunk &chunk) const {
 	if (!data_) {
 		return;
 	}
-	// When pending_expr_filter_ narrows via projection_map, the caller-visible
+	// When pending_expression_ narrows via projection_map, the caller-visible
 	// chunk schema is narrower than the raw CDC. Initialize to table_op_ types
 	// so FindChunkCol (which resolves against output_bindings_) stays correct.
-	if (pending_expr_filter_ && !pending_expr_filter_->projection_map.empty()) {
+	if (pending_expression_ && !pending_expression_->projection_map.empty()) {
 		chunk.Initialize(Allocator::DefaultAllocator(), table_op_.types);
 	} else {
 		data_->InitializeScanChunk(chunk);
@@ -687,7 +524,7 @@ void TableScanner::InitScanChunk(DataChunk &chunk) const {
 // Scan
 //===--------------------------------------------------------------------===//
 
-bool TableScanner::Scan(DataChunk &chunk) {
+bool TableMaterialization::Scan(DataChunk &chunk) {
 	if (!data_) {
 		return false;
 	}
@@ -695,10 +532,10 @@ bool TableScanner::Scan(DataChunk &chunk) {
 	while (true) {
 		chunk.Reset();
 
-		if (pending_expr_filter_) {
+		if (pending_expression_) {
 			// Scan into the wide scratch chunk, evaluate the composed filter
 			// expression, then project/reference into the caller's narrow chunk.
-			auto &pf = *pending_expr_filter_;
+			auto &pf = *pending_expression_;
 			pf.scratch.Reset();
 			if (!data_->Scan(scan_state_, pf.scratch) || pf.scratch.size() == 0) {
 				return false;
@@ -730,12 +567,7 @@ bool TableScanner::Scan(DataChunk &chunk) {
 			}
 		}
 
-		if (!filters_.empty()) {
-			ApplyFilters(chunk);
-		}
-		if (chunk.size() > 0) {
-			return true;
-		}
+		return true;
 	}
 }
 
@@ -743,258 +575,22 @@ bool TableScanner::Scan(DataChunk &chunk) {
 // ResetScan / Count
 //===--------------------------------------------------------------------===//
 
-void TableScanner::ResetScan() {
+void TableMaterialization::ResetScan() {
 	if (data_) {
 		data_->InitializeScan(scan_state_);
 	}
 }
 
-idx_t TableScanner::Count() const {
+idx_t TableMaterialization::Count() const {
 	return data_ ? data_->Count() : 0;
 }
 
-//===--------------------------------------------------------------------===//
-// ApplyFilters — BF filters on materialized data
-//===--------------------------------------------------------------------===//
-
-void TableScanner::ApplyFilters(DataChunk &chunk) {
-	if (chunk.size() == 0) {
-		return;
-	}
-	SelectionVector sel(STANDARD_VECTOR_SIZE);
-
-	for (auto &entry : filters_) {
-		if (chunk.size() == 0) {
-			break;
-		}
-		if (!entry.filter || entry.chunk_cols.empty()) {
-			continue;
-		}
-		const idx_t column_count = chunk.ColumnCount();
-		if (std::any_of(entry.chunk_cols.begin(), entry.chunk_cols.end(),
-		                [&](idx_t cc) { return cc >= column_count; })) {
-			continue;
-		}
-
-		size_t count = chunk.size();
-		entry.filter->Lookup(chunk, entry.chunk_cols, sel, count);
-
-		if (count < chunk.size()) {
-			chunk.Slice(sel, count);
-			chunk.Flatten();
-		}
-	}
-}
-
-//===--------------------------------------------------------------------===//
-// Compact — Evaluate deferred filters into a new flat collection
-//===--------------------------------------------------------------------===//
-
-TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &stats_requests) {
-	CompactResult result;
-	result.column_stats.resize(stats_requests.size());
-	if (!data_) {
-		return result;
-	}
-	if (filters_.empty() && !pending_expr_filter_ && stats_requests.empty()) {
-		result.row_count = Count();
-		return result;
-	}
-
+void TableMaterialization::ReplaceData(unique_ptr<ColumnDataCollection> data) {
+	D_ASSERT(data);
+	data_ = shared_ptr<ColumnDataCollection>(data.release());
+	pending_expression_.reset();
+	materialized_ = true;
 	ResetScan();
-	DataChunk chunk;
-	InitScanChunk(chunk);
-
-	vector<idx_t> collected_request_indices;
-	for (idx_t request_idx = 0; request_idx < stats_requests.size(); request_idx++) {
-		auto &request = stats_requests[request_idx];
-		if (request.chunk_col < chunk.ColumnCount() && request.type.IsIntegral() &&
-		    request.type != LogicalType::HUGEINT && request.type != LogicalType::UHUGEINT) {
-			collected_request_indices.push_back(request_idx);
-		}
-	}
-	bool collect_min_max = !collected_request_indices.empty();
-
-	vector<unique_ptr<Expression>> min_max_aggregates;
-	unique_ptr<GlobalUngroupedAggregateState> global_aggregate_state;
-	unique_ptr<LocalUngroupedAggregateState> local_aggregate_state;
-	if (collect_min_max) {
-		for (auto request_idx : collected_request_indices) {
-			for (auto &aggr : {MinFunction::GetFunction(), MaxFunction::GetFunction()}) {
-				FunctionBinder function_binder(context_);
-				vector<unique_ptr<Expression>> aggr_children;
-				aggr_children.push_back(make_uniq<BoundReferenceExpression>(stats_requests[request_idx].type,
-				                                                            stats_requests[request_idx].chunk_col));
-				auto aggr_expr = function_binder.BindAggregateFunction(aggr, std::move(aggr_children), nullptr,
-				                                                       AggregateType::NON_DISTINCT);
-				min_max_aggregates.push_back(std::move(aggr_expr));
-			}
-		}
-
-		global_aggregate_state =
-		    make_uniq<GlobalUngroupedAggregateState>(BufferAllocator::Get(context_), min_max_aggregates);
-		local_aggregate_state = make_uniq<LocalUngroupedAggregateState>(*global_aggregate_state);
-	}
-
-	unique_ptr<ColumnDataCollection> new_data;
-	if (!filters_.empty() || pending_expr_filter_) {
-		// New CDC matches the (possibly narrowed) chunk schema that Scan emits.
-		new_data = make_uniq<ColumnDataCollection>(context_, chunk.GetTypes());
-	}
-
-	auto task_count = RPTScanTaskCount(context_, *data_);
-	if (task_count <= 1) {
-		while (Scan(chunk)) {
-			if (collect_min_max) {
-				for (idx_t stats_idx = 0; stats_idx < collected_request_indices.size(); stats_idx++) {
-					auto chunk_col = stats_requests[collected_request_indices[stats_idx]].chunk_col;
-					local_aggregate_state->Sink(chunk, chunk_col, stats_idx * 2, chunk.size());
-					local_aggregate_state->Sink(chunk, chunk_col, stats_idx * 2 + 1, chunk.size());
-				}
-			}
-			if (new_data) {
-				// Append flattens the chunk natively, preserving only valid rows.
-				new_data->Append(chunk);
-			}
-		}
-	} else {
-		vector<unique_ptr<ExpressionExecutor>> local_expression_executors;
-		vector<unique_ptr<DataChunk>> local_projection_chunks;
-		if (pending_expr_filter_) {
-			local_expression_executors.reserve(task_count);
-			local_projection_chunks.reserve(task_count);
-			for (idx_t task_id = 0; task_id < task_count; task_id++) {
-				unique_ptr<ExpressionExecutor> executor;
-				if (!pending_expr_filter_->exprs_holder.empty()) {
-					executor = make_uniq<ExpressionExecutor>(context_, *pending_expr_filter_->exprs_holder.front());
-				}
-				local_expression_executors.push_back(std::move(executor));
-
-				unique_ptr<DataChunk> projection_chunk;
-				if (!pending_expr_filter_->projection_map.empty()) {
-					projection_chunk = make_uniq<DataChunk>();
-					projection_chunk->Initialize(Allocator::DefaultAllocator(), chunk.GetTypes());
-				}
-				local_projection_chunks.push_back(std::move(projection_chunk));
-			}
-		}
-
-		vector<unique_ptr<LocalUngroupedAggregateState>> local_aggregate_states;
-		if (collect_min_max) {
-			local_aggregate_state.reset();
-			local_aggregate_states.reserve(task_count);
-			for (idx_t task_id = 0; task_id < task_count; task_id++) {
-				local_aggregate_states.push_back(make_uniq<LocalUngroupedAggregateState>(*global_aggregate_state));
-			}
-		}
-
-		vector<unique_ptr<ColumnDataCollection>> local_collections;
-		if (new_data) {
-			new_data.reset();
-			local_collections.reserve(task_count);
-			for (idx_t task_id = 0; task_id < task_count; task_id++) {
-				local_collections.push_back(make_uniq<ColumnDataCollection>(context_, chunk.GetTypes()));
-			}
-		}
-
-		ParallelCompactScan(context_, *data_, task_count, [&](idx_t task_id, DataChunk &scan_chunk) {
-			DataChunk *filtered_chunk = &scan_chunk;
-			if (pending_expr_filter_) {
-				auto &pending = *pending_expr_filter_;
-				auto original_count = scan_chunk.size();
-				auto selected_count = original_count;
-				SelectionVector selected(STANDARD_VECTOR_SIZE);
-				if (local_expression_executors[task_id]) {
-					selected_count = local_expression_executors[task_id]->SelectExpression(scan_chunk, selected);
-				}
-				if (selected_count == 0) {
-					return;
-				}
-
-				if (!pending.projection_map.empty()) {
-					auto &projected = *local_projection_chunks[task_id];
-					projected.Reset();
-					projected.SetCardinalityUnsafe(selected_count);
-					for (idx_t col_idx = 0; col_idx < projected.ColumnCount(); col_idx++) {
-						auto source_idx = pending.projection_map[col_idx];
-						if (selected_count < original_count) {
-							projected.data[col_idx].Slice(scan_chunk.data[source_idx], selected, selected_count);
-						} else {
-							projected.data[col_idx].Reference(scan_chunk.data[source_idx]);
-						}
-					}
-					filtered_chunk = &projected;
-				} else if (selected_count < original_count) {
-					scan_chunk.Slice(selected, selected_count);
-					scan_chunk.Flatten();
-				}
-			}
-
-			if (!filters_.empty()) {
-				ApplyFilters(*filtered_chunk);
-			}
-			if (filtered_chunk->size() == 0) {
-				return;
-			}
-			if (collect_min_max) {
-				auto &aggregate_state = *local_aggregate_states[task_id];
-				for (idx_t stats_idx = 0; stats_idx < collected_request_indices.size(); stats_idx++) {
-					auto chunk_col = stats_requests[collected_request_indices[stats_idx]].chunk_col;
-					aggregate_state.Sink(*filtered_chunk, chunk_col, stats_idx * 2, filtered_chunk->size());
-					aggregate_state.Sink(*filtered_chunk, chunk_col, stats_idx * 2 + 1, filtered_chunk->size());
-				}
-			}
-			if (!local_collections.empty()) {
-				local_collections[task_id]->Append(*filtered_chunk);
-			}
-		});
-
-		for (auto &aggregate_state : local_aggregate_states) {
-			global_aggregate_state->Combine(*aggregate_state);
-		}
-		if (!local_collections.empty()) {
-			new_data = make_uniq<ColumnDataCollection>(context_, chunk.GetTypes());
-			for (auto &local_collection : local_collections) {
-				new_data->Combine(*local_collection);
-			}
-		}
-	}
-
-	if (collect_min_max) {
-		if (local_aggregate_state) {
-			global_aggregate_state->Combine(*local_aggregate_state);
-		}
-		vector<LogicalType> min_max_types;
-		for (auto &aggr_expr : min_max_aggregates) {
-			min_max_types.push_back(aggr_expr->GetReturnType());
-		}
-		DataChunk final_min_max;
-		final_min_max.Initialize(Allocator::DefaultAllocator(), min_max_types);
-		global_aggregate_state->Finalize(final_min_max);
-
-		for (idx_t stats_idx = 0; stats_idx < collected_request_indices.size(); stats_idx++) {
-			auto min_val = final_min_max.data[stats_idx * 2].GetValue(0);
-			auto max_val = final_min_max.data[stats_idx * 2 + 1].GetValue(0);
-			if (!min_val.IsNull() && !max_val.IsNull() && min_val.type().IsIntegral() &&
-			    max_val.type() == min_val.type()) {
-				auto &stats = result.column_stats[collected_request_indices[stats_idx]];
-				stats.has_min_max = true;
-				stats.observed_min = static_cast<int64_t>(IntegralValue::Get(min_val).lower);
-				stats.observed_max = static_cast<int64_t>(IntegralValue::Get(max_val).lower);
-			}
-		}
-	}
-
-	if (new_data) {
-		data_ = shared_ptr<ColumnDataCollection>(new_data.release());
-		filters_.clear();
-		// pending_expr_filter_ has been materialized into data_; drop it so
-		// subsequent Scan() sees the narrow schema directly.
-		pending_expr_filter_.reset();
-	}
-	result.row_count = Count();
-	ResetScan();
-	return result;
 }
 
 } // namespace duckdb

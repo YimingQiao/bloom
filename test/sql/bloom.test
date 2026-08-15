@@ -4,15 +4,185 @@
 
 require bloom
 
+require parquet
+
 query I
 SELECT current_setting('enable_rpt');
 ----
 true
 
+# Instant sampling admits the read-only Parquet scan function and uses exact
+# row-group metadata/file_row_number for bounded asynchronous tasks.
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_instant_parquet_row_groups = 4;
+
+statement ok
+SET threads = 8;
+
+statement ok
+COPY (
+    SELECT i AS id, i % 100 AS bucket, i * 2 AS payload
+    FROM range(200000) values_tbl(i)
+) TO '{TEST_DIR}/rpt_parquet_left.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 122880);
+
+statement ok
+COPY (
+    SELECT i AS id, i % 10 = 0 AS keep
+    FROM range(200000) values_tbl(i)
+) TO '{TEST_DIR}/rpt_parquet_right.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 122880);
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000
+
+# TaskExecutor must also drain queued Parquet work on the caller when DuckDB's
+# async pool has no background workers.
+statement ok
+SET async_threads = 0;
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000
+
+# A single work unit follows the same queued TaskExecutor path.
+statement ok
+SET rpt_instant_parquet_row_groups = 1;
+
+query II
+SELECT count(*), sum(l.id)
+FROM read_parquet('{TEST_DIR}/rpt_parquet_left.parquet') l
+JOIN read_parquet('{TEST_DIR}/rpt_parquet_right.parquet') r USING (id)
+WHERE l.bucket < 50 AND r.keep;
+----
+10000	999700000
+
+statement ok
+SET rpt_instant_parquet_row_groups = 4;
+
+statement ok
+SET async_threads = 4;
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET rpt_sample_mode = 'prepared';
+
+# Prepared sampling is reproducible and persistent-cache entries are isolated
+# by seed. Preloading a different seed must neither reuse nor build samples.
+statement ok
+SET rpt_sample_cache_dir = '{TEST_DIR}/prepared_seed_samples';
+
+statement ok
+SET rpt_sample_memory_cache = false;
+
+statement ok
+SET rpt_sample_size = 127;
+
+statement ok
+ATTACH '{TEST_DIR}/rpt_seed.db' AS rpt_seed_db;
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_a AS
+SELECT i::INTEGER id, (i * 3)::INTEGER payload FROM range(4096) t(i);
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_b AS
+SELECT i::INTEGER id, (i % 2 = 0) keep FROM range(4096) t(i);
+
+statement ok
+CREATE TABLE rpt_seed_db.rpt_seed_c AS
+SELECT i::INTEGER id FROM range(4096) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET rpt_sample_seed = 41;
+
+query I
+SELECT count(*)
+FROM rpt_seed_db.rpt_seed_a a
+JOIN rpt_seed_db.rpt_seed_b b USING (id)
+JOIN rpt_seed_db.rpt_seed_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2048
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
+----
+3
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+3
+
+statement ok
+SET rpt_sample_seed = 42;
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+query I
+SELECT count(*)
+FROM rpt_seed_db.rpt_seed_a a
+JOIN rpt_seed_db.rpt_seed_b b USING (id)
+JOIN rpt_seed_db.rpt_seed_c c USING (id)
+WHERE b.keep AND a.payload >= 0;
+----
+2048
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
+----
+6
+
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+3
+
+statement ok
+SET rpt_sample_seed = 2;
+
+statement ok
+SET rpt_sample_size = 10000;
+
+statement ok
+SET rpt_sample_memory_cache = true;
+
+statement ok
+SET rpt_sample_cache_dir = 'auto';
+
 query T
 SELECT current_setting('rpt_sample_cache_dir');
 ----
 auto
+
+query TTIIII
+SELECT current_setting('rpt_sample_mode'),
+       current_setting('rpt_instant_access'),
+	   current_setting('rpt_instant_snapshot'),
+       current_setting('rpt_instant_access_points'),
+	   current_setting('rpt_instant_rows_per_access'),
+	   current_setting('rpt_sample_seed');
+----
+prepared	scattered	false	256	32	2
 
 query III
 SELECT current_setting('rpt_sample_size'),
@@ -20,6 +190,40 @@ SELECT current_setting('rpt_sample_size'),
        current_setting('rpt_late_materialize');
 ----
 10000	true	false
+
+# The explicit prepared-sample preload is a no-op when no persistent sample
+# matches. It must never fall back to scanning or building a sample.
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+query II
+SELECT current_setting('rpt_instant_block_windows'),
+	   current_setting('rpt_instant_parquet_row_groups');
+----
+16	4
+
+# Reject settings that would otherwise create unbounded sample state.
+statement error
+SET rpt_sample_mode = 'unknown';
+----
+rpt_sample_mode must be 'prepared' or 'instant'
+
+statement error
+SET rpt_instant_access = 'unknown';
+----
+rpt_instant_access must be 'scattered' or 'block'
+
+statement error
+SET rpt_sample_size = 0;
+----
+rpt_sample_size must be between 1 and 1000000000
+
+statement error
+SET rpt_sample_rate = 1.5;
+----
+rpt_sample_rate must be finite and between 0 and 1
 
 statement ok
 CREATE TABLE rpt_build(id INTEGER, payload VARCHAR);
@@ -55,6 +259,10 @@ CREATE TABLE rpt_sparse_right AS
 SELECT i::INTEGER id, (i % 100 = 0) keep
 FROM range(10000) t(i);
 
+# Exercise persistent/compressed segments, not only in-memory append segments.
+statement ok
+CHECKPOINT;
+
 query IIII
 SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
 FROM rpt_sparse_left l
@@ -62,6 +270,75 @@ JOIN rpt_sparse_right r ON l.id = r.id
 WHERE r.keep AND l.middle_col >= 0;
 ----
 100	495000	1188	296
+
+# Exercise scattered instant sampling without making it the default mode.
+statement ok
+SET rpt_sample_cache_dir = '{TEST_DIR}/instant_samples';
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_sample_size = 1000;
+
+statement ok
+SET rpt_instant_access_points = 1;
+
+# Exercise splitting one logical access across multiple DuckDB vectors.
+statement ok
+SET rpt_instant_rows_per_access = 4096;
+
+# Native instant tasks must also make progress on the caller when the async
+# pool has no background workers.
+statement ok
+SET async_threads = 0;
+
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296
+
+# Instant sampling must not build a prepared sample as an implicit fallback.
+query I
+SELECT loaded_samples FROM rpt_preload_samples();
+----
+0
+
+statement ok
+SET rpt_instant_access = 'block';
+
+# Exercise the native block/prefetch path as well as the Parquet path above.
+query IIII
+SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep AND l.middle_col >= 0;
+----
+100	495000	1188	296
+
+statement ok
+SET async_threads = 4;
+
+statement ok
+SET rpt_sample_mode = 'prepared';
+
+statement ok
+SET rpt_sample_size = 10000;
+
+statement ok
+SET rpt_sample_cache_dir = 'auto';
+
+statement ok
+SET rpt_instant_access = 'scattered';
+
+statement ok
+SET rpt_instant_access_points = 256;
+
+statement ok
+SET rpt_instant_rows_per_access = 32;
 
 statement ok
 SET threads = 8;
@@ -255,3 +532,144 @@ query I
 SELECT current_setting('enable_rpt');
 ----
 true
+
+# Instant mode is deliberately narrow: unsupported table functions make Bloom
+# skip the plan instead of invoking an optimizer-time query or a prepared sample.
+statement ok
+SET rpt_sample_mode = 'instant';
+
+query I
+SELECT count(*)
+FROM range(100) l(i)
+JOIN range(100) r(i) USING (i);
+----
+100
+
+# Strict snapshot semantics are available explicitly. This path includes
+# updates and deletes layered over checkpointed column segments.
+statement ok
+SET rpt_instant_snapshot = true;
+
+statement ok
+CREATE TABLE rpt_snapshot_a AS
+SELECT i::INTEGER id, false AS keep FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_snapshot_b AS
+SELECT i::INTEGER id FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_snapshot_c AS
+SELECT i::INTEGER id FROM range(10000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+UPDATE rpt_snapshot_a SET keep = true WHERE id % 2 = 0;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+5000
+
+# Updates made by the active transaction must be visible to its own optimizer-
+# time sample without falling back to transaction-local append handling.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+UPDATE rpt_snapshot_a SET keep = true WHERE id = 1;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+5001
+
+statement ok
+ROLLBACK;
+
+statement ok
+DELETE FROM rpt_snapshot_a WHERE id % 4 = 0;
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+# Transaction-local appends are an explicit unsupported snapshot state. Bloom
+# must fall back to the logical estimate instead of mixing local and persistent
+# populations in one statistical sample.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO rpt_snapshot_a VALUES (10000, true);
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+statement ok
+ROLLBACK;
+
+statement ok
+SET rpt_instant_snapshot = false;
+
+# The default direct mode remains usable after updates and deletes. Its sample
+# deliberately stays on the base column segments and ignores every MVCC overlay;
+# the formal query below must still observe the current transaction correctly.
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2500
+
+# Direct sampling deliberately ignores transaction-local appends, while the
+# formal query still observes them through DuckDB's normal MVCC scan.
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO rpt_snapshot_a VALUES (10000, true);
+
+statement ok
+INSERT INTO rpt_snapshot_b VALUES (10000);
+
+statement ok
+INSERT INTO rpt_snapshot_c VALUES (10000);
+
+query I
+SELECT count(*)
+FROM rpt_snapshot_a a
+JOIN rpt_snapshot_b b USING (id)
+JOIN rpt_snapshot_c c USING (id)
+WHERE a.keep;
+----
+2501
+
+statement ok
+ROLLBACK;
+
+statement ok
+SET rpt_sample_mode = 'prepared';

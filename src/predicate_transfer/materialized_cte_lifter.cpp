@@ -250,9 +250,8 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	}
 
 	auto &client_data = ClientData::Get(context);
-	auto saved_profiler = client_data.profiler;
+	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context);
-
 	Executor executor(context);
 	auto collector = PhysicalResultCollector::GetResultCollector(context, stmt_data);
 	executor.Initialize(std::move(collector));
@@ -261,13 +260,15 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	}
 	auto result = executor.GetResult();
 	D_ASSERT(result);
-	D_ASSERT(!result->HasError());
-	// Drain the scheduler tasks before this stack Executor dies; see ExecutePlan.
 	executor.CancelTasks();
+	if (result->HasError()) {
+		client_data.profiler = std::move(previous_profiler);
+		result->ThrowError();
+	}
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	unique_ptr<ColumnDataCollection> result_data = mat_result.TakeCollection();
 
-	client_data.profiler = std::move(saved_profiler);
+	client_data.profiler = std::move(previous_profiler);
 	return result_data;
 }
 

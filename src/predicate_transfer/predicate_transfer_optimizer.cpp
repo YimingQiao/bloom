@@ -1,7 +1,7 @@
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
 #include "predicate_transfer/materialized_cte_lifter.hpp"
 #include "predicate_transfer/table_operator_manager.hpp"
-#include "predicate_transfer/transfer_plan/excitation_graph_manager.hpp"
+#include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/filter/table_filter.hpp"
 
 #include "duckdb/planner/operator/logical_get.hpp"
@@ -10,11 +10,13 @@
 #include "duckdb/planner/operator/logical_empty_result.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/main/client_config.hpp"
+#include "duckdb/main/config.hpp"
 
 namespace duckdb {
 
@@ -30,6 +32,21 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
+static bool IsReadOnlyParquetScan(const LogicalGet &get) {
+	auto function_name = get.function.GetName().GetIdentifierName();
+	if ((!StringUtil::CIEquals(function_name, "parquet_scan") &&
+	     !StringUtil::CIEquals(function_name, "read_parquet")) ||
+	    !get.function.get_partition_stats) {
+		return false;
+	}
+	for (auto &entry : get.virtual_columns) {
+		if (StringUtil::CIEquals(entry.second.name.GetIdentifierName(), "file_row_number")) {
+			return true;
+		}
+	}
+	return false;
+}
+
 //! RPT executes selected subtrees during optimization. Keep that execution
 //! away from plan nodes that cannot be evaluated as a self-contained snapshot:
 //! recursive scopes and non-catalog table functions. DML/trigger plans are
@@ -39,7 +56,7 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 //! This check deliberately runs before MaterializedCTELifter. Once lifting has
 //! started, an unsafe CTE definition may already have been copied or executed,
 //! so detecting it afterwards is too late.
-static const char *FindUnsupportedPlanFeature(const LogicalOperator &op) {
+static const char *FindUnsupportedPlanFeature(const LogicalOperator &op, bool allow_parquet) {
 	switch (op.type) {
 	case LogicalOperatorType::LOGICAL_INSERT:
 	case LogicalOperatorType::LOGICAL_DELETE:
@@ -50,8 +67,10 @@ static const char *FindUnsupportedPlanFeature(const LogicalOperator &op) {
 	case LogicalOperatorType::LOGICAL_GET:
 		// GetTable() is non-null for a catalog table scan. External and
 		// stateful table functions (read_csv, glob, replacement scans, etc.)
-		// are intentionally outside the initial safe domain.
-		if (!op.Cast<LogicalGet>().GetTable()) {
+		// remain outside the safe domain. Parquet is read-only and exposes exact
+		// row-group metadata plus file_row_number, so the storage-aware sampler
+		// can execute a bounded scan without admitting arbitrary table functions.
+		if (!op.Cast<LogicalGet>().GetTable() && !(allow_parquet && IsReadOnlyParquetScan(op.Cast<LogicalGet>()))) {
 			return "non_catalog_table_function";
 		}
 		break;
@@ -59,7 +78,7 @@ static const char *FindUnsupportedPlanFeature(const LogicalOperator &op) {
 		break;
 	}
 	for (auto &child : op.children) {
-		if (auto reason = FindUnsupportedPlanFeature(*child)) {
+		if (auto reason = FindUnsupportedPlanFeature(*child, allow_parquet)) {
 			return reason;
 		}
 	}
@@ -318,7 +337,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		return plan;
 	}
 
-	if (auto reason = FindUnsupportedPlanFeature(*plan)) {
+	if (auto reason = FindUnsupportedPlanFeature(*plan, config.sampling.mode == RPTSamplingMode::INSTANT)) {
 		if (config.log_transfer_steps) {
 			fprintf(stderr, "[RPT-Excitation] scope skipped: %s\n", reason);
 		}
@@ -460,20 +479,6 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 	}
 	const auto &output_bindings = scanner.GetOutputBindings();
 	auto rowid_chunk_col = scanner.GetRowIdChunkCol();
-
-	if (getenv("RPT_DEBUG_BINDINGS")) {
-		fprintf(stderr, "[MemScan] new_table=%llu wanted_bindings=[", (unsigned long long)table_index.index);
-		for (auto &b : wanted_bindings) {
-			fprintf(stderr, "(%llu,%llu) ", (unsigned long long)b.table_index.index,
-			        (unsigned long long)b.column_index);
-		}
-		fprintf(stderr, "] output_bindings=[");
-		for (auto &b : output_bindings) {
-			fprintf(stderr, "(%llu,%llu) ", (unsigned long long)b.table_index.index,
-			        (unsigned long long)b.column_index);
-		}
-		fprintf(stderr, "]\n");
-	}
 
 	// Build lookup: output_binding → chunk column index (excluding rowid)
 	unordered_map<ColumnBinding, idx_t, ColumnBindingHashFunc> binding_to_col;
