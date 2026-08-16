@@ -7,6 +7,7 @@
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/function/partition_stats.hpp"
 #include "duckdb/parallel/task_executor.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/parallel/thread_context.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_constant_expression.hpp"
@@ -23,8 +24,13 @@ namespace {
 
 using instant_sampler_internal::AllocateProportionalQuotas;
 using instant_sampler_internal::DirectStorageScanTiming;
-using instant_sampler_internal::INSTANT_PARQUET_TASK_LIMIT;
 using instant_sampler_internal::SelectStratifiedExactlyK;
+
+static idx_t ParquetTaskCount(ClientContext &context, idx_t work_units) {
+	D_ASSERT(work_units > 0);
+	auto async_threads = TaskScheduler::GetScheduler(context).NumberOfAsyncThreads();
+	return MinValue<idx_t>(work_units, MaxValue<idx_t>(async_threads, 1));
+}
 
 static optional_idx FindVirtualColumn(const LogicalGet &get, const string &name) {
 	for (auto &entry : get.virtual_columns) {
@@ -169,16 +175,21 @@ static bool LoadMultiFileParquetRowGroups(ClientContext &context, LogicalGet &ge
 	D_ASSERT(files.size() > 1);
 	file_row_groups.resize(files.size());
 	vector<uint8_t> valid_files(files.size(), 1);
-	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, files.size());
+	auto task_count = ParquetTaskCount(context, files.size());
 	D_ASSERT(task_count > 0);
 	ParquetMetadataLoadJob job {context, get.function, source_bind, files, file_row_groups, valid_files, task_count};
 
-	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
-	for (idx_t task_id = 0; task_id < task_count; task_id++) {
-		auto partition_bind = CreatePartitionStatsBind(source_bind);
-		executor.ScheduleTask(make_uniq<ParquetMetadataLoadTask>(executor, task_id, job, std::move(partition_bind)));
+	if (task_count == 1) {
+		LoadParquetMetadataSlice(0, job, CreatePartitionStatsBind(source_bind));
+	} else {
+		TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+		for (idx_t task_id = 0; task_id < task_count; task_id++) {
+			auto partition_bind = CreatePartitionStatsBind(source_bind);
+			executor.ScheduleTask(
+			    make_uniq<ParquetMetadataLoadTask>(executor, task_id, job, std::move(partition_bind)));
+		}
+		executor.WorkOnTasks();
 	}
-	executor.WorkOnTasks();
 	for (auto valid : valid_files) {
 		if (!valid) {
 			return false;
@@ -614,10 +625,10 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 	}
 
 	// Row-group initialization and positioning dominate tiny Parquet samples,
-	// so preserve one parallel work unit per selected group up to the global
-	// bound. When a caller selects more files than that bound, workers drain
-	// several isolated file domains instead of creating an executor per file.
-	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, plan.selected_row_groups);
+	// so preserve one parallel work unit per selected group up to the current
+	// async pool size. When more files are selected, workers drain several
+	// isolated file domains instead of creating an executor per file.
+	auto task_count = ParquetTaskCount(context, plan.selected_row_groups);
 	D_ASSERT(task_count > 0);
 	result.task_count = task_count;
 	vector<vector<shared_ptr<DirectParquetSampleSharedState>>> worker_states(task_count);

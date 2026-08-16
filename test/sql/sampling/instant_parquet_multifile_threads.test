@@ -43,7 +43,19 @@ statement ok
 SET threads = 8;
 
 statement ok
-SET async_threads = 8;
+SET async_threads = 2;
+
+query I
+SELECT count(*)
+FROM read_parquet('{TEST_DIR}/rpt_multi_threads/*/*.parquet') p
+JOIN rpt_multi_thread_ids ids USING (id)
+WHERE p.keep;
+----
+693
+
+# A larger pool lets all nine file/row-group work units run independently.
+statement ok
+SET async_threads = 16;
 
 query I
 SELECT count(*)

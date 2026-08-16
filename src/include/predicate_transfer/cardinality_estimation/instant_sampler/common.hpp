@@ -12,11 +12,10 @@ struct TransactionData;
 
 namespace instant_sampler_internal {
 
-// These provisional limits preserve the rollout values. They are engineering
-// guardrails, not benchmark-proven optima; revisit 8/8/4 with a dedicated
-// warm/cold fan-out sweep across work-unit counts and pool sizes.
+// These provisional native-storage limits preserve the rollout values. They
+// are engineering guardrails, not benchmark-proven optima; revisit 8/4 with a
+// dedicated warm/cold fan-out sweep across work-unit counts and pool sizes.
 static constexpr idx_t INSTANT_SCATTERED_TASK_LIMIT = 8;
-static constexpr idx_t INSTANT_PARQUET_TASK_LIMIT = 8;
 static constexpr idx_t INSTANT_BLOCK_TASK_LIMIT = 4;
 
 struct PhysicalRowGroupSpan {
