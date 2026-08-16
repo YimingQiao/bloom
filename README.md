@@ -78,26 +78,10 @@ Bloom sees its largest gains on the many-join CEB and JOB workloads. TPC-H and
 TPC-DS benefit less because DuckDB's built-in join filters already handle much
 of their filtering.
 
-### Prepared and instant sampling
-
-Prepared sampling is the default and reuses a maintained 10K-row reservoir.
-Instant sampling is an explicit option for deployments that prefer query-local
-sampling without maintaining that reservoir. With resident data, expect roughly
-5–20 ms of fixed overhead per query from the instant path.
-
-| Workload | Queries | Prepared | Instant | Total overhead |
-|---|---:|---:|---:|---:|
-| JOB (compressed) | 113 | 24.490 s | 25.621 s | 4.6% |
-
-Both totals use one discarded warmup per query and five timed runs. The broader
-[warm/cold experiment](experiments/2026-08-prepared-instant-full-benchmark/README.md)
-and its [raw records](experiments/2026-08-prepared-instant-full-benchmark/results/final/RUNS.csv)
-remain available separately.
-
 ### Running the benchmarks
 
-The commands below use the same native benchmark-runner procedure as both
-tables above: one same-process warmup followed by timed runs. First build the
+The commands below use the same native benchmark-runner procedure as the table
+above: one same-process warmup followed by timed runs. First build the
 runner with the TPC-H and TPC-DS data generators:
 
 ```bash
@@ -113,13 +97,6 @@ python3 scripts/run_benchmark_suite.py --workload tpch_sf10 --threads 1
 python3 scripts/run_benchmark_suite.py --workload tpcds_sf10 --threads 1
 ```
 
-Compare prepared and instant sampling with the identical procedure:
-
-```bash
-python3 scripts/run_benchmark_suite.py \
-  --workload imdb --threads 1 --comparison sampling
-```
-
 Results and raw timings are written under `benchmark_results/`. For a quick
 spot check, use the lower-level runner; `--baseline` disables Bloom and
 `--pattern` selects queries:
@@ -130,15 +107,13 @@ python3 scripts/run_benchmark.py --workload imdb --db /path/to/imdb.duckdb
 
 Databases and sample caches are kept under `.bench_cache/`. Pass `--db` to use
 an existing database. CEB SQL is downloaded and checksum-verified automatically.
-The prepared/instant matrix has its own cache-state gates and runner documented
-in [its experiment README](experiments/2026-08-prepared-instant-full-benchmark/README.md).
 
 ## Configuration
 
 Bloom works without tuning. Prepared sampling is the default: a 10K-row
-reservoir per table is persisted and reused across queries. Instant sampling
-reads a fresh, query-local sample directly from DuckDB storage or a single
-Parquet file and never creates or consumes a prepared sample.
+reservoir per table is persisted and reused across queries. Set
+`rpt_sample_mode` to `instant` to use a fresh, query-local sample from native
+DuckDB storage or a single Parquet file without using a prepared sample.
 
 The main settings are:
 
@@ -155,21 +130,4 @@ to disable disk caching. Prepared samples are keyed by `rpt_sample_seed`, whose
 cross-workload-validated default is `2`; changing the seed creates an independent
 cache entry and never reuses the previous sample.
 
-`rpt_sample_mode` accepts `prepared` (the default) and `instant`. For resident
-native data, instant sampling reads 256 stratified access points x 32 contiguous
-rows with an internal task limit of eight. Its performance-first path reads
-narrow ranges directly from DuckDB base column segments.
-
-For cold native data, select the block-aligned prefetch policy:
-
-```sql
-SET rpt_sample_mode = 'instant';
-SET rpt_instant_access = 'block';
-```
-
-Parquet instant sampling automatically uses stratified row groups and supports
-one file per table. `rpt_sample_size` controls prepared reservoirs and the
-target row count for block and Parquet instant sampling. Scattered sampling has
-an explicit physical shape: `rpt_instant_access_points` multiplied by
-`rpt_instant_rows_per_access`. Task fan-out is an internal bounded
-implementation detail and does not modify DuckDB's `async_threads` setting.
+`rpt_sample_mode` accepts `prepared` (the default) and `instant`.
