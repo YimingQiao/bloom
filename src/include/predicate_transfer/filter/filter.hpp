@@ -8,6 +8,7 @@
 #pragma once
 
 #include "duckdb/common/types/data_chunk.hpp"
+#include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/storage/statistics/base_statistics.hpp"
 
@@ -23,6 +24,11 @@ public:
 	                   size_t &result_count) const = 0;
 	virtual void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) = 0;
 	virtual size_t Hash() const = 0;
+	//! Exact number of non-NULL keys represented by this filter when its
+	//! physical representation can prove it. Approximate filters return invalid.
+	virtual optional_idx ExactDistinctCount() const {
+		return optional_idx();
+	}
 
 	virtual FilterPropagateResult CheckStatistics(const BaseStatistics &stats) {
 		return FilterPropagateResult::NO_PRUNING_POSSIBLE;

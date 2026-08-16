@@ -99,11 +99,6 @@ string FilterPlan::ToString() const {
 		}
 	};
 
-	auto vecint_to_str = [&](const vector<idx_t> &v) {
-		for (auto &x : v) {
-			ss << x << ", ";
-		}
-	};
 	ss << "build=(";
 	vec_to_str(build);
 	ss << "), ";

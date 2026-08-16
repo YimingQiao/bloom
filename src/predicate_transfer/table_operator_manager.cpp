@@ -155,7 +155,6 @@ string TableOperatorManager::GetTableName(const LogicalOperator &op) {
 	auto params = op.ParamsToString();
 
 	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
 		if (params.contains("Table")) {
 			ret = params.at("Table");
 		} else {

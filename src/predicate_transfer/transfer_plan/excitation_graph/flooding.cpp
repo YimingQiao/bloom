@@ -44,6 +44,11 @@ idx_t ExcitationGraphManager::ComputeBaseTableRows(const LogicalOperator &op) co
 void ExcitationGraphManager::InitializeWorkingSet() {
 	state_.Reset();
 	filter_cache_ = RPTFilterCache {};
+	if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV) {
+		equality_domains_.Reset(table_groups);
+	} else {
+		equality_domains_.Reset({});
+	}
 
 	const auto &all_tables = table_operator_manager.GetAllTableOperators();
 
@@ -329,6 +334,11 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			          << " block_windows=" << config.sampling.instant_block_windows
 			          << " parquet_row_groups=" << config.sampling.instant_parquet_row_groups
 			          << " seed=" << config.sampling.seed;
+		}
+		std::cerr << " excitation="
+		          << (config.excitation_mode == RPTExcitationMode::TABLE_SIZE ? "table_size" : "join_key_ndv");
+		if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV) {
+			std::cerr << " exact_domains=" << equality_domains_.TrackedDomainCount();
 		}
 		std::cerr << '\n';
 		std::cerr << "[RPT-Excitation] === Initial table cardinalities ===" << '\n';

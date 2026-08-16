@@ -241,12 +241,19 @@ public:
 	           size_t &result_count) const override;
 	int Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, Vector &results, size_t &result_count) const override;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) override;
-	unique_ptr<PrefixRangeFilter::BuildState> InitializeLocalBuildState(ClientContext &context) const;
-	idx_t GetLocalBuildStateSize() const;
-	void InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols, PrefixRangeFilter::BuildState &state) const;
-	void MergeLocalBuildState(PrefixRangeFilter::BuildState &state);
+	unique_ptr<PrefixRangeFilter::BuildState> InitializeBuildState(ClientContext &context) const;
+	idx_t GetBuildStateSize() const;
+	void InsertBuildState(DataChunk &chunk, const vector<idx_t> &bound_cols, PrefixRangeFilter::BuildState &state,
+	                      bool parallel) const;
+	void MergeBuildState(PrefixRangeFilter::BuildState &state);
 	void SetValid() override;
 	size_t Hash() const override;
+	optional_idx ExactDistinctCount() const override {
+		return exact_distinct_count_;
+	}
+	void SetExactDistinctCount(idx_t count) {
+		exact_distinct_count_ = count;
+	}
 	string ToString() const override;
 
 	PrefixRangeFilter &GetPrefixRangeFilter() {
@@ -258,6 +265,7 @@ private:
 	int64_t lower_bound_;
 	int64_t upper_bound_;
 	unique_ptr<PrefixRangeFilter> filter_;
+	optional_idx exact_distinct_count_;
 	unique_ptr<PrefixRangeFilter::BuildState> build_state_;
 };
 

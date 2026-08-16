@@ -3,6 +3,7 @@
 #include "predicate_transfer/transfer_plan/base_graph_manager.hpp"
 #include "predicate_transfer/cardinality_estimation/cardinality_estimator.hpp"
 #include "predicate_transfer/table_scanner/table_scanner.hpp"
+#include "predicate_transfer/transfer_plan/excitation_graph/equality_domain_tracker.hpp"
 #include "predicate_transfer/transfer_plan/excitation_graph/working_set.hpp"
 #include "predicate_transfer/transfer_plan/rpt_filter_cache.hpp"
 #include "predicate_transfer/transfer_plan/transfer_executor.hpp"
@@ -80,6 +81,7 @@ private:
 	};
 
 	ExcitationWorkingSet state_;
+	EqualityDomainTracker equality_domains_;
 	unordered_set<idx_t> protected_tables_; // survives Reset (external config)
 
 	unique_ptr<RPTCardinalityEstimator> estimator_;

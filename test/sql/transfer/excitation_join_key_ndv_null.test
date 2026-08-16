@@ -1,0 +1,39 @@
+# name: test/sql/transfer/excitation_join_key_ndv_null.test
+# description: exact join-key domains exclude NULL keys during parallel construction
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_excitation_mode = 'join_key_ndv';
+
+statement ok
+CREATE TABLE rpt_ndv_null_a AS
+SELECT CASE WHEN i % 11 = 0 THEN NULL ELSE i::INTEGER END k,
+       i % 4 != 3 keep
+FROM range(100000) t(i);
+
+statement ok
+CREATE TABLE rpt_ndv_null_b AS
+SELECT CASE WHEN i % 11 = 0 THEN NULL ELSE i::INTEGER END k
+FROM range(100000) t(i);
+
+statement ok
+CREATE TABLE rpt_ndv_null_c AS
+SELECT CASE WHEN i % 11 = 0 THEN NULL ELSE i::INTEGER END k
+FROM range(100000) t(i);
+
+query I
+SELECT count(*)
+FROM rpt_ndv_null_a a
+JOIN rpt_ndv_null_b b ON a.k = b.k
+JOIN rpt_ndv_null_c c ON b.k = c.k
+WHERE a.keep;
+----
+68182

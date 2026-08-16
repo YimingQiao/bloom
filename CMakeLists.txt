@@ -35,6 +35,7 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/table_scanner/table_scanner.cpp
     src/predicate_transfer/transfer_plan/base_graph_manager.cpp
     src/predicate_transfer/transfer_plan/dag.cpp
+    src/predicate_transfer/transfer_plan/excitation_graph/equality_domain_tracker.cpp
     src/predicate_transfer/transfer_plan/excitation_graph/flooding.cpp
     src/predicate_transfer/transfer_plan/excitation_graph/format.cpp
     src/predicate_transfer/transfer_plan/excitation_graph/materialize.cpp

@@ -8,6 +8,11 @@ namespace duckdb {
 
 enum class RPTSamplingMode : uint8_t { PREPARED, INSTANT };
 
+//! Criterion used after a transfer changes a table. TABLE_SIZE preserves the
+//! original row-cardinality rule. JOIN_KEY_NDV additionally suppresses an
+//! equality-domain transfer when its exact join-key domain has not shrunk.
+enum class RPTExcitationMode : uint8_t { TABLE_SIZE, JOIN_KEY_NDV };
+
 enum class RPTInstantAccessMode : uint8_t {
 	//! Many small, stratified reads. Best when the base table is already resident.
 	SCATTERED,
@@ -102,6 +107,8 @@ public:
 	bool log_transfer_steps = false;
 	//! Excitation threshold: re-excite if cardinality drops below this ratio of baseline
 	double excitation_threshold = 1.0;
+	//! How a re-excited source decides whether it carries new information.
+	RPTExcitationMode excitation_mode = RPTExcitationMode::TABLE_SIZE;
 	//! Tables with cardinality at or below this threshold are "small" and will
 	//! only send filters, never receive them (no benefit from further filtering).
 	idx_t small_table_threshold = 0;

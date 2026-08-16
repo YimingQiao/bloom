@@ -1,0 +1,53 @@
+# name: test/sql/transfer/excitation_join_key_ndv.test
+# description: exact join-key domains can gate repeated transfers independently of row count
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+CREATE TABLE rpt_domain_a AS
+SELECT (i % 10)::INTEGER k
+FROM range(40) t(i);
+
+statement ok
+CREATE TABLE rpt_domain_b AS
+SELECT k::INTEGER k, bridge::INTEGER bridge
+FROM range(10) x(k), range(10) y(bridge);
+
+statement ok
+CREATE TABLE rpt_domain_c AS
+SELECT (i % 10)::INTEGER bridge, (i < 10) keep
+FROM range(20) t(i);
+
+# C first sends its complete bridge domain to B. A then reduces B's rows,
+# while B's bridge NDV remains ten. The NDV mode can prove that B -> C carries
+# no new equality-domain information; both modes must retain identical results.
+statement ok
+SET rpt_excitation_mode = 'table_size';
+
+query I
+SELECT count(*)
+FROM rpt_domain_a a
+JOIN rpt_domain_b b ON a.k = b.k
+JOIN rpt_domain_c c ON b.bridge = c.bridge
+WHERE a.k < 5 AND c.keep;
+----
+200
+
+statement ok
+SET rpt_excitation_mode = 'join_key_ndv';
+
+query I
+SELECT count(*)
+FROM rpt_domain_a a
+JOIN rpt_domain_b b ON a.k = b.k
+JOIN rpt_domain_c c ON b.bridge = c.bridge
+WHERE a.k < 5 AND c.keep;
+----
+200

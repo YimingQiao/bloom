@@ -20,6 +20,7 @@ public:
 	struct FilterBuildSpec {
 		vector<ColumnBinding> key_bindings;
 		vector<LogicalType> key_types;
+		bool track_exact_domain = false;
 	};
 
 	TransferExecutor(Optimizer &optimizer, ClientContext &context, const RPTOptimizerConfig &config);

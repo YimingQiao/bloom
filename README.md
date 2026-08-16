@@ -124,6 +124,7 @@ The main settings are:
 SET enable_rpt = false;
 SET rpt_sample_cache_dir = '/path/to/cache';
 SET rpt_sample_mode = 'instant';
+SET rpt_excitation_mode = 'join_key_ndv';
 ```
 
 `enable_rpt` defaults to `true`; disable it for troubleshooting or an A/B
@@ -134,3 +135,9 @@ cross-workload-validated default is `2`; changing the seed creates an independen
 cache entry and never reuses the previous sample.
 
 `rpt_sample_mode` accepts `prepared` (the default) and `instant`.
+
+`rpt_excitation_mode` selects how repeated transfers decide whether a join-key
+domain contains new information. It accepts `table_size` (the default) and
+`join_key_ndv`; the latter uses exact NDV changes for supported single-column
+integer equality domains and falls back safely when an exact domain is not
+available.

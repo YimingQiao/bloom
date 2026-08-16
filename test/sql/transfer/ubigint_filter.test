@@ -8,6 +8,9 @@ statement ok
 SET threads = 8;
 
 statement ok
+SET rpt_excitation_mode = 'join_key_ndv';
+
+statement ok
 CREATE TABLE rpt_ubigint_source AS
 SELECT (9223372036854775808::UBIGINT + i::UBIGINT) k,
        i::INTEGER bridge,

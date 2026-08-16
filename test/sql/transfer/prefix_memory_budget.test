@@ -31,9 +31,9 @@ SELECT i::INTEGER bridge,
 FROM range(600000) t(i);
 
 # The sparse key creates an approximately 1 MB PrefixRange build state. The
-# source has enough chunks to request more lanes than fit in the 16 MB budget;
-# the build must reduce its task count instead of sharing atomically written
-# states between workers.
+# source has enough chunks to request more private states than fit in the 16 MB
+# budget; the scan must retain its worker count and safely share one atomically
+# written state instead.
 query II
 SELECT count(*), sum(s.bridge)
 FROM rpt_budget_probe p

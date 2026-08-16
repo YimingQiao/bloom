@@ -11,7 +11,6 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include <cstdint>
-#include <mutex>
 
 #include "filter.hpp"
 
@@ -43,16 +42,6 @@ class BitmapFilter : public RPTFilter {
 public:
 	BitmapFilter(ClientContext &context_p, const BitmapFilterConfig &config);
 
-	ClientContext *context;
-	BufferManager *buffer_manager;
-
-	uint64_t *blocks;
-	AllocatedData buf_;
-	BitmapFilterConfig config_;
-
-public:
-	static constexpr const int32_t SIMD_BATCH_SIZE = 16;
-
 	int Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_applied, SelectionVector &results,
 	           size_t &result_count) const override;
 
@@ -60,29 +49,39 @@ public:
 	           size_t &result_count) const override;
 
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built) override;
+	void InsertTaskLocal(DataChunk &chunk, const vector<idx_t> &bound_cols_built);
+	void MergeTaskLocal(const BitmapFilter &other);
 
 	FilterPropagateResult CheckStatistics(const BaseStatistics &stats) override;
+	size_t Hash() const override;
+	optional_idx ExactDistinctCount() const override;
+	string ToString() const override;
 
-	const BitmapFilterConfig &GetConfig() const {
-		return config_;
-	}
-
-	template <typename T>
-	int BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori, const uint64_t *BF_RESTRICT bf,
-	                       SelectionVector &results, size_t &result_count) const;
+private:
+	static constexpr int32_t SIMD_BATCH_SIZE = 16;
 
 	template <typename T>
 	int BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori, const uint64_t *BF_RESTRICT bf,
-	                       Vector &results, size_t &result_count) const;
+	                       const ValidityMask &validity, SelectionVector &results, size_t &result_count) const;
 
 	template <typename T>
-	void BitmapFilterInsert(int num, const_data_ptr_t BF_RESTRICT keys_ori, uint64_t *BF_RESTRICT bf) const;
+	int BitmapFilterLookup(int num, const_data_ptr_t BF_RESTRICT keys_ori, const uint64_t *BF_RESTRICT bf,
+	                       const ValidityMask &validity, Vector &results, size_t &result_count) const;
+
+	template <typename T, bool PARALLEL>
+	void BitmapFilterInsert(int num, const_data_ptr_t BF_RESTRICT keys_ori, const ValidityMask &validity,
+	                        uint64_t *BF_RESTRICT bf) const;
+	template <bool PARALLEL>
+	void InsertInternal(DataChunk &chunk, const vector<idx_t> &bound_cols_built);
 
 	template <typename T>
 	FilterPropagateResult BitmapFilterRangeLookup(const BaseStatistics &stats, const uint64_t *BF_RESTRICT bf) const;
 
-	size_t Hash() const override;
-	string ToString() const override;
+	idx_t BlockCount() const;
+
+	uint64_t *blocks = nullptr;
+	AllocatedData buf_;
+	BitmapFilterConfig config_;
 };
 
 } // namespace duckdb

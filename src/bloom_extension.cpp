@@ -87,12 +87,22 @@ static RPTInstantAccessMode ReadInstantAccess(const Value &value) {
 	           : RPTInstantAccessMode::BLOCK;
 }
 
+static RPTExcitationMode ReadExcitationMode(const Value &value) {
+	return ReadChoice(value, "rpt_excitation_mode", "table_size", "join_key_ndv") == "table_size"
+	           ? RPTExcitationMode::TABLE_SIZE
+	           : RPTExcitationMode::JOIN_KEY_NDV;
+}
+
 static void ValidateSampleMode(ClientContext &, SetScope, Value &value) {
 	ReadSampleMode(value);
 }
 
 static void ValidateInstantAccess(ClientContext &, SetScope, Value &value) {
 	ReadInstantAccess(value);
+}
+
+static void ValidateExcitationMode(ClientContext &, SetScope, Value &value) {
+	ReadExcitationMode(value);
 }
 
 static void ValidateUnsignedRange(Value &value, const char *setting, idx_t maximum) {
@@ -241,6 +251,9 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 		ValidateUnitInterval(setting, "rpt_excitation_threshold");
 		config.excitation_threshold = setting.GetValue<double>();
 	}
+	if (input.context.TryGetCurrentSetting("rpt_excitation_mode", setting)) {
+		config.excitation_mode = ReadExcitationMode(setting);
+	}
 	if (input.context.TryGetCurrentSetting("rpt_late_materialize", setting)) {
 		config.late_materialize_flag = setting.GetValue<bool>();
 	}
@@ -307,6 +320,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("rpt_excitation_threshold", "Re-excite below this fraction of the preceding cardinality",
 	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("RPT_EXCITATION_THRESHOLD", 1.0)),
 	                          ValidateExcitationThreshold);
+	config.AddExtensionOption(
+	    "rpt_excitation_mode",
+	    "Repeated-transfer information criterion: 'table_size' or exact 'join_key_ndv' equality domains",
+	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_EXCITATION_MODE", "table_size")), ValidateExcitationMode);
 	config.AddExtensionOption("rpt_late_materialize",
 	                          "Experimental: rowid-based late materialization (currently a net slowdown; off)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LATE_MATERIALIZE", false)));

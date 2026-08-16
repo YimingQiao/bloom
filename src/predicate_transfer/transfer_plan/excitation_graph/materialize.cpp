@@ -8,6 +8,23 @@
 
 namespace duckdb {
 
+static const char *DomainObservationName(EqualityDomainTracker::ObservationKind kind) {
+	switch (kind) {
+	case EqualityDomainTracker::ObservationKind::UNTRACKED:
+		return "untracked";
+	case EqualityDomainTracker::ObservationKind::INITIALIZED:
+		return "initialized";
+	case EqualityDomainTracker::ObservationKind::SHRUNK:
+		return "shrunk";
+	case EqualityDomainTracker::ObservationKind::UNCHANGED:
+		return "unchanged";
+	case EqualityDomainTracker::ObservationKind::UNCONTAINED:
+		return "uncontained";
+	}
+	D_ASSERT(false);
+	return "unknown";
+}
+
 void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 	for (auto &entry : cascade_filters_) {
 		idx_t table_id = entry.first;
@@ -171,6 +188,10 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 			activation.sorted_dst.push_back(edge->dest_columns[index]);
 			activation.sorted_types.push_back(edge->return_types[index]);
 		}
+		const bool track_exact_domain =
+		    config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV && activation.sorted_src.size() == 1 &&
+		    activation.sorted_dst.size() == 1 &&
+		    equality_domains_.Tracks(activation.sorted_src.front(), activation.sorted_dst.front());
 		activation.snapshot = state_.Lineage().MakeSnapshot(source_table_id, activation.sorted_src);
 		if (config.enable_filter_cache) {
 			activation.filter = filter_cache_.Lookup(source_lineage_id, activation.snapshot);
@@ -181,12 +202,13 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 				if (build_specs[existing].key_bindings == activation.sorted_src &&
 				    build_specs[existing].key_types == activation.sorted_types) {
 					activation.build_index = existing;
+					build_specs[existing].track_exact_domain |= track_exact_domain;
 					break;
 				}
 			}
 			if (activation.build_index == DConstants::INVALID_INDEX) {
 				activation.build_index = build_specs.size();
-				build_specs.push_back({activation.sorted_src, activation.sorted_types});
+				build_specs.push_back({activation.sorted_src, activation.sorted_types, track_exact_domain});
 			}
 		}
 		prepared.push_back(std::move(activation));
@@ -221,6 +243,36 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 			          << "]" << '\n';
 		}
 		if (!activation.filter) {
+			continue;
+		}
+
+		EqualityDomainTracker::Observation domain_observation;
+		if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV && activation.sorted_src.size() == 1 &&
+		    activation.sorted_dst.size() == 1) {
+			auto exact_ndv = activation.filter->ExactDistinctCount();
+			if (exact_ndv.IsValid()) {
+				domain_observation = equality_domains_.Observe(activation.sorted_src.front(), exact_ndv.GetIndex());
+			}
+		}
+		bool domain_suppressed = equality_domains_.Suppresses(activation.sorted_src.front(),
+		                                                      activation.sorted_dst.front(), domain_observation);
+		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
+			if (domain_observation.kind != EqualityDomainTracker::ObservationKind::UNTRACKED) {
+				std::cerr << "    [RPT-Domain] src=[" << source_table_id << "] dest=[" << activation.edge->destination
+				          << "] cols=" << activation.sorted_src.front().column_index << ">"
+				          << activation.sorted_dst.front().column_index
+				          << " observation=" << DomainObservationName(domain_observation.kind)
+				          << " previous_ndv=" << domain_observation.previous_ndv
+				          << " current_ndv=" << domain_observation.current_ndv
+				          << " version=" << domain_observation.version << " suppress=" << (domain_suppressed ? 1 : 0)
+				          << '\n';
+			}
+		}
+		if (domain_suppressed) {
+			// The destination already consumed this exact equality-domain version.
+			// Preserve the logical lineage progress without rebuilding or probing an
+			// identical physical filter.
+			state_.Lineage().Propagate(*activation.edge);
 			continue;
 		}
 		activation.edge->filter_type = activation.filter->ToString();
@@ -277,6 +329,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		if (dest_op) {
 			executor_.AttachFilterToScanner(*dest_op, activation.sorted_dst, activation.filter, filter_identity);
 		}
+		equality_domains_.MarkApplied(activation.sorted_dst.front(), domain_observation);
 		effective.push_back(activation.edge);
 	}
 	return effective;

@@ -1,0 +1,83 @@
+# name: test/sql/transfer/parallel_thread_consistency.test
+# description: transfer filter results agree across serial, private-lane, and shared-state builds
+# group: [transfer]
+
+require bloom
+
+statement ok
+CREATE TABLE rpt_thread_source AS
+SELECT ((i * 8000000) / 399999)::INTEGER sparse_key,
+       i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(400000) t(i);
+
+statement ok
+CREATE TABLE rpt_thread_probe AS
+SELECT ((i * 8000000) / 399999)::INTEGER sparse_key
+FROM range(400000) t(i);
+
+statement ok
+CREATE TABLE rpt_thread_anchor AS
+SELECT i::INTEGER bridge
+FROM range(400000) t(i);
+
+statement ok
+CREATE TABLE rpt_thread_edge AS
+SELECT i::INTEGER bridge,
+       (i % 4 != 3) keep
+FROM range(400000) t(i);
+
+# One prefix build state is approximately 1 MB. One and two threads exercise
+# the serial/private paths; eight threads use private lanes; 32 requested
+# threads exceed the 16 MB private-state budget and use one shared atomic state.
+statement ok
+SET threads = 1;
+
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_thread_probe p
+JOIN rpt_thread_source s ON p.sparse_key = s.sparse_key
+JOIN rpt_thread_anchor a ON s.bridge = a.bridge
+JOIN rpt_thread_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+300000	59999700000
+
+statement ok
+SET threads = 2;
+
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_thread_probe p
+JOIN rpt_thread_source s ON p.sparse_key = s.sparse_key
+JOIN rpt_thread_anchor a ON s.bridge = a.bridge
+JOIN rpt_thread_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+300000	59999700000
+
+statement ok
+SET threads = 8;
+
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_thread_probe p
+JOIN rpt_thread_source s ON p.sparse_key = s.sparse_key
+JOIN rpt_thread_anchor a ON s.bridge = a.bridge
+JOIN rpt_thread_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+300000	59999700000
+
+statement ok
+SET threads = 32;
+
+query II
+SELECT count(*), sum(s.bridge)
+FROM rpt_thread_probe p
+JOIN rpt_thread_source s ON p.sparse_key = s.sparse_key
+JOIN rpt_thread_anchor a ON s.bridge = a.bridge
+JOIN rpt_thread_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+300000	59999700000

@@ -9,15 +9,16 @@ SELECT current_setting('rpt_sample_cache_dir');
 ----
 auto
 
-query TTIIII
+query TTTIIII
 SELECT current_setting('rpt_sample_mode'),
        current_setting('rpt_instant_access'),
+       current_setting('rpt_excitation_mode'),
        current_setting('rpt_instant_snapshot'),
        current_setting('rpt_instant_access_points'),
        current_setting('rpt_instant_rows_per_access'),
        current_setting('rpt_sample_seed');
 ----
-prepared	scattered	false	256	32	2
+prepared	scattered	table_size	false	256	32	2
 
 query III
 SELECT current_setting('rpt_sample_size'),
@@ -47,6 +48,22 @@ statement error
 SET rpt_instant_access = 'unknown';
 ----
 rpt_instant_access must be 'scattered' or 'block'
+
+statement error
+SET rpt_excitation_mode = 'unknown';
+----
+rpt_excitation_mode must be 'table_size' or 'join_key_ndv'
+
+statement ok
+SET rpt_excitation_mode = 'join_key_ndv';
+
+query T
+SELECT current_setting('rpt_excitation_mode');
+----
+join_key_ndv
+
+statement ok
+SET rpt_excitation_mode = 'table_size';
 
 statement error
 SET rpt_sample_size = 0;

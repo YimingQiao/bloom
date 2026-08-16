@@ -8,6 +8,9 @@ statement ok
 SET threads = 8;
 
 statement ok
+SET rpt_excitation_mode = 'join_key_ndv';
+
+statement ok
 CREATE TABLE rpt_bigint_source AS
 SELECT CASE WHEN i % 2 = 0
             THEN (-9223372036854775807::BIGINT - 1) + i // 2

@@ -189,23 +189,27 @@ void DuckDBPrefixRangeFilterAdapter::Insert(DataChunk &chunk, const vector<idx_t
 }
 
 unique_ptr<PrefixRangeFilter::BuildState>
-DuckDBPrefixRangeFilterAdapter::InitializeLocalBuildState(ClientContext &context) const {
+DuckDBPrefixRangeFilterAdapter::InitializeBuildState(ClientContext &context) const {
 	return filter_->InitializeBuildState(context);
 }
 
-idx_t DuckDBPrefixRangeFilterAdapter::GetLocalBuildStateSize() const {
+idx_t DuckDBPrefixRangeFilterAdapter::GetBuildStateSize() const {
 	return filter_->GetBuildStateSize();
 }
 
-void DuckDBPrefixRangeFilterAdapter::InsertLocal(DataChunk &chunk, const vector<idx_t> &bound_cols,
-                                                 PrefixRangeFilter::BuildState &state) const {
+void DuckDBPrefixRangeFilterAdapter::InsertBuildState(DataChunk &chunk, const vector<idx_t> &bound_cols,
+                                                      PrefixRangeFilter::BuildState &state, bool parallel) const {
 	if (bound_cols.size() != 1) {
 		throw InternalException("RPT: prefix-range filter requires one key column");
 	}
-	filter_->InsertKeys(chunk.data[bound_cols[0]], state);
+	if (parallel) {
+		filter_->InsertKeysParallel(chunk.data[bound_cols[0]], state);
+	} else {
+		filter_->InsertKeys(chunk.data[bound_cols[0]], state);
+	}
 }
 
-void DuckDBPrefixRangeFilterAdapter::MergeLocalBuildState(PrefixRangeFilter::BuildState &state) {
+void DuckDBPrefixRangeFilterAdapter::MergeBuildState(PrefixRangeFilter::BuildState &state) {
 	filter_->MergeBuildState(state);
 }
 

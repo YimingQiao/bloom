@@ -114,9 +114,16 @@ static void ParallelCompactScan(ClientContext &context, const ColumnDataCollecti
 } // namespace
 
 idx_t RPTScanTaskCount(ClientContext &context, const ColumnDataCollection &collection) {
-	static constexpr idx_t CHUNKS_PER_TASK = 8;
+	// Filtering can leave a collection with many nearly empty chunks. Bound the
+	// lane count by both physical chunks and surviving rows so task-local setup
+	// does not dominate a small transfer.
+	static constexpr idx_t MIN_CHUNKS_PER_TASK = 8;
+	static constexpr idx_t MIN_ROWS_PER_TASK = static_cast<idx_t>(STANDARD_VECTOR_SIZE) * 4;
 	auto chunk_count = collection.ChunkCount();
-	auto tasks = MaxValue<idx_t>(chunk_count / CHUNKS_PER_TASK + (chunk_count % CHUNKS_PER_TASK != 0), 1);
+	auto row_count = collection.Count();
+	auto chunk_tasks = chunk_count / MIN_CHUNKS_PER_TASK + (chunk_count % MIN_CHUNKS_PER_TASK != 0);
+	auto row_tasks = row_count / MIN_ROWS_PER_TASK + (row_count % MIN_ROWS_PER_TASK != 0);
+	auto tasks = MaxValue<idx_t>(MinValue<idx_t>(chunk_tasks, row_tasks), 1);
 	return MinValue<idx_t>(NumericCast<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads()), tasks);
 }
 

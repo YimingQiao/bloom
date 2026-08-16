@@ -13,6 +13,8 @@
 namespace duckdb {
 namespace {
 
+static constexpr uint64_t MAX_EXACT_BITMAP_SPAN = 8000000;
+
 //! A materialized transfer source no longer has pending scanner filters after
 //! Compact(), so it can be scanned directly through CDC's parallel scan state.
 class ParallelCollectionScanTask : public BaseExecutorTask {
@@ -185,6 +187,8 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 	vector<idx_t> stats_request_indices(specs.size(), DConstants::INVALID_INDEX);
 	vector<TableScanner::StatsRequest> stats_requests;
 	vector<DuckDBPrefixRangeFilterAdapter *> prefix_filters(specs.size(), nullptr);
+	vector<BitmapFilterConfig> exact_domain_configs(specs.size());
+	vector<bool> track_exact_domain(specs.size(), false);
 	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 		auto &spec = specs[spec_idx];
 		if (spec.key_bindings.empty() || spec.key_bindings.size() != spec.key_types.size()) {
@@ -234,7 +238,7 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			auto row_budget = total_rows > std::numeric_limits<uint64_t>::max() / 128
 			                      ? std::numeric_limits<uint64_t>::max()
 			                      : static_cast<uint64_t>(total_rows) * 128;
-			use_bitmap = range <= row_budget || range <= 8000000;
+			use_bitmap = range <= row_budget || range <= MAX_EXACT_BITMAP_SPAN;
 		} else if (integral_key[spec_idx] && total_rows == 0) {
 			use_bitmap = true;
 			stats_min = 1;
@@ -245,6 +249,11 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			                                                              stats_min, stats_max, total_rows);
 			prefix_filters[spec_idx] = filter.get();
 			result[spec_idx] = std::move(filter);
+			const auto domain_span = static_cast<uint64_t>(stats_max) - static_cast<uint64_t>(stats_min);
+			if (specs[spec_idx].track_exact_domain && domain_span <= MAX_EXACT_BITMAP_SPAN) {
+				exact_domain_configs[spec_idx] = BitmapFilterConfig(stats_min, stats_max);
+				track_exact_domain[spec_idx] = true;
+			}
 		} else if (use_bitmap) {
 			result[spec_idx] = make_shared_ptr<BitmapFilter>(context_, BitmapFilterConfig(stats_min, stats_max));
 		} else {
@@ -252,26 +261,51 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			    make_shared_ptr<ActiveBloomFilter>(context_, BloomFilterConfig(), static_cast<uint32_t>(total_rows));
 		}
 	}
-	vector<vector<unique_ptr<PrefixRangeFilter::BuildState>>> local_prefix_states(specs.size());
-	static constexpr idx_t MAX_PREFIX_RANGE_BUILD_MEMORY = 16ULL * 1024ULL * 1024ULL;
+	vector<vector<unique_ptr<PrefixRangeFilter::BuildState>>> prefix_build_states(specs.size());
+	vector<bool> shared_prefix_states(specs.size(), false);
+	static constexpr idx_t MAX_PREFIX_RANGE_PRIVATE_MEMORY = 16ULL * 1024ULL * 1024ULL;
 	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 		if (!result[spec_idx]) {
 			continue;
 		}
 		if (prefix_filters[spec_idx] && task_count > 1) {
-			auto state_size = prefix_filters[spec_idx]->GetLocalBuildStateSize();
+			auto state_size = prefix_filters[spec_idx]->GetBuildStateSize();
 			D_ASSERT(state_size > 0);
-			task_count = MinValue<idx_t>(task_count, MaxValue<idx_t>(MAX_PREFIX_RANGE_BUILD_MEMORY / state_size, 1));
+			// Dense, compact ranges benefit from non-atomic task-private states. A
+			// wide range would replicate too much memory and pay to merge every
+			// replica, so all scan tasks use DuckDB's parallel insertion API on one
+			// shared state instead.
+			auto lane_count = state_size <= MAX_PREFIX_RANGE_PRIVATE_MEMORY / task_count ? task_count : 1;
+			prefix_build_states[spec_idx].resize(lane_count);
+			shared_prefix_states[spec_idx] = lane_count < task_count;
+		}
+	}
+	vector<vector<unique_ptr<BitmapFilter>>> local_domain_filters(specs.size());
+	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
+		if (track_exact_domain[spec_idx]) {
+			local_domain_filters[spec_idx].resize(task_count);
 		}
 	}
 	idx_t parallel_prefix_filter_count = 0;
 	if (task_count > 1) {
 		for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
 			if (prefix_filters[spec_idx]) {
-				local_prefix_states[spec_idx].resize(task_count);
 				parallel_prefix_filter_count++;
 			}
 		}
+	}
+	vector<idx_t> shared_state_specs;
+	for (idx_t spec_idx = 0; spec_idx < specs.size(); spec_idx++) {
+		if (shared_prefix_states[spec_idx]) {
+			D_ASSERT(prefix_build_states[spec_idx].size() == 1);
+			shared_state_specs.push_back(spec_idx);
+		}
+	}
+	if (!shared_state_specs.empty()) {
+		ExecuteIndexedTasks(context_, shared_state_specs.size(), "RPTPrefixStateInitialize", [&](idx_t task_id) {
+			auto spec_idx = shared_state_specs[task_id];
+			prefix_build_states[spec_idx][0] = prefix_filters[spec_idx]->InitializeBuildState(context_);
+		});
 	}
 	auto initialize_finished = Clock::now();
 	ScanCollection(context_, *collection, task_count, [&](idx_t task_id, DataChunk &chunk) {
@@ -279,27 +313,55 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			if (!result[spec_idx]) {
 				continue;
 			}
-			if (!local_prefix_states[spec_idx].empty()) {
-				D_ASSERT(task_id < local_prefix_states[spec_idx].size());
-				auto &local_state = local_prefix_states[spec_idx][task_id];
+			if (!prefix_build_states[spec_idx].empty()) {
+				auto lane_id = task_id % prefix_build_states[spec_idx].size();
+				auto &local_state = prefix_build_states[spec_idx][lane_id];
 				if (!local_state) {
-					local_state = prefix_filters[spec_idx]->InitializeLocalBuildState(context_);
+					local_state = prefix_filters[spec_idx]->InitializeBuildState(context_);
 				}
-				prefix_filters[spec_idx]->InsertLocal(chunk, chunk_cols[spec_idx], *local_state);
+				prefix_filters[spec_idx]->InsertBuildState(chunk, chunk_cols[spec_idx], *local_state,
+				                                           shared_prefix_states[spec_idx]);
 			} else {
 				result[spec_idx]->Insert(chunk, chunk_cols[spec_idx]);
+			}
+			if (!local_domain_filters[spec_idx].empty()) {
+				auto &domain_filter = local_domain_filters[spec_idx][task_id];
+				if (!domain_filter) {
+					domain_filter = make_uniq<BitmapFilter>(context_, exact_domain_configs[spec_idx]);
+				}
+				domain_filter->InsertTaskLocal(chunk, chunk_cols[spec_idx]);
 			}
 		}
 	});
 	auto insert_finished = Clock::now();
 	IndexedExecutorTask::Function finalize_filter = [&](idx_t spec_idx) {
-		for (auto &state : local_prefix_states[spec_idx]) {
+		for (auto &state : prefix_build_states[spec_idx]) {
 			if (state) {
-				prefix_filters[spec_idx]->MergeLocalBuildState(*state);
+				prefix_filters[spec_idx]->MergeBuildState(*state);
 			}
 		}
 		if (result[spec_idx]) {
 			result[spec_idx]->SetValid();
+		}
+		if (prefix_filters[spec_idx] && !local_domain_filters[spec_idx].empty()) {
+			BitmapFilter *merged_domain = nullptr;
+			for (auto &domain_filter : local_domain_filters[spec_idx]) {
+				if (!domain_filter) {
+					continue;
+				}
+				if (!merged_domain) {
+					merged_domain = domain_filter.get();
+				} else {
+					merged_domain->MergeTaskLocal(*domain_filter);
+				}
+			}
+			idx_t distinct = 0;
+			if (merged_domain) {
+				auto exact_distinct = merged_domain->ExactDistinctCount();
+				D_ASSERT(exact_distinct.IsValid());
+				distinct = exact_distinct.GetIndex();
+			}
+			prefix_filters[spec_idx]->SetExactDistinctCount(distinct);
 		}
 	};
 	if (parallel_prefix_filter_count > 1) {
@@ -315,7 +377,8 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 		};
 		auto finished = Clock::now();
 		std::cerr << "    [RPT-FilterBuildTiming] rows=" << total_rows << " specs=" << specs.size()
-		          << " tasks=" << task_count << " setup=" << elapsed(started, setup_finished)
+		          << " tasks=" << task_count << " shared_prefix=" << shared_state_specs.size()
+		          << " setup=" << elapsed(started, setup_finished)
 		          << "ms compact=" << elapsed(setup_finished, compact_finished)
 		          << "ms initialize=" << elapsed(compact_finished, initialize_finished)
 		          << "ms insert=" << elapsed(initialize_finished, insert_finished)
