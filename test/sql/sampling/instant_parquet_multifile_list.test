@@ -1,5 +1,5 @@
-# name: test/sql/sampling/instant_parquet_fallback.test
-# description: fall back cleanly for multi-file Parquet scans
+# name: test/sql/sampling/instant_parquet_multifile_list.test
+# description: sample an explicit list of Parquet files as one global population
 # group: [sampling]
 
 require bloom
@@ -9,8 +9,9 @@ require parquet
 statement ok
 SET rpt_sample_mode = 'instant';
 
-# file_row_number is relative to each input file, so multi-file scans use the
-# estimator fallback.
+statement ok
+SET rpt_instant_parquet_row_groups = 4;
+
 statement ok
 COPY (
     SELECT i::INTEGER id FROM range(0, 1000) t(i)

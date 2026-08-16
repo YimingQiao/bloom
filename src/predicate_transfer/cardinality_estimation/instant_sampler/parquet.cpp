@@ -1,6 +1,7 @@
 #include "predicate_transfer/cardinality_estimation/instant_sampler/common.hpp"
 
 #include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
+#include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/execution/expression_executor.hpp"
@@ -63,6 +64,174 @@ static unique_ptr<Expression> BuildRowNumberRangeFilter(const vector<InstantSamp
 	return std::move(disjunction);
 }
 
+struct ParquetRowGroup {
+	idx_t file_index;
+	idx_t row_start;
+	idx_t row_count;
+};
+
+struct ParquetMetadataLoadJob {
+	ClientContext &context;
+	const TableFunction &function;
+	const MultiFileBindData &source_bind;
+	const vector<OpenFileInfo> &files;
+	vector<vector<InstantSampleRange>> &file_row_groups;
+	vector<uint8_t> &valid_files;
+	idx_t task_count;
+};
+
+static void LoadParquetMetadataSlice(idx_t task_id, ParquetMetadataLoadJob &job,
+                                     unique_ptr<FunctionData> partition_bind_data) {
+	auto &partition_bind = partition_bind_data->Cast<MultiFileBindData>();
+	GlobalTableFunctionState reader_state;
+	auto file_begin = task_id * job.files.size() / job.task_count;
+	auto file_end = (task_id + 1) * job.files.size() / job.task_count;
+	for (idx_t file_index = file_begin; file_index < file_end; file_index++) {
+		shared_ptr<BaseFileReader> reader;
+		if (job.source_bind.union_readers.size() == job.files.size()) {
+			reader = job.source_bind.multi_file_reader->CreateReader(
+			    job.context, reader_state, *job.source_bind.union_readers[file_index], job.source_bind);
+		} else if (file_index == 0 && job.source_bind.initial_reader &&
+		           job.source_bind.initial_reader->GetFileName() == job.files[file_index].path) {
+			reader = job.source_bind.initial_reader;
+		} else {
+			reader = job.source_bind.multi_file_reader->CreateReader(job.context, reader_state, job.files[file_index],
+			                                                         file_index, job.source_bind);
+		}
+		if (!reader) {
+			throw InternalException("Parquet instant sampler could not open metadata reader");
+		}
+
+		vector<OpenFileInfo> one_file;
+		one_file.push_back(job.files[file_index]);
+		partition_bind.file_list = make_shared_ptr<SimpleMultiFileList>(std::move(one_file));
+		partition_bind.initial_reader = std::move(reader);
+		{
+			GetPartitionStatsInput input(job.function, &partition_bind);
+			auto partitions = job.function.get_partition_stats(job.context, input);
+			auto &row_groups = job.file_row_groups[file_index];
+			row_groups.reserve(partitions.size());
+			idx_t expected_row_start = 0;
+			bool valid = true;
+			for (auto &partition : partitions) {
+				if (!partition.row_start.IsValid() || partition.row_start.GetIndex() != expected_row_start ||
+				    partition.count_type != CountType::COUNT_EXACT) {
+					valid = false;
+					break;
+				}
+				row_groups.push_back({partition.row_start.GetIndex(), partition.count});
+				expected_row_start += partition.count;
+			}
+			if (!valid) {
+				row_groups.clear();
+				job.valid_files[file_index] = 0;
+			}
+		}
+		partition_bind.initial_reader.reset();
+	}
+}
+
+class ParquetMetadataLoadTask : public BaseExecutorTask {
+public:
+	ParquetMetadataLoadTask(TaskExecutor &executor, idx_t task_id, ParquetMetadataLoadJob &job,
+	                        unique_ptr<FunctionData> partition_bind_data)
+	    : BaseExecutorTask(executor), task_id(task_id), job(job), partition_bind_data(std::move(partition_bind_data)) {
+	}
+
+	void ExecuteTask() override {
+		LoadParquetMetadataSlice(task_id, job, std::move(partition_bind_data));
+	}
+
+	string TaskType() const override {
+		return "RPTParquetMetadataLoad";
+	}
+
+private:
+	idx_t task_id;
+	ParquetMetadataLoadJob &job;
+	unique_ptr<FunctionData> partition_bind_data;
+};
+
+static unique_ptr<FunctionData> CreatePartitionStatsBind(const MultiFileBindData &source_bind) {
+	auto bind_data = source_bind.Copy();
+	if (!bind_data) {
+		throw InternalException("Parquet instant sampler could not copy metadata bind data");
+	}
+	auto &partition_bind = bind_data->Cast<MultiFileBindData>();
+	partition_bind.initial_reader.reset();
+	partition_bind.union_readers.clear();
+	return bind_data;
+}
+
+static bool LoadMultiFileParquetRowGroups(ClientContext &context, LogicalGet &get, MultiFileBindData &source_bind,
+                                          const vector<OpenFileInfo> &files,
+                                          vector<vector<InstantSampleRange>> &file_row_groups) {
+	D_ASSERT(files.size() > 1);
+	file_row_groups.resize(files.size());
+	vector<uint8_t> valid_files(files.size(), 1);
+	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, files.size());
+	D_ASSERT(task_count > 0);
+	ParquetMetadataLoadJob job {context, get.function, source_bind, files, file_row_groups, valid_files, task_count};
+
+	TaskExecutor executor(context, TaskSchedulerType::ASYNC);
+	for (idx_t task_id = 0; task_id < task_count; task_id++) {
+		auto partition_bind = CreatePartitionStatsBind(source_bind);
+		executor.ScheduleTask(make_uniq<ParquetMetadataLoadTask>(executor, task_id, job, std::move(partition_bind)));
+	}
+	executor.WorkOnTasks();
+	for (auto valid : valid_files) {
+		if (!valid) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static bool CollectParquetRowGroups(ClientContext &context, LogicalGet &get, InstantParquetSamplePlan &plan,
+                                    vector<ParquetRowGroup> &row_groups) {
+	if (!get.bind_data) {
+		return false;
+	}
+	auto &multi_bind = get.bind_data->Cast<MultiFileBindData>();
+	auto expand_result = multi_bind.file_list->GetExpandResult();
+	if (expand_result == FileExpandResult::NO_FILES) {
+		return false;
+	}
+
+	if (expand_result == FileExpandResult::SINGLE_FILE) {
+		plan.total_files = 1;
+		GetPartitionStatsInput input(get.function, get.bind_data.get());
+		auto partitions = get.function.get_partition_stats(context, input);
+		row_groups.reserve(partitions.size());
+		idx_t expected_row_start = 0;
+		for (auto &partition : partitions) {
+			if (!partition.row_start.IsValid() || partition.row_start.GetIndex() != expected_row_start ||
+			    partition.count_type != CountType::COUNT_EXACT) {
+				return false;
+			}
+			row_groups.push_back({0, partition.row_start.GetIndex(), partition.count});
+			expected_row_start += partition.count;
+		}
+		return !row_groups.empty();
+	}
+
+	auto files = multi_bind.file_list->GetAllFiles();
+	if (files.size() <= 1) {
+		throw InternalException("Parquet multi-file expansion did not produce multiple files");
+	}
+	plan.total_files = files.size();
+	vector<vector<InstantSampleRange>> file_row_groups;
+	if (!LoadMultiFileParquetRowGroups(context, get, multi_bind, files, file_row_groups)) {
+		return false;
+	}
+	for (idx_t file_index = 0; file_index < file_row_groups.size(); file_index++) {
+		for (auto &row_group : file_row_groups[file_index]) {
+			row_groups.push_back({file_index, row_group.row_start, row_group.row_count});
+		}
+	}
+	return !row_groups.empty();
+}
+
 static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &get, idx_t target_rows,
                                           idx_t target_row_groups, uint64_t seed, InstantParquetSamplePlan &plan) {
 	D_ASSERT(target_rows > 0);
@@ -75,27 +244,16 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 		return false;
 	}
 
-	GetPartitionStatsInput input(get.function, get.bind_data.get());
-	auto partitions = get.function.get_partition_stats(context, input);
-	plan.total_row_groups = partitions.size();
-	if (partitions.empty()) {
+	vector<ParquetRowGroup> row_groups;
+	if (!CollectParquetRowGroups(context, get, plan, row_groups)) {
 		return false;
 	}
-
-	// file_row_number is file-relative. Accept only a single, contiguous row
-	// coordinate space; multi-file scans reset row_start and must use a future
-	// (file_index, row_number) composite filter instead of silently sampling the
-	// wrong row groups.
+	plan.total_row_groups = row_groups.size();
 	idx_t total_rows = 0;
 	vector<idx_t> sampleable_partitions;
-	for (idx_t partition_index = 0; partition_index < partitions.size(); partition_index++) {
-		auto &partition = partitions[partition_index];
-		if (!partition.row_start.IsValid() || partition.row_start.GetIndex() != total_rows ||
-		    partition.count_type != CountType::COUNT_EXACT) {
-			return false;
-		}
-		total_rows += partition.count;
-		if (partition.count > 0) {
+	for (idx_t partition_index = 0; partition_index < row_groups.size(); partition_index++) {
+		total_rows += row_groups[partition_index].row_count;
+		if (row_groups[partition_index].row_count > 0) {
 			sampleable_partitions.push_back(partition_index);
 		}
 	}
@@ -118,7 +276,7 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 	}
 	plan.candidate_rows = 0;
 	for (auto partition_index : selected) {
-		plan.candidate_rows += partitions[partition_index].count;
+		plan.candidate_rows += row_groups[partition_index].row_count;
 	}
 	if (plan.candidate_rows == 0) {
 		return false;
@@ -128,7 +286,7 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 	vector<idx_t> capacities;
 	capacities.reserve(selected.size());
 	for (auto partition_index : selected) {
-		capacities.push_back(partitions[partition_index].count);
+		capacities.push_back(row_groups[partition_index].row_count);
 	}
 	vector<idx_t> quotas(selected.size(), 1);
 	if (actual_target > selected.size()) {
@@ -144,27 +302,36 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 		}
 	}
 
-	vector<InstantSampleRange> ranges;
-	ranges.reserve(selected.size());
+	vector<vector<InstantSampleRange>> ranges_by_file(plan.total_files);
+	vector<idx_t> selected_groups_by_file(plan.total_files, 0);
 	for (idx_t i = 0; i < selected.size(); i++) {
-		auto &partition = partitions[selected[i]];
-		D_ASSERT(quotas[i] > 0 && quotas[i] <= partition.count);
-		if (quotas[i] == partition.count) {
-			ranges.push_back({partition.row_start.GetIndex(), partition.count});
+		auto &partition = row_groups[selected[i]];
+		D_ASSERT(partition.file_index < ranges_by_file.size());
+		D_ASSERT(quotas[i] > 0 && quotas[i] <= partition.row_count);
+		selected_groups_by_file[partition.file_index]++;
+		auto &ranges = ranges_by_file[partition.file_index];
+		if (quotas[i] == partition.row_count) {
+			ranges.push_back({partition.row_start, partition.row_count});
 			continue;
 		}
 		// A circular contiguous window gives every row the same inclusion
 		// probability while retaining page locality. Only a window crossing the
 		// row-group boundary needs a second physical range.
-		std::uniform_int_distribution<idx_t> offset_distribution(0, partition.count - 1);
+		std::uniform_int_distribution<idx_t> offset_distribution(0, partition.row_count - 1);
 		auto window_offset = offset_distribution(random);
-		auto first_count = MinValue<idx_t>(quotas[i], partition.count - window_offset);
-		ranges.push_back({partition.row_start.GetIndex() + window_offset, first_count});
+		auto first_count = MinValue<idx_t>(quotas[i], partition.row_count - window_offset);
+		ranges.push_back({partition.row_start + window_offset, first_count});
 		if (first_count < quotas[i]) {
-			ranges.push_back({partition.row_start.GetIndex(), quotas[i] - first_count});
+			ranges.push_back({partition.row_start, quotas[i] - first_count});
 		}
 	}
-	D_ASSERT(!ranges.empty());
+	for (idx_t file_index = 0; file_index < ranges_by_file.size(); file_index++) {
+		if (ranges_by_file[file_index].empty()) {
+			continue;
+		}
+		plan.files.push_back({file_index, selected_groups_by_file[file_index], std::move(ranges_by_file[file_index])});
+	}
+	D_ASSERT(!plan.files.empty());
 
 	auto &column_ids = get.GetMutableColumnIds();
 	auto payload_count = column_ids.size();
@@ -173,7 +340,6 @@ static bool ConfigureInstantParquetSample(ClientContext &context, LogicalGet &ge
 	for (idx_t i = 0; i < payload_count; i++) {
 		get.projection_ids.emplace_back(i);
 	}
-	plan.ranges = std::move(ranges);
 	return true;
 }
 
@@ -221,99 +387,104 @@ public:
 
 class DirectParquetSampleWorker {
 public:
-	DirectParquetSampleWorker(shared_ptr<DirectParquetSampleSharedState> shared_state,
+	DirectParquetSampleWorker(vector<shared_ptr<DirectParquetSampleSharedState>> shared_states,
 	                          unique_ptr<Expression> local_predicate, bool collect_timing)
-	    : shared_state(std::move(shared_state)), local_predicate(std::move(local_predicate)),
+	    : shared_states(std::move(shared_states)), local_predicate(std::move(local_predicate)),
 	      collect_timing(collect_timing) {
 	}
 
 	void Run() {
-		auto &shared = *shared_state;
+		D_ASSERT(!shared_states.empty());
+		auto &first = *shared_states.front();
 		// Expression execution state is thread-local. Build and destroy it on
 		// the same sampling worker instead of moving an executor created by the
 		// optimizer thread across thread boundaries.
 		auto task_predicate = std::move(local_predicate);
 		unique_ptr<ExpressionExecutor> task_filter_executor;
 		if (task_predicate) {
-			task_filter_executor = make_uniq<ExpressionExecutor>(shared.context);
+			task_filter_executor = make_uniq<ExpressionExecutor>(first.context);
 			task_filter_executor->AddExpression(*task_predicate);
 		}
 		auto task_started =
 		    collect_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		auto timing = collect_timing ? &result.timing : nullptr;
-		auto local_output = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), shared.output_types);
+		auto local_output = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), first.output_types);
 		ColumnDataAppendState append_state;
 		local_output->InitializeAppend(append_state);
 
-		ThreadContext thread_context(shared.context);
-		ExecutionContext execution_context(shared.context, thread_context, nullptr);
-		TableFunctionInitInput init_input(shared.bind_data.get(), shared.column_ids, shared.projection_ids,
-		                                  shared.filters.get());
-		auto local_state = shared.function.init_local(execution_context, init_input, shared.global_state.get());
-		if (!local_state) {
-			result.sample = std::move(local_output);
-			return;
-		}
-
+		ThreadContext thread_context(first.context);
+		ExecutionContext execution_context(first.context, thread_context, nullptr);
 		DataChunk chunk;
-		chunk.Initialize(Allocator::DefaultAllocator(), shared.output_types);
+		chunk.Initialize(Allocator::DefaultAllocator(), first.output_types);
 		SelectionVector selection(STANDARD_VECTOR_SIZE);
 		idx_t task_sampled_rows = 0;
-		while (true) {
-			chunk.Reset();
-			TableFunctionInput input(shared.bind_data.get(), local_state.get(), shared.global_state.get());
-			input.async_result = AsyncResultType::IMPLICIT;
-			input.results_execution_mode = AsyncResultsExecutionMode::SYNCHRONOUS;
-			auto decode_started = timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-			shared.function.function(shared.context, input, chunk);
-			if (timing) {
-				timing->decode_ms +=
-				    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decode_started)
-				        .count();
+		for (auto &shared_state : shared_states) {
+			auto &shared = *shared_state;
+			D_ASSERT(&shared.context == &first.context);
+			D_ASSERT(shared.output_types == first.output_types);
+			TableFunctionInitInput init_input(shared.bind_data.get(), shared.column_ids, shared.projection_ids,
+			                                  shared.filters.get());
+			auto local_state = shared.function.init_local(execution_context, init_input, shared.global_state.get());
+			if (!local_state) {
+				continue;
 			}
 
-			auto result_type = input.async_result.GetResultType();
-			if (result_type == AsyncResultType::BLOCKED || result_type == AsyncResultType::INVALID) {
-				throw InternalException("Direct Parquet sample returned an invalid synchronous scan state");
-			}
-			if (chunk.size() > 0) {
-				task_sampled_rows += chunk.size();
-				if (task_filter_executor) {
-					auto filter_started =
-					    timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-					auto survivor_count = task_filter_executor->SelectExpression(chunk, selection);
-					if (timing) {
-						timing->filter_ms +=
-						    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - filter_started)
-						        .count();
-					}
-					if (survivor_count == 0) {
-						if (result_type == AsyncResultType::FINISHED) {
-							break;
-						}
-						continue;
-					}
-					if (survivor_count < chunk.size()) {
-						chunk.Slice(selection, survivor_count);
-						chunk.Flatten();
-					}
-				}
-				auto append_started =
+			while (true) {
+				chunk.Reset();
+				TableFunctionInput input(shared.bind_data.get(), local_state.get(), shared.global_state.get());
+				input.async_result = AsyncResultType::IMPLICIT;
+				input.results_execution_mode = AsyncResultsExecutionMode::SYNCHRONOUS;
+				auto decode_started =
 				    timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
-				local_output->Append(append_state, chunk);
+				shared.function.function(shared.context, input, chunk);
 				if (timing) {
-					timing->append_ms +=
-					    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - append_started)
+					timing->decode_ms +=
+					    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - decode_started)
 					        .count();
 				}
-			}
+				auto result_type = input.async_result.GetResultType();
+				if (result_type == AsyncResultType::BLOCKED || result_type == AsyncResultType::INVALID) {
+					throw InternalException("Direct Parquet sample returned an invalid synchronous scan state");
+				}
+				if (chunk.size() > 0) {
+					task_sampled_rows += chunk.size();
+					if (task_filter_executor) {
+						auto filter_started =
+						    timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+						auto survivor_count = task_filter_executor->SelectExpression(chunk, selection);
+						if (timing) {
+							timing->filter_ms += std::chrono::duration<double, std::milli>(
+							                         std::chrono::steady_clock::now() - filter_started)
+							                         .count();
+						}
+						if (survivor_count == 0) {
+							if (result_type == AsyncResultType::FINISHED) {
+								break;
+							}
+							continue;
+						}
+						if (survivor_count < chunk.size()) {
+							chunk.Slice(selection, survivor_count);
+							chunk.Flatten();
+						}
+					}
+					auto append_started =
+					    timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+					local_output->Append(append_state, chunk);
+					if (timing) {
+						timing->append_ms +=
+						    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - append_started)
+						        .count();
+					}
+				}
 
-			if (result_type == AsyncResultType::FINISHED ||
-			    (result_type == AsyncResultType::IMPLICIT && chunk.size() == 0)) {
-				break;
-			}
-			if (result_type == AsyncResultType::HAVE_MORE_OUTPUT && chunk.size() == 0) {
-				throw InternalException("Direct Parquet sample produced empty HAVE_MORE_OUTPUT");
+				if (result_type == AsyncResultType::FINISHED ||
+				    (result_type == AsyncResultType::IMPLICIT && chunk.size() == 0)) {
+					break;
+				}
+				if (result_type == AsyncResultType::HAVE_MORE_OUTPUT && chunk.size() == 0) {
+					throw InternalException("Direct Parquet sample produced empty HAVE_MORE_OUTPUT");
+				}
 			}
 		}
 
@@ -330,7 +501,7 @@ public:
 	}
 
 private:
-	shared_ptr<DirectParquetSampleSharedState> shared_state;
+	vector<shared_ptr<DirectParquetSampleSharedState>> shared_states;
 	unique_ptr<Expression> local_predicate;
 	bool collect_timing;
 	DirectParquetWorkerResult result;
@@ -375,9 +546,9 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 	    plan.output_types.empty()) {
 		throw InternalException("Parquet instant sample is missing a required scan callback or bind data");
 	}
-	D_ASSERT(!plan.ranges.empty());
-	if (plan.ranges.empty()) {
-		throw InternalException("Parquet instant sample has no row ranges");
+	D_ASSERT(!plan.files.empty());
+	if (plan.files.empty()) {
+		throw InternalException("Parquet instant sample has no file scan domains");
 	}
 
 	vector<idx_t> projection_ids;
@@ -385,33 +556,113 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 	for (auto projection_id : get.projection_ids) {
 		projection_ids.push_back(projection_id.GetIndex());
 	}
-
 	auto scan_started = std::chrono::steady_clock::now();
-	auto row_filter = BuildRowNumberRangeFilter(plan.ranges);
-	D_ASSERT(row_filter);
-	auto filters = make_uniq<TableFilterSet>();
-	filters->PushFilter(ProjectionIndex(plan.output_types.size()), make_uniq<ExpressionFilter>(std::move(row_filter)));
-	auto bind_data = get.bind_data->Copy();
-	if (!bind_data) {
-		throw InternalException("Parquet instant sampler could not copy bind data");
+	auto &source_bind = get.bind_data->Cast<MultiFileBindData>();
+	vector<OpenFileInfo> source_files;
+	if (plan.total_files > 1) {
+		source_files = source_bind.file_list->GetAllFiles();
+		if (source_files.size() != plan.total_files) {
+			throw InternalException("Parquet instant sample file expansion changed between planning and execution");
+		}
 	}
-	auto shared_state = make_shared_ptr<DirectParquetSampleSharedState>(context, get.function, std::move(bind_data),
-	                                                                    get.GetColumnIds(), std::move(projection_ids),
-	                                                                    std::move(filters), plan.output_types);
-	if (!shared_state->Initialize()) {
-		throw InternalException("Parquet instant sample could not initialize its global scan state");
+
+	vector<shared_ptr<DirectParquetSampleSharedState>> shared_states;
+	shared_states.reserve(plan.files.size());
+	for (auto &file_sample : plan.files) {
+		D_ASSERT(file_sample.selected_row_groups > 0);
+		D_ASSERT(!file_sample.ranges.empty());
+		if (file_sample.ranges.empty()) {
+			throw InternalException("Parquet instant sample file has no row ranges");
+		}
+		auto row_filter = BuildRowNumberRangeFilter(file_sample.ranges);
+		D_ASSERT(row_filter);
+		auto filters = make_uniq<TableFilterSet>();
+		filters->PushFilter(ProjectionIndex(plan.output_types.size()),
+		                    make_uniq<ExpressionFilter>(std::move(row_filter)));
+
+		auto bind_data = get.bind_data->Copy();
+		if (!bind_data) {
+			throw InternalException("Parquet instant sampler could not copy bind data");
+		}
+		if (plan.total_files > 1) {
+			if (file_sample.file_index >= source_files.size()) {
+				throw InternalException("Parquet instant sample references an invalid file index");
+			}
+			auto &file_bind = bind_data->Cast<MultiFileBindData>();
+			vector<OpenFileInfo> one_file;
+			one_file.push_back(source_files[file_sample.file_index]);
+			file_bind.file_list = make_shared_ptr<SimpleMultiFileList>(std::move(one_file));
+			file_bind.initial_reader.reset();
+			file_bind.union_readers.clear();
+			if (source_bind.union_readers.size() == source_files.size()) {
+				GlobalTableFunctionState reader_state;
+				file_bind.initial_reader = source_bind.multi_file_reader->CreateReader(
+				    context, reader_state, *source_bind.union_readers[file_sample.file_index], source_bind);
+			} else if (file_sample.file_index == 0 && source_bind.initial_reader &&
+			           source_bind.initial_reader->GetFileName() == source_files.front().path) {
+				file_bind.initial_reader = source_bind.initial_reader;
+			}
+		}
+
+		auto shared_state = make_shared_ptr<DirectParquetSampleSharedState>(context, get.function, std::move(bind_data),
+		                                                                    get.GetColumnIds(), projection_ids,
+		                                                                    std::move(filters), plan.output_types);
+		if (!shared_state->Initialize()) {
+			throw InternalException("Parquet instant sample could not initialize its global scan state");
+		}
+		shared_states.push_back(std::move(shared_state));
 	}
 
 	// Row-group initialization and positioning dominate tiny Parquet samples,
-	// so preserve one parallel work unit per selected group up to the bound.
+	// so preserve one parallel work unit per selected group up to the global
+	// bound. When a caller selects more files than that bound, workers drain
+	// several isolated file domains instead of creating an executor per file.
 	auto task_count = MinValue<idx_t>(INSTANT_PARQUET_TASK_LIMIT, plan.selected_row_groups);
 	D_ASSERT(task_count > 0);
 	result.task_count = task_count;
+	vector<vector<shared_ptr<DirectParquetSampleSharedState>>> worker_states(task_count);
+	if (shared_states.size() >= task_count) {
+		vector<idx_t> state_order(shared_states.size());
+		vector<idx_t> state_weights(shared_states.size(), 0);
+		for (idx_t state_index = 0; state_index < shared_states.size(); state_index++) {
+			state_order[state_index] = state_index;
+			for (auto &range : plan.files[state_index].ranges) {
+				state_weights[state_index] += range.row_count;
+			}
+		}
+		std::sort(state_order.begin(), state_order.end(),
+		          [&](idx_t left, idx_t right) { return state_weights[left] > state_weights[right]; });
+		vector<idx_t> worker_weights(task_count, 0);
+		for (auto state_index : state_order) {
+			auto worker_index = std::min_element(worker_weights.begin(), worker_weights.end()) - worker_weights.begin();
+			worker_states[worker_index].push_back(shared_states[state_index]);
+			worker_weights[worker_index] += state_weights[state_index];
+		}
+	} else {
+		vector<idx_t> additional_capacities;
+		additional_capacities.reserve(plan.files.size());
+		for (auto &file_sample : plan.files) {
+			D_ASSERT(file_sample.selected_row_groups > 0);
+			additional_capacities.push_back(file_sample.selected_row_groups - 1);
+		}
+		auto additional_workers = AllocateProportionalQuotas(additional_capacities, task_count - shared_states.size());
+		idx_t worker_index = 0;
+		for (idx_t state_index = 0; state_index < shared_states.size(); state_index++) {
+			auto state_workers = 1 + additional_workers[state_index];
+			for (idx_t state_worker = 0; state_worker < state_workers; state_worker++) {
+				D_ASSERT(worker_index < worker_states.size());
+				worker_states[worker_index++].push_back(shared_states[state_index]);
+			}
+		}
+		D_ASSERT(worker_index == worker_states.size());
+	}
+
 	vector<unique_ptr<DirectParquetSampleWorker>> workers;
 	workers.reserve(task_count);
 	for (idx_t task = 0; task < task_count; task++) {
+		D_ASSERT(!worker_states[task].empty());
 		workers.push_back(make_uniq<DirectParquetSampleWorker>(
-		    shared_state, local_predicate ? local_predicate->Copy() : nullptr, collect_timing));
+		    std::move(worker_states[task]), local_predicate ? local_predicate->Copy() : nullptr, collect_timing));
 	}
 
 	if (task_count == 1) {

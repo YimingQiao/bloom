@@ -113,7 +113,7 @@ an existing database. CEB SQL is downloaded and checksum-verified automatically.
 Bloom works without tuning. Prepared sampling is the default: a 10K-row
 reservoir per table is persisted and reused across queries. Set
 `rpt_sample_mode` to `instant` to use a fresh, query-local sample from native
-DuckDB storage or a single Parquet file without using a prepared sample.
+DuckDB storage or one or more Parquet files without using a prepared sample.
 
 The main settings are:
 

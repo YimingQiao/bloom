@@ -33,15 +33,25 @@ struct InstantSampleRange {
 	idx_t row_count;
 };
 
-//! A bounded sample plan for one single-file Parquet scan.
+//! File-relative Parquet ranges that must be scanned as one isolated domain.
+//! file_row_number restarts at zero for every file, so ranges from different
+//! files cannot share a TableFilterSet.
+struct InstantParquetFileSample {
+	idx_t file_index;
+	idx_t selected_row_groups;
+	vector<InstantSampleRange> ranges;
+};
+
+//! A bounded sample plan over one or more Parquet files.
 struct InstantParquetSamplePlan {
 	bool valid = false;
+	idx_t total_files = 0;
 	idx_t total_row_groups = 0;
 	idx_t selected_row_groups = 0;
 	idx_t candidate_rows = 0;
 	idx_t source_rows = 0;
 	vector<LogicalType> output_types;
-	vector<InstantSampleRange> ranges;
+	vector<InstantParquetFileSample> files;
 
 	explicit operator bool() const {
 		return valid;
@@ -83,7 +93,7 @@ struct InstantSampleResult {
 	}
 };
 
-//! Add a bounded, stratified row-group selection to a single-file Parquet GET.
+//! Add a bounded, stratified row-group selection to a Parquet GET.
 InstantParquetSamplePlan PlanInstantParquetSample(ClientContext &context, LogicalGet &get, idx_t target_rows,
                                                   idx_t target_row_groups, uint64_t seed);
 

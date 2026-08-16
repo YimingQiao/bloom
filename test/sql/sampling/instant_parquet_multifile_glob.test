@@ -1,0 +1,48 @@
+# name: test/sql/sampling/instant_parquet_multifile_glob.test
+# description: sample a Parquet glob with unequal and empty files
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET parquet_metadata_cache = false;
+
+statement ok
+SET threads = 8;
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 11 = 0) keep FROM range(0, 1000) t(i)
+) TO '{TEST_DIR}/rpt_multi_glob_0.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 16384);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, false keep FROM range(0) t(i)
+) TO '{TEST_DIR}/rpt_multi_glob_1.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 16384);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 11 = 0) keep FROM range(1000, 5000) t(i)
+) TO '{TEST_DIR}/rpt_multi_glob_2.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 16384);
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 11 = 0) keep FROM range(5000, 10000) t(i)
+) TO '{TEST_DIR}/rpt_multi_glob_3.parquet' (FORMAT PARQUET, ROW_GROUP_SIZE 16384);
+
+statement ok
+CREATE TABLE rpt_multi_glob_ids AS
+SELECT i::INTEGER id FROM range(10000) t(i);
+
+query I
+SELECT count(*)
+FROM read_parquet('{TEST_DIR}/rpt_multi_glob_*.parquet') p
+JOIN rpt_multi_glob_ids ids USING (id)
+WHERE p.keep;
+----
+910

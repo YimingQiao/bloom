@@ -1,0 +1,54 @@
+# name: test/sql/sampling/instant_parquet_multifile_threads.test
+# description: drain multi-file metadata and scan tasks with and without background workers
+# group: [sampling]
+
+require bloom
+
+require parquet
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_sample_size = 64;
+
+statement ok
+SET rpt_instant_parquet_row_groups = 9;
+
+statement ok
+COPY (
+    SELECT i::INTEGER id, (i % 13 = 0) keep, (i // 1000)::INTEGER part
+    FROM range(9000) t(i)
+) TO '{TEST_DIR}/rpt_multi_threads' (FORMAT PARQUET, PARTITION_BY (part));
+
+statement ok
+CREATE TABLE rpt_multi_thread_ids AS
+SELECT i::INTEGER id FROM range(9000) t(i);
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET async_threads = 0;
+
+query I
+SELECT count(*)
+FROM read_parquet('{TEST_DIR}/rpt_multi_threads/*/*.parquet') p
+JOIN rpt_multi_thread_ids ids USING (id)
+WHERE p.keep;
+----
+693
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET async_threads = 8;
+
+query I
+SELECT count(*)
+FROM read_parquet('{TEST_DIR}/rpt_multi_threads/*/*.parquet') p
+JOIN rpt_multi_thread_ids ids USING (id)
+WHERE p.keep;
+----
+693

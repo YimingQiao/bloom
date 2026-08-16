@@ -423,7 +423,7 @@ void TableSampleManager::BuildInstantSample(Entry &sample, const LogicalOperator
 	if (!plan || plan.output_types.empty()) {
 		InstantSampleResult unavailable;
 		unavailable.source = InstantSampleSource::PARQUET;
-		unavailable.unavailable_reason = "Parquet scan cannot form a bounded single-file row-number sample";
+		unavailable.unavailable_reason = "Parquet scan cannot form a bounded file-aware row-number sample";
 		AdoptInstantSample(sample, std::move(unavailable), 0, table_seed);
 		return;
 	}
