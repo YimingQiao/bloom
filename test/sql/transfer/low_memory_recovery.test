@@ -1,0 +1,756 @@
+# name: test/sql/transfer/low_memory_recovery.test
+# description: keep RPT bounded and recoverable when transfer memory is scarce
+# group: [transfer]
+
+require bloom
+
+load {TEST_DIR}/rpt_low_memory_recovery.db
+
+statement ok
+CREATE TABLE rpt_low_hub AS
+SELECT i::INTEGER id, (i * 3)::BIGINT payload
+FROM range(80000) t(i);
+
+statement ok
+CREATE TABLE rpt_low_wide1 AS
+SELECT i::INTEGER id,
+       repeat('x', 512) payload,
+       (i % 100 = 0) keep
+FROM range(80000) t(i);
+
+statement ok
+CREATE TABLE rpt_low_wide2 AS
+SELECT i::INTEGER id,
+       repeat('y', 512) payload,
+       (i % 50 = 0) keep
+FROM range(80000) t(i);
+
+statement ok
+CHECKPOINT;
+
+# Reopen the database so the low-memory cases start with evictable table data
+# instead of buffers retained by CREATE TABLE.
+restart
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET rpt_sample_mode = 'instant';
+
+statement ok
+SET rpt_instant_access = 'scattered';
+
+statement ok
+SET rpt_instant_access_points = 4;
+
+statement ok
+SET rpt_instant_rows_per_access = 64;
+
+statement ok
+SET rpt_sample_memory_cache = false;
+
+# ============================================================================
+# Native reference and whole-query admission fallback
+# ============================================================================
+
+statement ok
+CREATE TEMP TABLE rpt_low_allocator_baseline AS
+SELECT memory_usage_bytes AS bytes
+FROM duckdb_memory()
+WHERE tag = 'ALLOCATOR';
+
+# Measure the allocator footprint of DuckDB's native prepared plan. Every
+# whole-query fallback below must retain exactly this much, rather than merely
+# returning the same result after silently keeping RPT objects alive.
+statement ok
+SET enable_rpt = false;
+
+statement ok
+PREPARE rpt_low_native AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_native;
+----
+800	409600	409600
+
+statement ok
+CREATE TEMP TABLE rpt_low_native_retained AS
+SELECT memory_usage_bytes - baseline.bytes AS bytes
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+
+query II
+SELECT (native.bytes > 0)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory, rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_native;
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+SET enable_rpt = true;
+
+# A non-zero budget below the sample estimate falls back before sampling.
+statement ok
+SET rpt_memory_limit = '64KB';
+
+statement ok
+PREPARE rpt_low_sample_fallback AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_sample_fallback;
+----
+800	409600	409600
+
+query II
+SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_sample_fallback;
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+# Sampling fits, but the first wide source does not. This is a distinct
+# pre-materialization fallback and must still match the native plan footprint.
+statement ok
+SET rpt_memory_limit = '13MB';
+
+statement ok
+PREPARE rpt_low_materialize_fallback AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_materialize_fallback;
+----
+800	409600	409600
+
+query II
+SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_materialize_fallback;
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+# DuckDB can independently deny RPT's temporary-memory reservation even when
+# the explicit RPT limit is generous. That denial is also a native fallback.
+statement ok
+SET debug_force_external = true;
+
+statement ok
+SET rpt_memory_limit = '32MB';
+
+statement ok
+PREPARE rpt_low_reservation_fallback AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_reservation_fallback;
+----
+800	409600	409600
+
+query II
+SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_reservation_fallback;
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+statement ok
+SET debug_force_external = false;
+
+# ============================================================================
+# Retained-plan memory ladder and repeated cleanup
+# ============================================================================
+
+# A generous RPT budget establishes how much memory the complete rewrite
+# retains in its prepared physical plan.
+statement ok
+SET rpt_memory_limit = '32MB';
+
+statement ok
+PREPARE rpt_low_full AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_full;
+----
+800	409600	409600
+
+statement ok
+CREATE TEMP TABLE rpt_low_full_retained AS
+SELECT memory_usage_bytes - baseline.bytes AS bytes
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+
+query II
+SELECT (retained.bytes > native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_full_retained retained,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_full;
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# This budget admits the first wide source but not the second one. RPT must
+# stop expanding the transfer, keep the completed work, and execute correctly.
+statement ok
+SET rpt_memory_limit = '14.4MB';
+
+statement ok
+PREPARE rpt_low_partial AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_partial;
+----
+800	409600	409600
+
+# Partial transfer retains some RPT data, but less than the complete rewrite,
+# and the non-spill allocator never has temporary storage.
+query III
+SELECT (memory.memory_usage_bytes - baseline.bytes > native.bytes)::INTEGER,
+       (memory.memory_usage_bytes - baseline.bytes < retained.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_full_retained retained,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1	1
+
+statement ok
+DEALLOCATE rpt_low_partial;
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# Repeated partial transfers must not accumulate allocator memory after each
+# statement releases its physical plan.
+loop i 0 5
+
+query III
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	409600	409600
+
+endloop
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# ============================================================================
+# Explicit and automatic fallback across execution widths
+# ============================================================================
+
+# Before any source is completed, no budget means a whole-query fallback.
+# Its prepared plan must retain exactly the native footprint.
+statement ok
+SET rpt_memory_limit = '0B';
+
+statement ok
+SET threads = 1;
+
+statement ok
+PREPARE rpt_low_zero_fallback AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_zero_fallback;
+----
+800	409600	409600
+
+query II
+SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_zero_fallback;
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# Also exercise the native fallback at several execution widths.
+query II
+SELECT count(*), sum(h.id)
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	31960000
+
+statement ok
+SET threads = 4;
+
+query II
+SELECT count(*), sum(h.id)
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	31960000
+
+statement ok
+SET threads = 8;
+
+query II
+SELECT count(*), sum(h.id)
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	31960000
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# In automatic mode RPT receives only a fraction of DuckDB's currently
+# available operator memory. A wide, parallel transfer must be rejected by
+# admission while the original query still runs within the global limit.
+statement ok
+SET memory_limit = '32MB';
+
+statement ok
+SET threads = 8;
+
+statement ok
+SET rpt_memory_limit = 'auto';
+
+statement ok
+PREPARE rpt_low_auto_fallback AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III
+EXECUTE rpt_low_auto_fallback;
+----
+800	409600	409600
+
+query II
+SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+DEALLOCATE rpt_low_auto_fallback;
+
+query I
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# ============================================================================
+# Database-wide budget contention across connections
+# ============================================================================
+
+# Temporary-memory reservations are database-wide. Keep a large RPT rewrite
+# alive on one connection, then verify that another connection's auto budget is
+# computed from the remaining memory and retains only its native plan.
+statement ok
+SET memory_limit = '64MB';
+
+statement ok con1
+SET threads = 4;
+
+statement ok con1
+SET rpt_sample_mode = 'instant';
+
+statement ok con1
+SET rpt_instant_access = 'scattered';
+
+statement ok con1
+SET rpt_instant_access_points = 4;
+
+statement ok con1
+SET rpt_instant_rows_per_access = 64;
+
+statement ok con1
+SET rpt_sample_memory_cache = false;
+
+statement ok con1
+SET rpt_memory_limit = '48MB';
+
+statement ok con1
+PREPARE rpt_low_pressure_holder AS
+SELECT count(*), sum(length(w1.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+WHERE w1.id % 4 != 3;
+
+query II con1
+EXECUTE rpt_low_pressure_holder;
+----
+60000	30720000
+
+statement ok
+CREATE TEMP TABLE rpt_low_pressure_retained AS
+SELECT memory_usage_bytes - baseline.bytes AS bytes
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+
+query II
+SELECT (pressure.bytes > retained.bytes)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_pressure_retained pressure,
+     rpt_low_full_retained retained
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+# Measure the second connection's native prepared-plan footprint while the
+# first reservation is held; this is the fallback reference under pressure.
+statement ok con2
+SET threads = 8;
+
+statement ok con2
+SET enable_rpt = false;
+
+statement ok con2
+PREPARE rpt_low_contended_native AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III con2
+EXECUTE rpt_low_contended_native;
+----
+800	409600	409600
+
+statement ok
+CREATE TEMP TABLE rpt_low_contended_native_retained AS
+SELECT memory.memory_usage_bytes - baseline.bytes - pressure.bytes AS bytes
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_pressure_retained pressure
+WHERE memory.tag = 'ALLOCATOR';
+
+query I
+SELECT (bytes > 0)::INTEGER
+FROM rpt_low_contended_native_retained;
+----
+1
+
+statement ok con2
+DEALLOCATE rpt_low_contended_native;
+
+query I
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - pressure.bytes) <= 65536)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_pressure_retained pressure
+WHERE memory.tag = 'ALLOCATOR';
+----
+1
+
+statement ok con2
+SET enable_rpt = true;
+
+statement ok con2
+SET rpt_sample_mode = 'instant';
+
+statement ok con2
+SET rpt_instant_access = 'scattered';
+
+statement ok con2
+SET rpt_instant_access_points = 4;
+
+statement ok con2
+SET rpt_instant_rows_per_access = 64;
+
+statement ok con2
+SET rpt_sample_memory_cache = false;
+
+statement ok con2
+SET rpt_memory_limit = 'auto';
+
+statement ok con2
+PREPARE rpt_low_contended_auto AS
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+
+query III con2
+EXECUTE rpt_low_contended_auto;
+----
+800	409600	409600
+
+# Concurrent native prepared plans can differ by one small allocator block.
+# Allow 64 KiB of native-plan noise; the smallest retained RPT rewrite measured
+# above is hundreds of KiB larger than this fallback footprint.
+query II
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - pressure.bytes - native.bytes) <= 65536)::INTEGER,
+       (memory.temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_pressure_retained pressure,
+     rpt_low_contended_native_retained native
+WHERE memory.tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok con2
+DEALLOCATE rpt_low_contended_auto;
+
+query I
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - pressure.bytes) <= 65536)::INTEGER
+FROM duckdb_memory() memory,
+     rpt_low_allocator_baseline baseline,
+     rpt_low_pressure_retained pressure
+WHERE memory.tag = 'ALLOCATOR';
+----
+1
+
+statement ok con1
+DEALLOCATE rpt_low_pressure_holder;
+
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+# ============================================================================
+# Allocation failure, cleanup, and connection recovery
+# ============================================================================
+
+# Variable-width values can exceed the conservative admission estimate while
+# materialization is already running. RPT is deliberately non-spill: propagate
+# DuckDB's OOM instead of hiding it or silently restarting the query.
+statement ok
+SET memory_limit = '32MB';
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET rpt_memory_limit = '16MB';
+
+statement error
+SELECT count(*), sum(length(w1.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+WHERE w1.id % 4 != 3;
+----
+Out of Memory Error
+
+query I
+SELECT 42;
+----
+42
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+# Recovery must include RPT itself, not only trivial native statements.
+statement ok
+SET rpt_memory_limit = '14.4MB';
+
+query III
+SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	409600	409600
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+# Repeat the allocation failure with worker tasks active.
+statement ok
+SET threads = 4;
+
+statement ok
+SET rpt_memory_limit = '28MB';
+
+statement error
+SELECT count(*), sum(length(w1.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+WHERE w1.id % 4 != 3;
+----
+Out of Memory Error
+
+# The failed transfer must release its executor state and leave the connection
+# usable. With RPT forced to the original plan, the same query fits in 32 MB.
+query I
+SELECT 42;
+----
+42
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
+
+statement ok
+SET rpt_memory_limit = '0B';
+
+query II
+SELECT count(*), sum(length(w1.payload))
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+WHERE w1.id % 4 != 3;
+----
+60000	30720000
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
