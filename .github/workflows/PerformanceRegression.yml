@@ -44,15 +44,17 @@ jobs:
     name: JOB + TPC-H SF1
     runs-on: ubuntu-24.04
     timeout-minutes: 120
-    env:
-      BASE_DIR: ${{ runner.temp }}/bloom-base
-      RPT_SAMPLE_CACHE_DIR: ${{ runner.temp }}/rpt-samples
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
           submodules: recursive
+
+      - name: Set benchmark paths
+        run: |
+          echo "BASE_DIR=${RUNNER_TEMP}/bloom-base" >> "${GITHUB_ENV}"
+          echo "RPT_SAMPLE_CACHE_DIR=${RUNNER_TEMP}/rpt-samples" >> "${GITHUB_ENV}"
 
       - name: Install build dependencies
         run: |
