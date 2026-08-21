@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
-"""Compare Bloom performance between a base and candidate benchmark runner.
+"""Compare Bloom performance with its base commit and the DuckDB baseline.
 
 The comparison intentionally covers only JOB and TPC-H SF1. Each round runs
-the full workload once per binary and alternates which binary runs first. A
-query slowdown of at least 10% is reported, while the CI gate follows DuckDB's
-aggregate policy: fail when the workload geomean grows by at least 10% or 50ms.
+the full workload with the base Bloom runner, candidate Bloom runner, and the
+candidate runner with RPT disabled. The order alternates for both comparisons.
+A commit-to-commit query slowdown of at least 10% is reported, while the CI
+gate follows DuckDB's aggregate policy: fail when the workload geomean grows
+by at least 10% or 50ms. The DuckDB comparison reports Bloom's absolute
+speedup without imposing an uncalibrated speedup floor.
 """
 
 import argparse
@@ -98,6 +101,8 @@ def run_once(args, workload, side, runner, round_index):
         "--out",
         str(result_path),
     ]
+    if side == "duckdb":
+        command.append("--baseline")
     print(f">>> {workload} {side} round {round_index + 1}: {shlex.join(command)}", flush=True)
     completed = subprocess.run(command, text=True, capture_output=True, check=False)
     log_path.write_text(
@@ -127,11 +132,22 @@ def geometric_mean(values):
     return math.exp(math.fsum(math.log(value) for value in values) / len(values))
 
 
-def summarize_timings(workload, base_timings, candidate_timings, expected_samples, regression_ratio):
+def summarize_timings(
+    workload,
+    base_timings,
+    candidate_timings,
+    expected_samples,
+    regression_ratio,
+    base_label="base",
+    candidate_label="candidate",
+):
     if base_timings.keys() != candidate_timings.keys():
         base_only = sorted(base_timings.keys() - candidate_timings.keys())
         candidate_only = sorted(candidate_timings.keys() - base_timings.keys())
-        raise RuntimeError(f"query-set mismatch: base-only={base_only}, candidate-only={candidate_only}")
+        raise RuntimeError(
+            f"query-set mismatch: {base_label}-only={base_only}, "
+            f"{candidate_label}-only={candidate_only}"
+        )
     expected_queries = WORKLOAD_QUERY_COUNTS[workload]
     if len(base_timings) != expected_queries:
         raise RuntimeError(f"{workload} produced {len(base_timings)} queries; expected {expected_queries}")
@@ -142,8 +158,8 @@ def summarize_timings(workload, base_timings, candidate_timings, expected_sample
         candidate_samples = candidate_timings[query]
         if len(base_samples) != expected_samples or len(candidate_samples) != expected_samples:
             raise RuntimeError(
-                f"{query} has {len(base_samples)} base and {len(candidate_samples)} candidate "
-                f"samples; expected {expected_samples}"
+                f"{query} has {len(base_samples)} {base_label} and "
+                f"{len(candidate_samples)} {candidate_label} samples; expected {expected_samples}"
             )
         base_median = statistics.median(base_samples)
         candidate_median = statistics.median(candidate_samples)
@@ -235,20 +251,78 @@ def report_summary(summary, regression_ratio, geomean_seconds, no_fail):
     return gate_failed
 
 
+def report_duckdb_summary(summary):
+    rows = summary["rows"]
+    duckdb_total = math.fsum(row["base"] for row in rows)
+    bloom_total = math.fsum(row["candidate"] for row in rows)
+    total_speedup = duckdb_total / bloom_total
+    geomean_speedup = 1 / summary["geomean_ratio"]
+    faster = sum(row["candidate"] < row["base"] for row in rows)
+    faster_by_ten_percent = sum(row["ratio"] <= 1 / 1.10 for row in rows)
+    slower_by_ten_percent = sum(row["ratio"] >= 1.10 for row in rows)
+    lines = [
+        f"## Bloom vs DuckDB: `{summary['workload']}`",
+        "",
+        "| Metric | DuckDB | Bloom | Bloom speedup |",
+        "| --- | ---: | ---: | ---: |",
+        f"| Sum of query medians | {format_seconds(duckdb_total)} | {format_seconds(bloom_total)} "
+        f"| {total_speedup:.3f}x |",
+        f"| Query geomean | {format_seconds(summary['base_geomean'])} "
+        f"| {format_seconds(summary['candidate_geomean'])} | {geomean_speedup:.3f}x |",
+        "",
+        f"Bloom is faster on {faster}/{len(rows)} queries; at least 10% faster on "
+        f"{faster_by_ten_percent}, and at least 10% slower on {slower_by_ten_percent}.",
+        "",
+    ]
+    if total_speedup < 1 or geomean_speedup < 1:
+        emit_annotation(
+            "warning",
+            "Bloom slower than DuckDB",
+            f"{summary['workload']} total speedup is {total_speedup:.3f}x and "
+            f"query geomean speedup is {geomean_speedup:.3f}x",
+        )
+    print("\n".join(lines))
+    append_step_summary(lines)
+
+
 def compare_workload(args, workload):
-    timings = {"base": defaultdict(list), "candidate": defaultdict(list)}
-    runners = {"base": args.base_runner, "candidate": args.candidate_runner}
+    timings = {
+        "base": defaultdict(list),
+        "candidate": defaultdict(list),
+        "duckdb": defaultdict(list),
+    }
+    runners = {
+        "base": args.base_runner,
+        "candidate": args.candidate_runner,
+        "duckdb": args.candidate_runner,
+    }
     for round_index in range(args.rounds):
-        order = ("base", "candidate") if round_index % 2 == 0 else ("candidate", "base")
+        order = (
+            ("base", "candidate", "duckdb")
+            if round_index % 2 == 0
+            else ("duckdb", "candidate", "base")
+        )
         for side in order:
             current = run_once(args, workload, side, runners[side], round_index)
             merge_timings(timings[side], current)
-    return summarize_timings(
-        workload,
-        timings["base"],
-        timings["candidate"],
-        args.rounds * args.timed_runs,
-        args.regression_ratio,
+    expected_samples = args.rounds * args.timed_runs
+    return (
+        summarize_timings(
+            workload,
+            timings["base"],
+            timings["candidate"],
+            expected_samples,
+            args.regression_ratio,
+        ),
+        summarize_timings(
+            workload,
+            timings["duckdb"],
+            timings["candidate"],
+            expected_samples,
+            args.regression_ratio,
+            base_label="duckdb",
+            candidate_label="bloom",
+        ),
     )
 
 
@@ -270,13 +344,14 @@ def main():
     failed = False
     try:
         for workload in workloads:
-            summary = compare_workload(args, workload)
+            summary, duckdb_summary = compare_workload(args, workload)
             failed |= report_summary(
                 summary,
                 args.regression_ratio,
                 args.geomean_regression_seconds,
                 args.no_fail,
             )
+            report_duckdb_summary(duckdb_summary)
     except RuntimeError as error:
         emit_annotation("error", "Performance benchmark failure", str(error))
         print(f"performance comparison failed: {error}", file=sys.stderr)

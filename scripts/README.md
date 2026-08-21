@@ -9,8 +9,11 @@ belongs under the dated directory in `experiments/`.
   prepared with instant sampling under the same query-warm protocol. Select the
   latter with `--comparison sampling`.
 - `compare_performance.py`: compare base and candidate Bloom benchmark runners
-  across full JOB and TPC-H SF1 workloads. It reports per-query slowdowns of at
-  least 10% and fails on a workload geomean increase of at least 10% or 50ms.
+  across full JOB and TPC-H SF1 workloads, then compare the candidate with the
+  same DuckDB runner with RPT disabled. It reports absolute total and
+  per-query-geomean speedups, reports commit-to-commit query slowdowns of at
+  least 10%, and fails on a commit-to-commit workload geomean increase of at
+  least 10% or 50ms.
 - `run_benchmark.py`: lower-level workload runner used by the suite and
   research experiments. Existing databases that are not writable are attached
   read-only to a transient runner database; they are never silently regenerated.

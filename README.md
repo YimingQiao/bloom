@@ -111,10 +111,12 @@ python3 scripts/run_benchmark.py --workload imdb --db /path/to/imdb.duckdb
 Databases and sample caches are kept under `.bench_cache/`. Pass `--db` to use
 an existing database. CEB SQL is downloaded and checksum-verified automatically.
 
-The Performance Regression workflow compares each change with its base commit
-across the complete JOB and TPC-H SF1 workloads. Per-query slowdowns of at least
-10% are reported; CI fails when a workload's query-time geomean increases by at
-least 10% or 50ms.
+The Performance Regression workflow runs the complete JOB and TPC-H SF1
+workloads against the base commit, the candidate, and the candidate with RPT
+disabled. It reports Bloom's total and per-query-geomean speedups over DuckDB,
+as well as commit-to-commit query slowdowns of at least 10%. CI fails when a
+workload's commit-to-commit query-time geomean increases by at least 10% or
+50ms.
 
 ## Configuration
 

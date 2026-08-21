@@ -137,7 +137,7 @@ jobs:
           CCACHE_DIR: ${{ runner.temp }}/ccache
         run: ccache --show-stats
 
-      - name: Compare JOB and TPC-H SF1
+      - name: Compare commits and DuckDB baseline
         run: |
           mkdir -p "${RPT_SAMPLE_CACHE_DIR}"
           python3 scripts/compare_performance.py \
