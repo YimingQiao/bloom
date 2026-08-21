@@ -111,6 +111,11 @@ python3 scripts/run_benchmark.py --workload imdb --db /path/to/imdb.duckdb
 Databases and sample caches are kept under `.bench_cache/`. Pass `--db` to use
 an existing database. CEB SQL is downloaded and checksum-verified automatically.
 
+The Performance Regression workflow compares each change with its base commit
+across the complete JOB and TPC-H SF1 workloads. Per-query slowdowns of at least
+10% are reported; CI fails when a workload's query-time geomean increases by at
+least 10% or 50ms.
+
 ## Configuration
 
 Bloom works without tuning. Prepared sampling is the default: a 10K-row

@@ -8,6 +8,9 @@ belongs under the dated directory in `experiments/`.
 - `run_benchmark_suite.py`: compare Bloom with the DuckDB baseline, or compare
   prepared with instant sampling under the same query-warm protocol. Select the
   latter with `--comparison sampling`.
+- `compare_performance.py`: compare base and candidate Bloom benchmark runners
+  across full JOB and TPC-H SF1 workloads. It reports per-query slowdowns of at
+  least 10% and fails on a workload geomean increase of at least 10% or 50ms.
 - `run_benchmark.py`: lower-level workload runner used by the suite and
   research experiments. Existing databases that are not writable are attached
   read-only to a transient runner database; they are never silently regenerated.

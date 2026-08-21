@@ -1,0 +1,155 @@
+name: Performance Regression
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/PerformanceRegression.yml'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'duckdb'
+      - 'extension_config.cmake'
+      - 'scripts/compare_performance.py'
+      - 'scripts/run_benchmark.py'
+      - 'src/**'
+      - 'test/python/test_compare_performance.py'
+  pull_request:
+    paths:
+      - '.github/workflows/PerformanceRegression.yml'
+      - 'CMakeLists.txt'
+      - 'Makefile'
+      - 'duckdb'
+      - 'extension_config.cmake'
+      - 'scripts/compare_performance.py'
+      - 'scripts/run_benchmark.py'
+      - 'src/**'
+      - 'test/python/test_compare_performance.py'
+  workflow_dispatch:
+    inputs:
+      base_ref:
+        description: Optional base commit or ref (defaults to HEAD^)
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: JOB + TPC-H SF1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      BASE_DIR: ${{ runner.temp }}/bloom-base
+      RPT_SAMPLE_CACHE_DIR: ${{ runner.temp }}/rpt-samples
+
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes ccache libcurl4-openssl-dev libssl-dev ninja-build
+
+      - name: Resolve base commit
+        env:
+          DISPATCH_BASE: ${{ inputs.base_ref }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE: ${{ github.event.pull_request.base.sha }}
+          PUSH_BASE: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          if [[ -n "${DISPATCH_BASE}" ]]; then
+            base_ref="${DISPATCH_BASE}"
+          elif [[ "${EVENT_NAME}" == "pull_request" ]]; then
+            base_ref="${PR_BASE}"
+          elif [[ "${EVENT_NAME}" == "push" && ! "${PUSH_BASE}" =~ ^0+$ ]]; then
+            base_ref="${PUSH_BASE}"
+          else
+            base_ref='HEAD^'
+          fi
+          base_sha="$(git rev-parse --verify --end-of-options "${base_ref}^{commit}")"
+          echo "Comparing $(git rev-parse HEAD) against ${base_sha}"
+          echo "BASE_SHA=${base_sha}" >> "${GITHUB_ENV}"
+
+      - name: Check out base worktree
+        run: |
+          git worktree add --detach "${BASE_DIR}" "${BASE_SHA}"
+          git -C "${BASE_DIR}" submodule update --init --recursive
+
+      - name: Test performance comparison logic
+        run: python3 -m unittest discover --start-directory test/python
+
+      - name: Build candidate benchmark runner
+        env:
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_HASHDIR: 'false'
+          CCACHE_TEMPDIR: ${{ runner.temp }}/ccache-tmp
+        run: |
+          cmake \
+            -G Ninja \
+            -S duckdb \
+            -B build/performance \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEXTENSION_STATIC_BUILD=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="${GITHUB_WORKSPACE}/extension_config.cmake" \
+            -DBUILD_EXTENSIONS='tpch;httpfs;parquet' \
+            -DBUILD_BENCHMARKS=TRUE \
+            -DBUILD_UNITTESTS=TRUE \
+            -DENABLE_EXTENSION_AUTOLOADING=0 \
+            -DENABLE_EXTENSION_AUTOINSTALL=0
+          cmake --build build/performance --target benchmark_runner --parallel 2
+
+      - name: Build base benchmark runner
+        env:
+          CCACHE_BASEDIR: ${{ runner.temp }}/bloom-base
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+          CCACHE_HASHDIR: 'false'
+          CCACHE_TEMPDIR: ${{ runner.temp }}/ccache-tmp
+        run: |
+          cmake \
+            -G Ninja \
+            -S "${BASE_DIR}/duckdb" \
+            -B "${BASE_DIR}/build/performance" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DEXTENSION_STATIC_BUILD=1 \
+            -DDUCKDB_EXTENSION_CONFIGS="${BASE_DIR}/extension_config.cmake" \
+            -DBUILD_EXTENSIONS='tpch;httpfs;parquet' \
+            -DBUILD_BENCHMARKS=TRUE \
+            -DBUILD_UNITTESTS=TRUE \
+            -DENABLE_EXTENSION_AUTOLOADING=0 \
+            -DENABLE_EXTENSION_AUTOINSTALL=0
+          cmake --build "${BASE_DIR}/build/performance" --target benchmark_runner --parallel 2
+
+      - name: Show compiler cache statistics
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: ccache --show-stats
+
+      - name: Compare JOB and TPC-H SF1
+        run: |
+          mkdir -p "${RPT_SAMPLE_CACHE_DIR}"
+          python3 scripts/compare_performance.py \
+            --base-runner "${BASE_DIR}/build/performance/benchmark/benchmark_runner" \
+            --candidate-runner build/performance/benchmark/benchmark_runner \
+            --workload imdb \
+            --workload tpch_sf1 \
+            --out-dir "${RUNNER_TEMP}/performance-results"
+
+      - name: Upload benchmark logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: performance-regression-${{ github.run_id }}
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/performance-results
+          retention-days: 7

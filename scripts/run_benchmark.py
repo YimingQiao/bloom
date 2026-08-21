@@ -46,7 +46,7 @@ WORKLOADS = {
         "queries": DUCKDB / "benchmark" / "imdb_plan_cost" / "queries",
         "answers": DUCKDB / "benchmark" / "imdb" / "answers",
         "load_file": DUCKDB / "benchmark" / "imdb" / "init" / "load.sql",
-        "require": [],
+        "require": ["httpfs", "parquet"],
     },
     "ceb_imdb": {
         "cache": "imdb.duckdb",

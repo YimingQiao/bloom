@@ -5,5 +5,6 @@ duckdb_extension_load(bloom
 
 # To reproduce the TPC-H / TPC-DS benchmark suites, build the runner with the
 # data generators too:
-#   CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j"$(nproc)"
+#   EXT_FLAGS="-DBUILD_EXTENSIONS='tpch;tpcds;httpfs;parquet'" \
+#     BUILD_BENCHMARK=1 make release -j"$(nproc)"
 # They are intentionally not loaded here so the distribution build stays lean.
