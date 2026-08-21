@@ -1,6 +1,6 @@
 # Bloom
 
-[![Version: 0.0.1](https://img.shields.io/badge/version-0.0.1-blue)](extension_config.cmake)
+[![Version: 0.0.2](https://img.shields.io/badge/version-0.0.2-blue)](extension_config.cmake)
 [![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
 
 Bloom speeds up complex join queries in DuckDB by moving selective filters

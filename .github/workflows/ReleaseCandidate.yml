@@ -11,7 +11,7 @@ on:
       extension_version:
         description: Bloom version from extension_config.cmake (without v)
         required: true
-        default: 0.0.1
+        default: 0.0.2
         type: string
 
 permissions:
