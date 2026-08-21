@@ -60,9 +60,14 @@ SELECT memory_usage_bytes AS bytes
 FROM duckdb_memory()
 WHERE tag = 'ALLOCATOR';
 
+# DuckDB can retain or release one 64 KiB allocator block as prepared plans and
+# worker state are created. Cleanup checks allow only that native-runtime noise;
+# retained RPT plans below are required to exceed it.
+
 # Measure the allocator footprint of DuckDB's native prepared plan. Every
-# whole-query fallback below must retain exactly this much, rather than merely
-# returning the same result after silently keeping RPT objects alive.
+# whole-query fallback below must retain this footprint within one allocator
+# block, rather than merely returning the same result while keeping RPT objects
+# alive.
 statement ok
 SET enable_rpt = false;
 
@@ -97,7 +102,7 @@ statement ok
 DEALLOCATE rpt_low_native;
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -125,7 +130,7 @@ EXECUTE rpt_low_sample_fallback;
 800	409600	409600
 
 query II
-SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -138,7 +143,7 @@ statement ok
 DEALLOCATE rpt_low_sample_fallback;
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -164,7 +169,7 @@ EXECUTE rpt_low_materialize_fallback;
 800	409600	409600
 
 query II
-SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -177,7 +182,7 @@ statement ok
 DEALLOCATE rpt_low_materialize_fallback;
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -206,7 +211,7 @@ EXECUTE rpt_low_reservation_fallback;
 800	409600	409600
 
 query II
-SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -218,12 +223,13 @@ WHERE memory.tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_low_reservation_fallback;
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 statement ok
 SET debug_force_external = false;
@@ -257,7 +263,7 @@ FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 
 query II
-SELECT (retained.bytes > native.bytes)::INTEGER,
+SELECT (retained.bytes - native.bytes > 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_full_retained retained,
@@ -269,12 +275,13 @@ WHERE memory.tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_low_full;
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # This budget admits the first wide source but not the second one. RPT must
 # stop expanding the transfer, keep the completed work, and execute correctly.
@@ -297,7 +304,7 @@ EXECUTE rpt_low_partial;
 # Partial transfer retains some RPT data, but less than the complete rewrite,
 # and the non-spill allocator never has temporary storage.
 query III
-SELECT (memory.memory_usage_bytes - baseline.bytes > native.bytes)::INTEGER,
+SELECT (memory.memory_usage_bytes - baseline.bytes - native.bytes > 65536)::INTEGER,
        (memory.memory_usage_bytes - baseline.bytes < retained.bytes)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
@@ -311,12 +318,13 @@ WHERE memory.tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_low_partial;
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # Repeated partial transfers must not accumulate allocator memory after each
 # statement releases its physical plan.
@@ -333,12 +341,13 @@ WHERE w1.keep AND w2.keep;
 
 endloop
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # ============================================================================
 # Explicit and automatic fallback across execution widths
@@ -366,7 +375,7 @@ EXECUTE rpt_low_zero_fallback;
 800	409600	409600
 
 query II
-SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -378,12 +387,13 @@ WHERE memory.tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_low_zero_fallback;
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # Also exercise the native fallback at several execution widths.
 query II
@@ -485,7 +495,7 @@ EXECUTE rpt_low_auto_fallback;
 800	409600	409600
 
 query II
-SELECT (memory.memory_usage_bytes - baseline.bytes = native.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -497,12 +507,13 @@ WHERE memory.tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_low_auto_fallback;
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # ============================================================================
 # Database-wide budget contention across connections
@@ -711,7 +722,7 @@ SELECT 42;
 42
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -732,7 +743,7 @@ WHERE w1.keep AND w2.keep;
 800	409600	409600
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -762,7 +773,7 @@ SELECT 42;
 42
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -781,7 +792,7 @@ WHERE w1.id % 4 != 3;
 60000	30720000
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';

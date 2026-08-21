@@ -93,7 +93,7 @@ EXECUTE rpt_allocator_lifetime;
 100	1188
 
 query I
-SELECT (memory_usage_bytes > bytes)::INTEGER
+SELECT (memory_usage_bytes - bytes > 65536)::INTEGER
 FROM duckdb_memory(), rpt_allocator_baseline
 WHERE tag = 'ALLOCATOR';
 ----
@@ -115,12 +115,13 @@ WHERE tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_allocator_lifetime;
 
-query I
-SELECT (memory_usage_bytes = bytes)::INTEGER
+query II
+SELECT (abs(memory_usage_bytes - bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_allocator_baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 # DuckDB can reduce an operator's temporary-memory reservation to zero. RPT
 # must then keep the original plan instead of materializing or spilling.
@@ -149,12 +150,16 @@ WHERE tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_allocator_fallback;
 
-query I
-SELECT (memory_usage_bytes = bytes)::INTEGER
+# DuckDB may retain or release one small allocator block around prepared-plan
+# destruction. The materialized RPT footprint measured above is larger than
+# this tolerance, so the bound still detects retained transfer state.
+query II
+SELECT (abs(memory_usage_bytes - bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_allocator_baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
 
 statement ok
 SET debug_force_external = false;
