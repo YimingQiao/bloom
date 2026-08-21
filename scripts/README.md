@@ -12,7 +12,8 @@ belongs under the dated directory in `experiments/`.
   research experiments. Existing databases that are not writable are attached
   read-only to a transient runner database; they are never silently regenerated.
   The wrapper also returns a failure when DuckDB's benchmark runner records an
-  `ERROR`, even if the native runner itself exits successfully.
+  `ERROR`, even if the native runner itself exits successfully. Pass
+  `--late-materialize` to benchmark RPT's experimental rowid-based path.
 - `summarize_benchmark.py`: aggregate benchmark timing files.
 - `package_release_artifacts.py`: assemble local release bundles.
 

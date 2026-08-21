@@ -123,6 +123,7 @@ The main settings are:
 ```sql
 SET enable_rpt = false;
 SET rpt_memory_limit = '512MB';
+SET rpt_late_materialize = true;
 SET rpt_sample_cache_dir = '/path/to/cache';
 SET rpt_sample_mode = 'instant';
 SET rpt_excitation_mode = 'join_key_ndv';
@@ -164,3 +165,15 @@ domain contains new information. It accepts `table_size` (the default) and
 `join_key_ndv`; the latter uses exact NDV changes for supported single-column
 integer equality domains and falls back safely when an exact domain is not
 available.
+
+## Late materialization
+
+`rpt_late_materialize` is experimental and defaults to `false`. When enabled,
+RPT materializations keep only transfer columns and row IDs where possible;
+the resulting row-ID bitmap filters DuckDB's original table scan, which reads
+output-only columns during normal query execution. This is most useful when a
+large transfer source has wide or string payload columns used only by the final
+projection, grouping, or aggregation. Across ten CEB Stack q15 variants, it
+improved geomean runtime by 1.263x over normal RPT with identical results. The
+extra bitmap construction is not universally beneficial, so enable it per
+workload after benchmarking.

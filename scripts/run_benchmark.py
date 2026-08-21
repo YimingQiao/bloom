@@ -71,6 +71,7 @@ WORKLOADS = {
         "queries": CEB_STACK_QUERY_DIR,
         "answers": None,
         "load_sql": "SET schema='public';",
+        "init_sql": "SET schema='public';",
         "require": [],
         "recursive_queries": True,
         "prepare_ceb_stack": True,
@@ -168,6 +169,11 @@ def parse_args():
     parser.add_argument("--out", type=Path)
     parser.add_argument("--log", type=Path)
     parser.add_argument("--baseline", action="store_true", help="Run with RPT_ENABLE=0")
+    parser.add_argument(
+        "--late-materialize",
+        action="store_true",
+        help="Enable RPT rowid-based late materialization",
+    )
     return parser.parse_args()
 
 
@@ -227,6 +233,7 @@ def write_benchmark_root(
             "",
         ]
         lines += [f"require {r}" for r in requires]
+        init_queries = []
         if database_is_read_only:
             # The native benchmark runner opens `cache` databases read-write.
             # Use an in-memory connection with a read-only attachment when the
@@ -235,15 +242,10 @@ def write_benchmark_root(
             # open-error recovery from replacing the cache link with an empty
             # database and unexpectedly executing the remote load SQL.
             database_sql = str(database).replace("'", "''")
-            lines += [
-                "",
-                "storage transient",
-                "",
-                "init",
+            lines += ["", "storage transient"]
+            init_queries += [
                 f"ATTACH '{database_sql}' AS bloom_benchmark_db (READ_ONLY);",
                 "USE bloom_benchmark_db;",
-                "",
-                f"run {query_file}",
             ]
         else:
             lines += ["", f"cache {spec['cache']}"]
@@ -252,7 +254,11 @@ def write_benchmark_root(
             # An existing cache must never fall through to remote regeneration
             # merely because the runner failed to open it. With no load query,
             # that condition becomes a visible benchmark ERROR below.
-            lines += ["", f"run {query_file}"]
+        if spec.get("init_sql"):
+            init_queries.append(spec["init_sql"])
+        if init_queries:
+            lines += ["", "init", *init_queries]
+        lines += ["", f"run {query_file}"]
         answer = spec["answers"] / f"{query_id}.csv" if spec["answers"] else None
         if answer and answer.is_file():
             lines += ["", f"result {answer}"]
@@ -343,6 +349,7 @@ def main():
         sample_dir.mkdir(parents=True, exist_ok=True)
         env.setdefault("RPT_SAMPLE_CACHE_DIR", str(sample_dir))
         env["RPT_ENABLE"] = "0" if args.baseline else "1"
+        env["RPT_LATE_MATERIALIZE"] = "1" if args.late_materialize else "0"
         env["RPT_SAMPLE_MODE"] = args.sampling_mode
         env["RPT_SAMPLE_SEED"] = str(args.sample_seed)
         completed = subprocess.run(command, env=env, check=False)

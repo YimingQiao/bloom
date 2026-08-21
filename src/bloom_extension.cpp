@@ -355,9 +355,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "rpt_excitation_mode",
 	    "Repeated-transfer information criterion: 'table_size' or exact 'join_key_ndv' equality domains",
 	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_EXCITATION_MODE", "table_size")), ValidateExcitationMode);
-	config.AddExtensionOption("rpt_late_materialize",
-	                          "Experimental: rowid-based late materialization (currently a net slowdown; off)",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LATE_MATERIALIZE", false)));
+	config.AddExtensionOption(
+	    "rpt_late_materialize",
+	    "Experimental: materialize transfer keys and row IDs, then filter the original table scan",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LATE_MATERIALIZE", false)));
 
 	TableFunction preload_samples("rpt_preload_samples", {}, RPTSamplePreloadFunction, RPTSamplePreloadBind,
 	                              RPTSamplePreloadInit);
