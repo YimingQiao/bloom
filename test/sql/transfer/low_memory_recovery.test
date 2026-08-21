@@ -419,12 +419,45 @@ WHERE w1.keep AND w2.keep;
 ----
 800	31960000
 
-query I
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER
+# Changing execution width can lazily retain one small DuckDB allocator block
+# on some platforms (notably Windows). Bound that native runtime noise well
+# below the measured RPT footprint, then make the warmed state the baseline.
+query II
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
-1
+1	1
+
+statement ok
+UPDATE rpt_low_allocator_baseline
+SET bytes = memory.memory_usage_bytes
+FROM duckdb_memory() memory
+WHERE memory.tag = 'ALLOCATOR';
+
+# Once DuckDB's native worker state is warm, repeated fallback executions must
+# not accumulate allocator memory.
+loop i 0 5
+
+query II
+SELECT count(*), sum(h.id)
+FROM rpt_low_hub h
+JOIN rpt_low_wide1 w1 USING (id)
+JOIN rpt_low_wide2 w2 USING (id)
+WHERE w1.keep AND w2.keep;
+----
+800	31960000
+
+endloop
+
+query II
+SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+       (temporary_storage_bytes = 0)::INTEGER
+FROM duckdb_memory(), rpt_low_allocator_baseline baseline
+WHERE tag = 'ALLOCATOR';
+----
+1	1
 
 # In automatic mode RPT receives only a fraction of DuckDB's currently
 # available operator memory. A wide, parallel transfer must be rejected by
