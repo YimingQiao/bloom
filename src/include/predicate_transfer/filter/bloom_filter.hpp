@@ -56,6 +56,9 @@ public:
 	           size_t &result_count) const override;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built) override;
 	size_t Hash() const override;
+	idx_t MemoryUsage() const override {
+		return 64 + static_cast<idx_t>(num_sectors) * sizeof(uint32_t);
+	}
 	string ToString() const override {
 		return "CacheSectorizedBF";
 	}
@@ -219,6 +222,9 @@ public:
 	           size_t &result_count) const override;
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols_built) override;
 	size_t Hash() const override;
+	idx_t MemoryUsage() const override {
+		return memory_usage_;
+	}
 	string ToString() const override {
 		return "DuckDBBloomFilter";
 	}
@@ -228,6 +234,7 @@ public:
 
 private:
 	BloomFilter bf_; // DuckDB's built-in BloomFilter
+	idx_t memory_usage_ = 0;
 };
 
 //! Exact integral bitmap implemented through DuckDB's built-in prefix-range
@@ -243,6 +250,9 @@ public:
 	void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) override;
 	unique_ptr<PrefixRangeFilter::BuildState> InitializeBuildState(ClientContext &context) const;
 	idx_t GetBuildStateSize() const;
+	idx_t MemoryUsage() const override {
+		return GetBuildStateSize();
+	}
 	void InsertBuildState(DataChunk &chunk, const vector<idx_t> &bound_cols, PrefixRangeFilter::BuildState &state,
 	                      bool parallel) const;
 	void MergeBuildState(PrefixRangeFilter::BuildState &state);

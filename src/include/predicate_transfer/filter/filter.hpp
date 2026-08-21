@@ -24,6 +24,9 @@ public:
 	                   size_t &result_count) const = 0;
 	virtual void Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) = 0;
 	virtual size_t Hash() const = 0;
+	//! Bytes retained by the finalized filter itself. Task-local build state is
+	//! temporary and is accounted separately by transfer admission.
+	virtual idx_t MemoryUsage() const = 0;
 	//! Exact number of non-NULL keys represented by this filter when its
 	//! physical representation can prove it. Approximate filters return invalid.
 	virtual optional_idx ExactDistinctCount() const {

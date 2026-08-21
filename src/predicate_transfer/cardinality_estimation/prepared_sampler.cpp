@@ -16,6 +16,7 @@
 #include "duckdb/planner/operator/logical_sample.hpp"
 #include "duckdb/storage/data_table.hpp"
 #include "duckdb/storage/object_cache.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <chrono>
 #include <iostream>
@@ -35,6 +36,12 @@ public:
 	}
 
 	optional_idx GetEstimatedCacheMemory() const override {
+		// The collection itself is already hard-accounted by BufferAllocator.
+		// Keep the full ObjectCache estimate as a deliberately conservative
+		// eviction reservation: DuckDB's current ObjectCache API cannot mark a
+		// payload as externally accounted, and understating this value can make
+		// pressure-driven eviction ineffective. Users with a tight limit can
+		// disable the optional process cache and retain only the disk cache.
 		return cdc ? optional_idx(cdc->AllocationSize()) : optional_idx(0);
 	}
 
@@ -129,7 +136,7 @@ static shared_ptr<ColumnDataCollection> LoadSampleFromDisk(ClientContext &contex
 	}
 	auto types = deserializer.ReadProperty<vector<LogicalType>>(101, "types");
 	auto chunk_count = deserializer.ReadProperty<idx_t>(102, "chunk_count");
-	auto sample = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), types);
+	auto sample = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context), types);
 	deserializer.ReadList(103, "chunks", [&](Deserializer::List &list, idx_t i) {
 		list.ReadObject([&](Deserializer &object) {
 			DataChunk chunk;

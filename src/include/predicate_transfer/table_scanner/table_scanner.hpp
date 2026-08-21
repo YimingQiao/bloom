@@ -58,6 +58,9 @@ public:
 	bool HasPendingExprFilter() const {
 		return materialization_.GetPendingExpression() != nullptr;
 	}
+	bool NeedsCompaction() const {
+		return !filters_.Empty() || HasPendingExprFilter();
+	}
 
 	shared_ptr<ColumnDataCollection> TakeData() {
 		return materialization_.TakeData();

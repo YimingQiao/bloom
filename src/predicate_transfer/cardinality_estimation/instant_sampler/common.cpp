@@ -197,7 +197,8 @@ struct StorageSampleJob {
 static void ExecuteStorageSampleTask(idx_t task_id, StorageSampleJob &job, unique_ptr<Expression> local_predicate) {
 	auto task_started = job.timings ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 	auto timing = job.timings ? &(*job.timings)[task_id] : nullptr;
-	auto local = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), job.column_types);
+	auto &allocator = BufferAllocator::Get(job.context);
+	auto local = make_shared_ptr<ColumnDataCollection>(allocator, job.column_types);
 	ColumnDataAppendState append_state;
 	local->InitializeAppend(append_state);
 	TableScanState scan_state;
@@ -210,9 +211,9 @@ static void ExecuteStorageSampleTask(idx_t task_id, StorageSampleJob &job, uniqu
 		scan_state.table_state.Initialize(job.context, job.collection.GetTypes());
 	}
 	DataChunk scan_chunk;
-	scan_chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
+	scan_chunk.Initialize(allocator, job.column_types);
 	DataChunk chunk;
-	chunk.Initialize(Allocator::DefaultAllocator(), job.column_types);
+	chunk.Initialize(allocator, job.column_types);
 	unique_ptr<ExpressionExecutor> filter_executor;
 	if (local_predicate) {
 		filter_executor = make_uniq<ExpressionExecutor>(job.context);

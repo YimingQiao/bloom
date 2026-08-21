@@ -3,18 +3,325 @@
 #include "predicate_transfer/table_operator_manager.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/common/exception.hpp"
+#include "duckdb/common/string_util.hpp"
 #include "duckdb/main/client_config.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/temporary_memory_manager.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 
 namespace duckdb {
+
+idx_t ExcitationGraphManager::SaturatingAdd(idx_t left, idx_t right) {
+	return right > std::numeric_limits<idx_t>::max() - left ? std::numeric_limits<idx_t>::max() : left + right;
+}
+
+idx_t ExcitationGraphManager::SaturatingMultiply(idx_t left, idx_t right) {
+	return left != 0 && right > std::numeric_limits<idx_t>::max() / left ? std::numeric_limits<idx_t>::max()
+	                                                                     : left * right;
+}
+
+template <class T>
+static shared_ptr<T> HoldMemoryState(shared_ptr<T> value, const shared_ptr<TemporaryMemoryState> &memory_state) {
+	if (!value || !memory_state) {
+		return value;
+	}
+	auto *raw = value.get();
+	auto retained_state = memory_state;
+	// The deleter releases the payload first, so BufferAllocator returns its
+	// bytes before the last execution object unregisters the reservation.
+	return shared_ptr<T>(raw, [value = std::move(value), retained_state = std::move(retained_state)](T *) mutable {
+		value.reset();
+		retained_state.reset();
+	});
+}
+
+void ExcitationGraphManager::InitializeMemoryBudget() {
+	if (memory_state_) {
+		memory_state_->SetZero();
+		memory_state_.reset();
+	}
+	auto &buffer_manager = BufferManager::GetBufferManager(context);
+	auto limit = buffer_manager.GetOperatorMemoryLimit();
+	auto used = buffer_manager.GetUsedMemory();
+	auto available = used < limit ? limit - used : 0;
+	memory_budget_ =
+	    config.memory_limit.IsValid() ? MinValue(config.memory_limit.GetIndex(), available) : available / 4;
+	if (memory_budget_ == 0) {
+		return;
+	}
+	auto state = TemporaryMemoryManager::Get(context).Register(context);
+	memory_state_ = shared_ptr<TemporaryMemoryState>(std::move(state));
+	// RPT cannot make progress on a partial reservation because it deliberately
+	// has no spill path. Do not claim DuckDB's per-operator minimum as usable;
+	// every phase below must obtain its complete projected peak.
+	memory_state_->SetMinimumReservation(0);
+	ResizeMemoryReservation(memory_budget_);
+}
+
+idx_t ExcitationGraphManager::EstimateCollectionMemory(idx_t rows, const vector<LogicalType> &types) const {
+	idx_t row_width = 0;
+	for (auto &type : types) {
+		idx_t width;
+		switch (type.InternalType()) {
+		case PhysicalType::VARCHAR:
+			// string_t plus a conservative allowance for non-inlined payload.
+			width = 64;
+			break;
+		case PhysicalType::LIST:
+		case PhysicalType::STRUCT:
+		case PhysicalType::ARRAY:
+			width = 128;
+			break;
+		default:
+			width = MaxValue<idx_t>(GetTypeIdSize(type.InternalType()), 8);
+			break;
+		}
+		// Include validity and per-vector bookkeeping conservatively per row.
+		row_width = SaturatingAdd(row_width, SaturatingAdd(width, 1));
+	}
+	return SaturatingAdd(SaturatingMultiply(rows, row_width), SaturatingMultiply(types.size(), 4096));
+}
+
+idx_t ExcitationGraphManager::EstimateInitialSampleMemory() const {
+	idx_t total = 0;
+	unordered_set<const TableCatalogEntry *> seen_tables;
+	for (auto &entry : table_operator_manager.GetAllTableOperators()) {
+		auto &op = entry.second.get();
+		const LogicalOperator *leaf = &op;
+		while (leaf->type != LogicalOperatorType::LOGICAL_GET && leaf->type != LogicalOperatorType::LOGICAL_CHUNK_GET &&
+		       !leaf->children.empty()) {
+			leaf = leaf->children[0].get();
+		}
+		if (leaf->type != LogicalOperatorType::LOGICAL_GET) {
+			continue;
+		}
+		auto &get = leaf->Cast<LogicalGet>();
+		auto table = get.GetTable();
+		auto input_rows = MaxValue<idx_t>(ComputeBaseTableRows(op), op.estimated_cardinality);
+		auto target_rows = config.sampling.target_rows;
+		if (config.sampling.mode == RPTSamplingMode::INSTANT &&
+		    config.sampling.instant_access == RPTInstantAccessMode::SCATTERED) {
+			target_rows =
+			    SaturatingMultiply(config.sampling.instant_access_points, config.sampling.instant_rows_per_access);
+		}
+		auto rows = MinValue<idx_t>(input_rows, target_rows);
+		// Use the full storage schema for admission. Instant sampling normally
+		// narrows this set, but op.types can omit filter-only columns and would
+		// underestimate the allocation in exactly the cases where safety matters.
+		auto collection_memory = EstimateCollectionMemory(rows, get.returned_types);
+		// Only memory-cached prepared samples are shared across self-join
+		// references. Instant samples and non-memory-cached prepared samples are
+		// acquired independently. Every logical reference can additionally own a
+		// different local-predicate view.
+		auto shares_raw_sample =
+		    table && config.sampling.mode == RPTSamplingMode::PREPARED && config.sampling.prepared_memory_cache;
+		if (!shares_raw_sample || seen_tables.insert(table.get()).second) {
+			total = SaturatingAdd(total, collection_memory);
+		}
+		total = SaturatingAdd(total, collection_memory);
+	}
+	return total;
+}
+
+void ExcitationGraphManager::EstimateFilterMemory(idx_t rows, const vector<shared_ptr<GraphEdge>> &edges,
+                                                  idx_t &persistent, idx_t &temporary) const {
+	persistent = 0;
+	temporary = 0;
+	vector<vector<ColumnBinding>> spec_bindings;
+	vector<vector<LogicalType>> spec_types;
+	vector<bool> spec_tracks_exact_domain;
+	for (auto &edge : edges) {
+		vector<idx_t> order(edge->source_columns.size());
+		std::iota(order.begin(), order.end(), idx_t {0});
+		std::sort(order.begin(), order.end(), [&](idx_t left_idx, idx_t right_idx) {
+			const auto &left = edge->source_columns[left_idx];
+			const auto &right = edge->source_columns[right_idx];
+			return left.table_index.index == right.table_index.index ? left.column_index < right.column_index
+			                                                         : left.table_index.index < right.table_index.index;
+		});
+		vector<ColumnBinding> sorted_bindings;
+		vector<LogicalType> sorted_types;
+		for (auto index : order) {
+			sorted_bindings.push_back(edge->source_columns[index]);
+			sorted_types.push_back(edge->return_types[index]);
+		}
+		if (config.enable_filter_cache) {
+			auto source_lineage_id = state_.Lineage().LineageOf(edge->source);
+			auto snapshot = state_.Lineage().MakeSnapshot(edge->source, sorted_bindings);
+			if (filter_cache_.Lookup(source_lineage_id, snapshot)) {
+				continue;
+			}
+		}
+		bool track_exact_domain = config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV &&
+		                          sorted_bindings.size() == 1 && edge->dest_columns.size() == 1 &&
+		                          equality_domains_.Tracks(sorted_bindings.front(), edge->dest_columns.front());
+		idx_t existing = DConstants::INVALID_INDEX;
+		for (idx_t spec_idx = 0; spec_idx < spec_bindings.size(); spec_idx++) {
+			if (spec_bindings[spec_idx] == sorted_bindings && spec_types[spec_idx] == sorted_types) {
+				existing = spec_idx;
+				break;
+			}
+		}
+		if (existing != DConstants::INVALID_INDEX) {
+			spec_tracks_exact_domain[existing] = spec_tracks_exact_domain[existing] || track_exact_domain;
+			continue;
+		}
+		spec_bindings.push_back(std::move(sorted_bindings));
+		spec_types.push_back(std::move(sorted_types));
+		spec_tracks_exact_domain.push_back(track_exact_domain);
+	}
+
+	auto thread_count = MaxValue<idx_t>(TaskScheduler::GetScheduler(context).NumberOfThreads(), 1);
+	for (idx_t spec_idx = 0; spec_idx < spec_bindings.size(); spec_idx++) {
+		auto &types = spec_types[spec_idx];
+		bool prefix_candidate = types.size() == 1 && types.front().IsIntegral() &&
+		                        types.front() != LogicalType::UBIGINT && types.front() != LogicalType::HUGEINT &&
+		                        types.front() != LogicalType::UHUGEINT;
+		idx_t filter_bytes;
+		idx_t build_bytes = 0;
+		if (prefix_candidate) {
+			// Prefix filters are chosen for a span of at most max(rows * 128,
+			// 8M) bits. Account for the largest possible final bitmap and every
+			// task-private build lane before construction starts.
+			filter_bytes = SaturatingAdd(MaxValue<idx_t>(1024ULL * 1024ULL, SaturatingMultiply(rows, 16)), 64);
+			auto private_bytes = SaturatingMultiply(filter_bytes, thread_count);
+			build_bytes = private_bytes <= 16ULL * 1024ULL * 1024ULL ? private_bytes : filter_bytes;
+			if (spec_tracks_exact_domain[spec_idx]) {
+				build_bytes = SaturatingAdd(build_bytes, SaturatingMultiply(thread_count, 1024ULL * 1024ULL + 64));
+			}
+		} else {
+			// DuckDB's Bloom filter uses 12 bits/key rounded to a power of two.
+			// Four bytes/key safely covers rounding and the aligned allocation.
+			filter_bytes = SaturatingAdd(MaxValue<idx_t>(512, SaturatingMultiply(rows, 4)), 64);
+		}
+		persistent = SaturatingAdd(persistent, filter_bytes);
+		temporary = SaturatingAdd(temporary, build_bytes);
+	}
+}
+
+idx_t ExcitationGraphManager::RetainedMemoryUsage() const {
+	idx_t retained = executor_.MaterializedMemoryUsage();
+	retained = SaturatingAdd(retained, filter_memory_used_);
+	if (estimator_) {
+		retained = SaturatingAdd(retained, estimator_->MemoryUsage());
+	}
+	return retained;
+}
+
+void ExcitationGraphManager::AccountFilterMemory(const shared_ptr<RPTFilter> &filter) {
+	if (!filter || !accounted_filters_.insert(filter.get()).second) {
+		return;
+	}
+	filter_memory_used_ = SaturatingAdd(filter_memory_used_, filter->MemoryUsage());
+}
+
+void ExcitationGraphManager::ResizeMemoryReservation(idx_t size) {
+	if (!memory_state_) {
+		return;
+	}
+	if (size == 0) {
+		memory_state_->SetZero();
+	} else {
+		memory_state_->SetRemainingSizeAndUpdateReservation(context, size);
+	}
+}
+
+bool ExcitationGraphManager::FitsMemoryBudget(idx_t retained, idx_t additional) {
+	if (retained > memory_budget_ || additional > memory_budget_ - retained) {
+		return false;
+	}
+	auto required = retained + additional;
+	ResizeMemoryReservation(required);
+	if (config.log_transfer_steps) {
+		std::cerr << "[RPT-Memory] admission required=" << required
+		          << " reservation=" << (memory_state_ ? memory_state_->GetReservation() : 0)
+		          << " budget=" << memory_budget_ << '\n';
+	}
+	if (required > 0 && (!memory_state_ || memory_state_->GetReservation() < required)) {
+		return false;
+	}
+	auto &buffer_manager = BufferManager::GetBufferManager(context);
+	auto limit = buffer_manager.GetOperatorMemoryLimit();
+	auto used = buffer_manager.GetUsedMemory();
+	auto available = used < limit ? limit - used : 0;
+	return additional <= available;
+}
+
+shared_ptr<ColumnDataCollection>
+ExcitationGraphManager::RetainMaterializedDataForExecution(shared_ptr<ColumnDataCollection> data,
+                                                           bool owns_materialized_data) {
+	if (!data || !owns_materialized_data) {
+		return data;
+	}
+	if (execution_collections_.insert(data.get()).second) {
+		execution_memory_used_ = SaturatingAdd(execution_memory_used_, data->AllocationSize());
+	}
+	return HoldMemoryState(std::move(data), memory_state_);
+}
+
+shared_ptr<RPTFilter> ExcitationGraphManager::RetainFilterForExecution(shared_ptr<RPTFilter> filter) {
+	if (!filter) {
+		return filter;
+	}
+	if (execution_filters_.insert(filter.get()).second) {
+		execution_memory_used_ = SaturatingAdd(execution_memory_used_, filter->MemoryUsage());
+	}
+	return HoldMemoryState(std::move(filter), memory_state_);
+}
+
+void ExcitationGraphManager::FinalizeMemoryReservationForExecution() {
+	D_ASSERT(execution_memory_used_ <= memory_budget_);
+	if (execution_memory_used_ > memory_budget_) {
+		throw OutOfMemoryException("RPT retained %s for execution, exceeding its %s memory budget",
+		                           StringUtil::BytesToHumanReadableString(execution_memory_used_),
+		                           StringUtil::BytesToHumanReadableString(memory_budget_));
+	}
+	if (execution_memory_used_ > 0) {
+		D_ASSERT(memory_state_);
+		if (!memory_state_) {
+			throw InternalException("RPT retained execution memory without a temporary-memory state");
+		}
+		memory_state_->SetMinimumReservation(execution_memory_used_);
+	}
+	ResizeMemoryReservation(execution_memory_used_);
+	if (execution_memory_used_ > 0 && memory_state_->GetReservation() < execution_memory_used_) {
+		throw OutOfMemoryException("DuckDB could reserve only %s of the %s retained by RPT for query execution",
+		                           StringUtil::BytesToHumanReadableString(memory_state_->GetReservation()),
+		                           StringUtil::BytesToHumanReadableString(execution_memory_used_));
+	}
+}
+
+void ExcitationGraphManager::StopForMemory(const char *phase, idx_t requested, idx_t retained) {
+	memory_stopped_ = true;
+	if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
+		std::cerr << "[RPT-Memory] transfer stopped phase=" << phase << " requested=" << requested
+		          << " retained=" << retained << " budget=" << memory_budget_
+		          << " completed_sources=" << materialized_source_count_ << '\n';
+	}
+	if (materialized_source_count_ == 0) {
+		result_transfer_steps.clear();
+		executor_.Clear();
+		cascade_filters_.clear();
+		row_id_filters_.clear();
+		direct_filters_.clear();
+		filter_cache_ = RPTFilterCache {};
+		filter_memory_used_ = 0;
+		accounted_filters_.clear();
+		estimator_.reset();
+		ResizeMemoryReservation(0);
+	}
+}
 
 //===--------------------------------------------------------------------===//
 // ExcitationGraphManager — Initialization
@@ -299,6 +606,13 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	execution_history_.clear();
 	execution_action_count_ = 0;
 	execution_round_count_ = 0;
+	filter_memory_used_ = 0;
+	accounted_filters_.clear();
+	execution_memory_used_ = 0;
+	execution_collections_.clear();
+	execution_filters_.clear();
+	materialized_source_count_ = 0;
+	memory_stopped_ = false;
 	executor_.Clear();
 	cascade_filters_.clear();
 	row_id_filters_.clear();
@@ -315,8 +629,19 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	double init_ms = 0, mat_ms = 0, bf_ms = 0, est_ms = 0, finalize_ms = 0;
 
 	auto t_init = SteadyClock::now();
+	InitializeMemoryBudget();
+	auto estimated_sample_memory = EstimateInitialSampleMemory();
+	if (memory_budget_ == 0 || !FitsMemoryBudget(0, estimated_sample_memory)) {
+		StopForMemory("sample_admission", estimated_sample_memory, 0);
+		return;
+	}
 	InitEstimator();
 	InitializeWorkingSet();
+	auto sampled_memory = estimator_->MemoryUsage();
+	if (!FitsMemoryBudget(sampled_memory, 0)) {
+		StopForMemory("sample_actual", 0, sampled_memory);
+		return;
+	}
 	if (rpt_log) {
 		init_ms = elapsed_ms(t_init, SteadyClock::now());
 	}
@@ -412,15 +737,67 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			continue;
 		}
 
+		auto *source_op = table_operator_manager.GetTableOperator(table_id);
+		if (!source_op) {
+			continue;
+		}
+		idx_t persistent_filter_memory, temporary_filter_memory;
+		EstimateFilterMemory(static_cast<idx_t>(state_.Cardinality(table_id)), informative_candidates,
+		                     persistent_filter_memory, temporary_filter_memory);
+		auto maximum_source_rows = MaxValue<idx_t>(ComputeBaseTableRows(*source_op), source_op->estimated_cardinality);
+		auto *registered_scanner = executor_.Find(*source_op);
+		idx_t collection_memory = 0;
+		idx_t collection_copies = 0;
+		if (!executor_.IsMaterialized(*source_op)) {
+			collection_memory = EstimateCollectionMemory(maximum_source_rows, source_op->types);
+			// A disk source can briefly hold its initial materialization and its
+			// filtered compacted replacement at the same time.
+			collection_copies = 2;
+		} else if (registered_scanner && !executor_.OwnsMaterializedData(*source_op) &&
+		           registered_scanner->NeedsCompaction()) {
+			// CHUNK_GET is already in memory and remains owned by DuckDB. Applying
+			// pending filters creates exactly one RPT-owned compacted collection.
+			auto *borrowed = registered_scanner->GetData();
+			collection_memory = borrowed ? borrowed->AllocationSize() : 0;
+			collection_copies = 1;
+		}
+		// Filters and their task-local build states coexist with any new source
+		// collections accounted above.
+		auto requested_memory = SaturatingMultiply(collection_memory, collection_copies);
+		requested_memory = SaturatingAdd(requested_memory, persistent_filter_memory);
+		requested_memory = SaturatingAdd(requested_memory, temporary_filter_memory);
+		auto retained_memory = RetainedMemoryUsage();
+		if (!FitsMemoryBudget(retained_memory, requested_memory)) {
+			StopForMemory("materialize_admission", requested_memory, retained_memory);
+			break;
+		}
+
 		auto t_mat = SteadyClock::now();
 		PrepareSourceTable(table_id);
 		double round_mat = rpt_log ? elapsed_ms(t_mat, SteadyClock::now()) : 0;
 		auto estimated_source_card = state_.Cardinality(table_id);
 		mat_ms += round_mat;
+		auto *source_scanner = executor_.Find(*source_op);
+		// The current collection is already part of retained memory. Only
+		// Compact() needs another collection, and only while filters remain.
+		auto compaction_memory = source_scanner && source_scanner->NeedsCompaction() && source_scanner->GetData()
+		                             ? source_scanner->GetData()->AllocationSize()
+		                             : 0;
+		if (source_scanner) {
+			EstimateFilterMemory(source_scanner->Count(), informative_candidates, persistent_filter_memory,
+			                     temporary_filter_memory);
+		}
+		retained_memory = RetainedMemoryUsage();
+		requested_memory = SaturatingAdd(compaction_memory, persistent_filter_memory);
+		requested_memory = SaturatingAdd(requested_memory, temporary_filter_memory);
+		if (!FitsMemoryBudget(retained_memory, requested_memory)) {
+			executor_.Remove(*source_op);
+			StopForMemory("filter_admission", requested_memory, RetainedMemoryUsage());
+			break;
+		}
+		materialized_source_count_++;
 		state_.CommitBaseline(table_id);
-		auto *source_op = table_operator_manager.GetTableOperator(table_id);
 		if (rpt_log && source_op) {
-			auto *source_scanner = executor_.Find(*source_op);
 			std::cerr << "  [RPT-Materialized] source=[" << table_id
 			          << "] name=" << TableOperatorManager::GetTableName(*source_op)
 			          << " estimated=" << static_cast<idx_t>(estimated_source_card)
@@ -436,7 +813,6 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		auto effective_candidates = ActivateTables(table_id, informative_candidates);
 		double round_bf = rpt_log ? elapsed_ms(t_bf, SteadyClock::now()) : 0;
 		bf_ms += round_bf;
-
 		if (effective_candidates.empty()) {
 			if (rpt_log) {
 				execution_history << ":materialized_no_effective;";
@@ -481,6 +857,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	if (rpt_log) {
 		execution_history_ = execution_history.str();
 		execution_round_count_ = excitation_round;
+	}
+	if (memory_stopped_ && materialized_source_count_ == 0) {
+		return;
 	}
 
 	auto t_fin = SteadyClock::now();

@@ -103,6 +103,7 @@ size_t CacheSectorizedBF::Hash() const {
 DuckDBBloomFilterAdapter::DuckDBBloomFilterAdapter(ClientContext &context_p, const BloomFilterConfig &config,
                                                    uint32_t est_num_rows) {
 	bf_.Initialize(context_p, static_cast<idx_t>(est_num_rows));
+	memory_usage_ = 64 + BloomFilter::GetNumberOfSectors(est_num_rows) * sizeof(uint64_t);
 }
 
 int DuckDBBloomFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_applied,

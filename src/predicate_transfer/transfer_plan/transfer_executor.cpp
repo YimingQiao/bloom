@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <iostream>
+#include <limits>
 
 namespace duckdb {
 namespace {
@@ -130,8 +131,44 @@ TableScanner *TransferExecutor::Register(LogicalOperator &op) {
 	}
 	auto scanner = make_uniq<TableScanner>(optimizer_, context_, op, config_.late_materialize_flag);
 	auto *raw = scanner.get();
+	if (raw->IsMaterialized()) {
+		borrowed_data_[&op] = raw->GetData();
+	}
 	scanners_[&op] = std::move(scanner);
 	return raw;
+}
+
+idx_t TransferExecutor::MaterializedMemoryUsage() const {
+	unordered_set<const ColumnDataCollection *> seen;
+	idx_t total = 0;
+	for (auto &entry : scanners_) {
+		auto *data = entry.second->GetData();
+		if (!data) {
+			continue;
+		}
+		auto borrowed = borrowed_data_.find(entry.first);
+		if ((borrowed != borrowed_data_.end() && borrowed->second == data) || !seen.insert(data).second) {
+			continue;
+		}
+		auto allocation = data->AllocationSize();
+		total = allocation > std::numeric_limits<idx_t>::max() - total ? std::numeric_limits<idx_t>::max()
+		                                                               : total + allocation;
+	}
+	return total;
+}
+
+bool TransferExecutor::OwnsMaterializedData(LogicalOperator &op) const {
+	auto *scanner = Find(op);
+	if (!scanner || !scanner->GetData()) {
+		return false;
+	}
+	auto borrowed = borrowed_data_.find(&op);
+	return borrowed == borrowed_data_.end() || borrowed->second != scanner->GetData();
+}
+
+void TransferExecutor::Remove(LogicalOperator &op) {
+	scanners_.erase(&op);
+	borrowed_data_.erase(&op);
 }
 
 bool TransferExecutor::IsMaterialized(LogicalOperator &op) const {
@@ -410,19 +447,13 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 	}
 
 	auto task_count = RPTScanTaskCount(context_, *collection);
-	vector<vector<int64_t>> local_rids(task_count);
 	vector<int64_t> local_min_rids(task_count, std::numeric_limits<int64_t>::max());
 	vector<int64_t> local_max_rids(task_count, std::numeric_limits<int64_t>::min());
-	for (auto &rids : local_rids) {
-		rids.reserve(scanner.Count() / task_count + STANDARD_VECTOR_SIZE);
-	}
 
 	ScanCollection(context_, *collection, task_count, [&](idx_t task_id, DataChunk &chunk) {
 		auto &rid_vec = chunk.data[rowid_chunk_col];
 		rid_vec.Flatten();
 		auto rid_data = FlatVector::GetData<int64_t>(rid_vec);
-		auto &rids = local_rids[task_id];
-		rids.insert(rids.end(), rid_data, rid_data + chunk.size());
 		for (idx_t row_idx = 0; row_idx < chunk.size(); row_idx++) {
 			local_min_rids[task_id] = MinValue(local_min_rids[task_id], rid_data[row_idx]);
 			local_max_rids[task_id] = MaxValue(local_max_rids[task_id], rid_data[row_idx]);
@@ -441,21 +472,9 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 	}
 
 	auto bitmap = make_shared_ptr<BitmapFilter>(context_, BitmapFilterConfig(min_rid, max_rid));
-	IndexedExecutorTask::Function insert_rids = [&](idx_t task_id) {
-		DataChunk tmp_chunk;
-		tmp_chunk.Initialize(Allocator::DefaultAllocator(), {LogicalType::BIGINT});
-		auto &rids = local_rids[task_id];
-		for (idx_t offset = 0; offset < rids.size(); offset += STANDARD_VECTOR_SIZE) {
-			auto batch = MinValue<idx_t>(STANDARD_VECTOR_SIZE, rids.size() - offset);
-			tmp_chunk.Reset();
-			tmp_chunk.SetCardinalityUnsafe(batch);
-			auto *data = FlatVector::GetDataMutable<int64_t>(tmp_chunk.data[0]);
-			memcpy(data, rids.data() + offset, batch * sizeof(int64_t));
-			static const vector<idx_t> rid_insert_cols = {0};
-			bitmap->Insert(tmp_chunk, rid_insert_cols);
-		}
-	};
-	ExecuteIndexedTasks(context_, task_count, "RPTRowIDBitmapInsert", insert_rids);
+	const vector<idx_t> row_id_columns {rowid_chunk_col};
+	ScanCollection(context_, *collection, task_count,
+	               [&](idx_t, DataChunk &chunk) { bitmap->Insert(chunk, row_id_columns); });
 	bitmap->SetValid();
 	return bitmap;
 }

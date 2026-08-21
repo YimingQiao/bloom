@@ -7,6 +7,7 @@
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
+#include "duckdb/main/config.hpp"
 #include "duckdb/main/database.hpp"
 #include "duckdb/parser/parsed_data/sample_options.hpp"
 
@@ -93,6 +94,18 @@ static RPTExcitationMode ReadExcitationMode(const Value &value) {
 	           : RPTExcitationMode::JOIN_KEY_NDV;
 }
 
+static optional_idx ReadRPTMemoryLimit(const Value &value) {
+	auto limit = StringUtil::Lower(value.GetValue<string>());
+	StringUtil::Trim(limit);
+	if (limit == "auto") {
+		return optional_idx();
+	}
+	if (limit.empty() || limit.front() == '-' || limit == "none" || limit == "null") {
+		throw InvalidInputException("rpt_memory_limit must be 'auto' or a non-negative memory size");
+	}
+	return optional_idx(DBConfig::ParseMemoryLimit(limit));
+}
+
 static void ValidateSampleMode(ClientContext &, SetScope, Value &value) {
 	ReadSampleMode(value);
 }
@@ -103,6 +116,10 @@ static void ValidateInstantAccess(ClientContext &, SetScope, Value &value) {
 
 static void ValidateExcitationMode(ClientContext &, SetScope, Value &value) {
 	ReadExcitationMode(value);
+}
+
+static void ValidateRPTMemoryLimit(ClientContext &, SetScope, Value &value) {
+	ReadRPTMemoryLimit(value);
 }
 
 static void ValidateUnsignedRange(Value &value, const char *setting, idx_t maximum) {
@@ -200,8 +217,18 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	if (input.context.TryGetCurrentSetting("enable_rpt", setting) && !setting.GetValue<bool>()) {
 		return;
 	}
+	// EXPLAIN must only inspect DuckDB's native plan. RPT executes selected
+	// subtrees during optimization, which would make even a plain EXPLAIN scan
+	// data and evaluate volatile expressions. EXPLAIN ANALYZE follows the same
+	// rule so every EXPLAIN variant consistently bypasses RPT.
+	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN) {
+		return;
+	}
 
 	RPTOptimizerConfig config;
+	if (input.context.TryGetCurrentSetting("rpt_memory_limit", setting)) {
+		config.memory_limit = ReadRPTMemoryLimit(setting);
+	}
 	if (input.context.TryGetCurrentSetting("rpt_sample_cache_dir", setting)) {
 		config.sampling.prepared_cache_dir = setting.ToString();
 	}
@@ -274,6 +301,10 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("enable_rpt", "Enable the Robust Predicate Transfer optimizer", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(EnvFlagDefault("RPT_ENABLE", true)));
+	config.AddExtensionOption(
+	    "rpt_memory_limit",
+	    "Maximum in-memory budget for optimizer-time RPT work ('auto' uses 25% of available operator memory)",
+	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_MEMORY_LIMIT", "auto")), ValidateRPTMemoryLimit);
 	config.AddExtensionOption("rpt_sample_cache_dir",
 	                          "Prepared-sample cache directory ('auto' stores it beside the database)",
 	                          LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_CACHE_DIR", "auto")));

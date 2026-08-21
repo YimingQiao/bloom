@@ -18,12 +18,30 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/table_filter.hpp"
 #include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <chrono>
 #include <iostream>
+#include <limits>
 #include <random>
 
 namespace duckdb {
+
+idx_t TableSampleManager::MemoryUsage() const {
+	unordered_set<const ColumnDataCollection *> seen;
+	idx_t total = 0;
+	for (auto &entry : entries_) {
+		for (auto &collection : {entry.second.sample, entry.second.locally_filtered}) {
+			if (!collection || !seen.insert(collection.get()).second) {
+				continue;
+			}
+			auto allocation = collection->AllocationSize();
+			total = allocation > std::numeric_limits<idx_t>::max() - total ? std::numeric_limits<idx_t>::max()
+			                                                               : total + allocation;
+		}
+	}
+	return total;
+}
 
 bool TableSampleManager::LogEnabled() const {
 	Value setting;
@@ -230,11 +248,11 @@ void TableSampleManager::EnsureLocalFilter(Entry &sample, const LogicalOperator 
 		expression_executor->AddExpression(*final_expression);
 	}
 
-	auto locally_filtered = make_shared_ptr<ColumnDataCollection>(context_, sample_types);
+	auto locally_filtered = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context_), sample_types);
 	ColumnDataScanState scan_state;
 	sample.sample->InitializeScan(scan_state, sample.sample_column_positions);
 	DataChunk chunk;
-	chunk.Initialize(Allocator::DefaultAllocator(), sample_types);
+	chunk.Initialize(BufferAllocator::Get(context_), sample_types);
 	SelectionVector selection(STANDARD_VECTOR_SIZE);
 	idx_t survivors = 0;
 	while (true) {

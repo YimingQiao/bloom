@@ -68,7 +68,7 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 	}
 
 	DataChunk chunk;
-	chunk.Initialize(Allocator::DefaultAllocator(), cdc.Types());
+	chunk.Initialize(cdc.GetAllocator(), cdc.Types());
 	SelectionVector sel(STANDARD_VECTOR_SIZE);
 
 	idx_t sampled_chunks = 0;

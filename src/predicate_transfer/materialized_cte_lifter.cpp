@@ -1,7 +1,7 @@
 #include "predicate_transfer/materialized_cte_lifter.hpp"
+#include "predicate_transfer/rpt_result_collector.hpp"
 
 #include "duckdb/execution/executor.hpp"
-#include "duckdb/execution/operator/helper/physical_result_collector.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
@@ -253,7 +253,7 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context);
 	Executor executor(context);
-	auto collector = PhysicalResultCollector::GetResultCollector(context, stmt_data);
+	auto collector = GetRPTResultCollector(context, stmt_data);
 	executor.Initialize(std::move(collector));
 
 	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {

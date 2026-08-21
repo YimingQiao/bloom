@@ -9,7 +9,10 @@ belongs under the dated directory in `experiments/`.
   prepared with instant sampling under the same query-warm protocol. Select the
   latter with `--comparison sampling`.
 - `run_benchmark.py`: lower-level workload runner used by the suite and
-  research experiments.
+  research experiments. Existing databases that are not writable are attached
+  read-only to a transient runner database; they are never silently regenerated.
+  The wrapper also returns a failure when DuckDB's benchmark runner records an
+  `ERROR`, even if the native runner itself exits successfully.
 - `summarize_benchmark.py`: aggregate benchmark timing files.
 - `package_release_artifacts.py`: assemble local release bundles.
 

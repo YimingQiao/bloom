@@ -80,7 +80,7 @@ static unique_ptr<NativeSampleSource> PrepareNativeSampleSource(ClientContext &c
 		result.candidate_chunks += access_count;
 	}
 	result.total_row_groups = source->spans.size();
-	result.sample = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), column_types);
+	result.sample = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context), column_types);
 	result.status = InstantSampleStatus::SUCCESS;
 	return source;
 }

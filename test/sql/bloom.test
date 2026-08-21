@@ -14,6 +14,11 @@ SELECT current_setting('rpt_sample_cache_dir');
 ----
 auto
 
+query T
+SELECT current_setting('rpt_memory_limit');
+----
+auto
+
 query III
 SELECT current_setting('rpt_sample_size'),
        current_setting('rpt_sample_memory_cache'),
@@ -62,6 +67,183 @@ JOIN rpt_sparse_right r ON l.id = r.id
 WHERE r.keep AND l.middle_col >= 0;
 ----
 100	495000	1188	296
+
+# RPT's large retained objects must use DuckDB's non-spill BufferAllocator.
+# EXECUTE lazily optimizes the prepared statement, after which its physical
+# plan keeps the rewritten memory scans alive until DEALLOCATE.
+statement ok
+SET rpt_sample_memory_cache = false;
+
+statement ok
+CREATE TEMP TABLE rpt_allocator_baseline AS
+SELECT memory_usage_bytes AS bytes
+FROM duckdb_memory()
+WHERE tag = 'ALLOCATOR';
+
+statement ok
+PREPARE rpt_allocator_lifetime AS
+SELECT count(*), sum(length(l.payload))
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+
+query II
+EXECUTE rpt_allocator_lifetime;
+----
+100	1188
+
+query I
+SELECT (memory_usage_bytes > bytes)::INTEGER
+FROM duckdb_memory(), rpt_allocator_baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+statement ok
+CREATE TEMP TABLE rpt_allocator_retained AS
+SELECT memory_usage_bytes - bytes AS bytes
+FROM duckdb_memory(), rpt_allocator_baseline
+WHERE tag = 'ALLOCATOR';
+
+query I
+SELECT temporary_storage_bytes
+FROM duckdb_memory()
+WHERE tag = 'ALLOCATOR';
+----
+0
+
+statement ok
+DEALLOCATE rpt_allocator_lifetime;
+
+query I
+SELECT (memory_usage_bytes = bytes)::INTEGER
+FROM duckdb_memory(), rpt_allocator_baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+# DuckDB can reduce an operator's temporary-memory reservation to zero. RPT
+# must then keep the original plan instead of materializing or spilling.
+statement ok
+SET debug_force_external = true;
+
+statement ok
+PREPARE rpt_allocator_fallback AS
+SELECT count(*), sum(length(l.payload))
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+
+query II
+EXECUTE rpt_allocator_fallback;
+----
+100	1188
+
+query I
+SELECT (memory_usage_bytes - baseline.bytes < retained.bytes)::INTEGER
+FROM duckdb_memory(), rpt_allocator_baseline baseline, rpt_allocator_retained retained
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+statement ok
+DEALLOCATE rpt_allocator_fallback;
+
+query I
+SELECT (memory_usage_bytes = bytes)::INTEGER
+FROM duckdb_memory(), rpt_allocator_baseline
+WHERE tag = 'ALLOCATOR';
+----
+1
+
+statement ok
+SET debug_force_external = false;
+
+statement ok
+SET rpt_sample_memory_cache = true;
+
+# EXPLAIN must preserve DuckDB's native scans instead of running RPT's
+# optimizer-time sampling and replacing them with COLUMN_DATA_SCAN nodes.
+query II
+EXPLAIN SELECT count(*)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+----
+physical_plan	<REGEX>:.*Seq Scan.*
+
+query II
+EXPLAIN ANALYZE SELECT count(*)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+----
+analyzed_plan	<REGEX>:.*Table Scan.*
+
+# A zero RPT budget must take the whole-query fallback before sampling or the
+# first materialization. Keep this query non-volatile so it reaches the memory
+# admission path rather than the volatile-expression guard below.
+statement ok
+SET rpt_memory_limit = '0B';
+
+query II
+SELECT count(*), sum(l.id)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+----
+100	495000
+
+statement ok
+SET rpt_memory_limit = 'auto';
+
+# Prepared samples and row-id bitmaps must not inspect uncommitted table state:
+# cached samples can omit local values, and local row IDs occupy a high,
+# disjoint range. The complete RPT scope must stay on DuckDB's original path.
+statement ok
+SET rpt_late_materialize = true;
+
+statement ok
+BEGIN TRANSACTION;
+
+statement ok
+INSERT INTO rpt_sparse_left VALUES (10000, 20000, 'payload_10000', 4);
+
+statement ok
+INSERT INTO rpt_sparse_right VALUES (10000, true);
+
+query III
+SELECT count(*), sum(l.id), sum(length(l.payload))
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep;
+----
+101	505000	1201
+
+statement ok
+ROLLBACK;
+
+statement ok
+SET rpt_late_materialize = false;
+
+# Sampling and transfer execute predicates during optimization. Volatile
+# expressions must bypass RPT even with memory available, or their side effects
+# would occur once during optimization and again in the final query.
+statement ok
+CREATE SEQUENCE rpt_volatile_sequence START 1;
+
+query I
+SELECT count(*)
+FROM rpt_sparse_left l
+JOIN rpt_sparse_right r ON l.id = r.id
+WHERE r.keep AND nextval('rpt_volatile_sequence') > 0;
+----
+100
+
+query I
+SELECT currval('rpt_volatile_sequence');
+----
+100
 
 statement ok
 SET threads = 8;
@@ -203,6 +385,56 @@ JOIN rpt_map_right r ON l.k = r.k
 WHERE r.keep;
 ----
 two
+
+# DuckDB rewrites large IN lists into uniquely-owned CHUNK_GET collections.
+# RPT must keep an unfiltered collection under its original logical owner;
+# replacing the node with a non-owning MemoryScan would leave a dangling CDC.
+statement ok
+CREATE TABLE rpt_chunk_sales(customer_id INTEGER, item_sk INTEGER, date_sk INTEGER, price INTEGER);
+
+statement ok
+INSERT INTO rpt_chunk_sales VALUES (1, 1, 1, 10), (2, 9, 1, 20);
+
+statement ok
+CREATE TABLE rpt_chunk_customer(customer_id INTEGER, address_id INTEGER);
+
+statement ok
+INSERT INTO rpt_chunk_customer VALUES (1, 1), (2, 2);
+
+statement ok
+CREATE TABLE rpt_chunk_address(address_id INTEGER, zip VARCHAR);
+
+statement ok
+INSERT INTO rpt_chunk_address VALUES (1, 'A'), (2, 'Z');
+
+statement ok
+CREATE TABLE rpt_chunk_date(date_sk INTEGER, year INTEGER);
+
+statement ok
+INSERT INTO rpt_chunk_date VALUES (1, 2001);
+
+statement ok
+CREATE TABLE rpt_chunk_item(item_sk INTEGER, item_id VARCHAR);
+
+statement ok
+INSERT INTO rpt_chunk_item VALUES (1, 'X'), (9, 'Y');
+
+query II
+SELECT count(*), sum(price)
+FROM rpt_chunk_sales sales
+JOIN rpt_chunk_customer customer ON sales.customer_id = customer.customer_id
+JOIN rpt_chunk_address address ON customer.address_id = address.address_id
+JOIN rpt_chunk_date dates ON sales.date_sk = dates.date_sk
+JOIN rpt_chunk_item items ON sales.item_sk = items.item_sk
+WHERE dates.year = 2001
+  AND (address.zip IN ('A', 'B', 'C', 'D', 'E', 'F', 'G')
+       OR items.item_id IN (
+           SELECT item_id
+           FROM rpt_chunk_item
+           WHERE item_sk IN (1, 2, 3, 4, 5, 6, 7)
+       ));
+----
+1	10
 
 statement ok
 UPDATE rpt_probe

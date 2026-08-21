@@ -1,6 +1,7 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
+#include "duckdb/common/optional_idx.hpp"
 
 #include <string>
 
@@ -55,6 +56,10 @@ struct RPTSamplingConfig {
 
 class RPTOptimizerConfig {
 public:
+	//! Query-local memory budget for optimizer-time RPT work. Invalid means
+	//! "auto": use a conservative fraction of currently available DuckDB
+	//! operator memory. RPT collections stay in memory and never spill.
+	optional_idx memory_limit;
 	bool late_materialize_flag = false;
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
 	//! These tables benefit from early termination; RPT materialisation would defeat it.
@@ -78,8 +83,10 @@ public:
 	bool skip_cte_with_agg = true;
 	//! Execute and lift optimizer-time-safe MATERIALIZED CTE definitions.
 	//! Definitions whose physical plans may schedule tasks through DuckDB's
-	//! not-yet-installed outer query Executor remain intact for runtime.
-	bool enable_materialized_cte_lifting = true;
+	//! not-yet-installed outer query Executor remain intact for runtime. Keep
+	//! optimizer-time lifting off until its nested execution participates in the
+	//! same memory admission as the outer transfer scope.
+	bool enable_materialized_cte_lifting = false;
 	//! Skip RPT when the scope's join tree is fully left-deep (every join's
 	//! right input is a base table / CTE scan). Such plans already get most of
 	//! their benefit from join-side filter pushdown; RPT's materialization

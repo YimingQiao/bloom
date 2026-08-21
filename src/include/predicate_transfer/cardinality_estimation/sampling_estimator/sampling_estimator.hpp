@@ -13,6 +13,9 @@ public:
 	idx_t Estimate(const LogicalOperator &op) override;
 	idx_t Estimate(const LogicalOperator &op, const vector<DirectFilterInfo> &filters) override;
 	idx_t Estimate(TableScanner &scanner, const vector<DirectFilterInfo> &filters) override;
+	idx_t MemoryUsage() const override {
+		return samples_.MemoryUsage();
+	}
 
 private:
 	bool LogEnabled() const;

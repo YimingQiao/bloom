@@ -55,6 +55,7 @@ public:
 	//! Table functions and predicates not settled by statistics return invalid.
 	optional_idx TryGetExactLocalCardinality(const Entry &sample, const LogicalOperator &op) const;
 	void EnsureLocalFilter(Entry &sample, const LogicalOperator &op);
+	idx_t MemoryUsage() const;
 
 private:
 	bool LogEnabled() const;

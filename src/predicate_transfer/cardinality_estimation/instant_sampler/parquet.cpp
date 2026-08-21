@@ -15,6 +15,7 @@
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/table_filter.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -419,14 +420,15 @@ public:
 		auto task_started =
 		    collect_timing ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
 		auto timing = collect_timing ? &result.timing : nullptr;
-		auto local_output = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), first.output_types);
+		auto &allocator = BufferAllocator::Get(first.context);
+		auto local_output = make_shared_ptr<ColumnDataCollection>(allocator, first.output_types);
 		ColumnDataAppendState append_state;
 		local_output->InitializeAppend(append_state);
 
 		ThreadContext thread_context(first.context);
 		ExecutionContext execution_context(first.context, thread_context, nullptr);
 		DataChunk chunk;
-		chunk.Initialize(Allocator::DefaultAllocator(), first.output_types);
+		chunk.Initialize(allocator, first.output_types);
 		SelectionVector selection(STANDARD_VECTOR_SIZE);
 		idx_t task_sampled_rows = 0;
 		for (auto &shared_state : shared_states) {
@@ -546,7 +548,7 @@ InstantSampleResult BuildInstantParquetSample(ClientContext &context, LogicalGet
 	result.total_row_groups = plan.total_row_groups;
 	result.selected_row_groups = plan.selected_row_groups;
 	result.candidate_rows = plan.candidate_rows;
-	result.sample = make_shared_ptr<ColumnDataCollection>(Allocator::DefaultAllocator(), plan.output_types);
+	result.sample = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context), plan.output_types);
 	D_ASSERT(get.function.function);
 	D_ASSERT(get.function.init_global);
 	D_ASSERT(get.function.init_local);

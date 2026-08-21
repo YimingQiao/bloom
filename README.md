@@ -122,17 +122,40 @@ The main settings are:
 
 ```sql
 SET enable_rpt = false;
+SET rpt_memory_limit = '512MB';
 SET rpt_sample_cache_dir = '/path/to/cache';
 SET rpt_sample_mode = 'instant';
 SET rpt_excitation_mode = 'join_key_ndv';
 ```
 
 `enable_rpt` defaults to `true`; disable it for troubleshooting or an A/B
-comparison. `rpt_sample_cache_dir` defaults to `auto`, which stores samples
+comparison. `rpt_memory_limit` defaults to `auto`, which admits optimizer-time
+RPT work against at most 25% of currently available DuckDB operator memory.
+Each phase must also obtain its complete share from DuckDB's temporary-memory
+manager. RPT's large sample/materialized collections and filter payloads use
+DuckDB's non-spill `BufferAllocator`, so they count against the database-wide
+memory limit without becoming temporary-storage blocks; large task-local build
+states are included in admission estimates. If admission fails
+before the first materialization, RPT keeps DuckDB's original plan; after
+transfer has begun it stops adding new transfer rounds. The reservation for
+tables and filters retained by the rewritten plan remains active until those
+execution objects are destroyed. Set the limit to `0B` to force the fallback
+path. Allocation failures that occur after admission are reported to the query;
+they are not silently converted into a fallback.
+
+`EXPLAIN`, queries containing volatile expressions, and reads from a database
+with uncommitted changes bypass RPT and remain on DuckDB's native path. This
+prevents optimizer-time execution from evaluating side effects or mixing
+prepared samples with transaction-local state.
+
+`rpt_sample_cache_dir` defaults to `auto`, which stores samples
 under `<database>.rpt_samples/`. Set another directory to share a cache, or `''`
 to disable disk caching. Prepared samples are keyed by `rpt_sample_seed`, whose
 cross-workload-validated default is `2`; changing the seed creates an independent
-cache entry and never reuses the previous sample.
+cache entry and never reuses the previous sample. The optional
+`rpt_sample_memory_cache` also keeps DuckDB's conservative
+`ObjectCache` eviction reservation in addition to the sample's allocator charge;
+set it to `false` on especially tight memory limits while retaining disk caching.
 
 `rpt_sample_mode` accepts `prepared` (the default) and `instant`.
 

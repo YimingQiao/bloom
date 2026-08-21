@@ -54,6 +54,21 @@ SET rpt_excitation_mode = 'unknown';
 ----
 rpt_excitation_mode must be 'table_size' or 'join_key_ndv'
 
+statement error
+SET rpt_memory_limit = 'unknown';
+----
+Memory must have a number (e.g. 1GB)
+
+statement error
+SET rpt_memory_limit = '';
+----
+rpt_memory_limit must be 'auto' or a non-negative memory size
+
+statement error
+SET rpt_memory_limit = '-1GB';
+----
+rpt_memory_limit must be 'auto' or a non-negative memory size
+
 statement ok
 SET rpt_excitation_mode = 'join_key_ndv';
 

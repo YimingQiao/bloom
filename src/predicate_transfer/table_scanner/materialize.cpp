@@ -1,10 +1,10 @@
 #include "predicate_transfer/table_scanner/materialization.hpp"
+#include "predicate_transfer/rpt_result_collector.hpp"
 #include "predicate_transfer/table_scanner/filter_set.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
 #include "duckdb/execution/executor.hpp"
-#include "duckdb/execution/operator/helper/physical_result_collector.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_data.hpp"
@@ -23,6 +23,7 @@
 #include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -98,13 +99,19 @@ TableMaterialization::TableMaterialization(Optimizer &optimizer, ClientContext &
 	std::function<void(unique_ptr<Expression> &)> rewrite_refs = [&](unique_ptr<Expression> &expr) {
 		if (expr->GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
 			auto &cref = expr->Cast<BoundColumnRefExpression>();
+			idx_t binding_idx = DConstants::INVALID_INDEX;
 			for (idx_t i = 0; i < current_bindings.size(); i++) {
 				if (current_bindings[i] == cref.Binding()) {
-					expr = make_uniq<BoundReferenceExpression>(cref.GetAlias(), cref.GetReturnType(),
-					                                           current_positions[i]);
-					return;
+					binding_idx = i;
+					break;
 				}
 			}
+			D_ASSERT(binding_idx != DConstants::INVALID_INDEX);
+			if (binding_idx == DConstants::INVALID_INDEX) {
+				throw InternalException("RPT could not bind CHUNK_GET filter column %s", cref.Binding().ToString());
+			}
+			expr = make_uniq<BoundReferenceExpression>(cref.GetAlias(), cref.GetReturnType(),
+			                                           current_positions[binding_idx]);
 			return;
 		}
 		ExpressionIterator::EnumerateChildren(*expr, [&](unique_ptr<Expression> &child) { rewrite_refs(child); });
@@ -160,7 +167,7 @@ TableMaterialization::TableMaterialization(Optimizer &optimizer, ClientContext &
 	if (needs_projection) {
 		pending_expression_->projection_map = std::move(current_positions);
 	}
-	pending_expression_->scratch.Initialize(Allocator::DefaultAllocator(), data_->Types());
+	pending_expression_->scratch.Initialize(BufferAllocator::Get(context_), data_->Types());
 }
 
 //===--------------------------------------------------------------------===//
@@ -197,7 +204,7 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context_);
 	Executor executor(context_);
-	auto collector = PhysicalResultCollector::GetResultCollector(context_, stmt_data);
+	auto collector = GetRPTResultCollector(context_, stmt_data);
 	executor.Initialize(std::move(collector));
 	auto executor_init_end = MaterializeClock::now();
 
@@ -216,7 +223,8 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	data_ = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
 	if (!data_) {
-		data_ = shared_ptr<ColumnDataCollection>(make_uniq<ColumnDataCollection>(context_, mat_result.types).release());
+		data_ = shared_ptr<ColumnDataCollection>(
+		    make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), mat_result.types).release());
 	}
 	auto take_collection_end = MaterializeClock::now();
 	client_data.profiler = std::move(previous_profiler);
@@ -514,7 +522,7 @@ void TableMaterialization::InitScanChunk(DataChunk &chunk) const {
 	// chunk schema is narrower than the raw CDC. Initialize to table_op_ types
 	// so FindChunkCol (which resolves against output_bindings_) stays correct.
 	if (pending_expression_ && !pending_expression_->projection_map.empty()) {
-		chunk.Initialize(Allocator::DefaultAllocator(), table_op_.types);
+		chunk.Initialize(BufferAllocator::Get(context_), table_op_.types);
 	} else {
 		data_->InitializeScanChunk(chunk);
 	}

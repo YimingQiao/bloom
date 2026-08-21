@@ -1,8 +1,16 @@
 #include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/table_operator_manager.hpp"
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
+#include "duckdb/main/client_config.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
+#include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+#include "duckdb/transaction/local_storage.hpp"
 
 #include <algorithm>
 #include <iostream>
+#include <limits>
 #include <numeric>
 #include <sstream>
 
@@ -25,6 +33,37 @@ static const char *DomainObservationName(EqualityDomainTracker::ObservationKind 
 	return "unknown";
 }
 
+static bool IsDirectColumnDataGet(const LogicalOperator &op) {
+	auto *leaf = &op;
+	while (leaf->type == LogicalOperatorType::LOGICAL_FILTER && leaf->children.size() == 1) {
+		leaf = leaf->children[0].get();
+	}
+	return leaf->type == LogicalOperatorType::LOGICAL_CHUNK_GET;
+}
+
+idx_t ExcitationGraphManager::ComputeBaseTableRowIdSpan(const LogicalOperator &op) const {
+	const LogicalOperator *leaf = &op;
+	while (leaf->type != LogicalOperatorType::LOGICAL_GET && !leaf->children.empty()) {
+		leaf = leaf->children[0].get();
+	}
+	if (leaf->type != LogicalOperatorType::LOGICAL_GET) {
+		return ComputeBaseTableRows(op);
+	}
+	auto table = leaf->Cast<LogicalGet>().GetTable();
+	if (!table) {
+		return ComputeBaseTableRows(op);
+	}
+	auto &storage = table->GetStorage();
+	auto &transaction = DuckTransaction::Get(context, storage.GetAttached());
+	if (LocalStorage::Get(transaction).Find(storage)) {
+		// Transaction-local row IDs live in a disjoint high range. Mixing them
+		// with committed row IDs would require a prohibitively sparse bitmap;
+		// force the finalization admission to use the original scan instead.
+		return std::numeric_limits<idx_t>::max();
+	}
+	return MaxValue(storage.GetTotalRows(), storage.GetNextRowId());
+}
+
 void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 	for (auto &entry : cascade_filters_) {
 		idx_t table_id = entry.first;
@@ -45,11 +84,47 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 			// Materialized destinations finish the join stage with a row-id
 			// bitmap over their fully filtered in-memory data. The executor
 			// compacts any still-pending BFs first.
-			auto bitmap = executor_.FinalizeRowIDBitmap(*op);
-			if (bitmap) {
-				row_id_filters_[table_id] = bitmap;
+			auto *scanner = executor_.Find(*op);
+			D_ASSERT(scanner);
+			// Existing data is already retained. Compact() allocates one additional
+			// collection only when a native expression or RPT filter is pending.
+			auto compaction_memory =
+			    scanner->NeedsCompaction() && scanner->GetData() ? scanner->GetData()->AllocationSize() : 0;
+			idx_t bitmap_memory = 0;
+			idx_t row_id_scan_memory = 0;
+			if (scanner->IsPruned()) {
+				auto row_id_span = ComputeBaseTableRowIdSpan(*op);
+				auto bitmap_words = SaturatingAdd(row_id_span, 63) / 64;
+				bitmap_memory = SaturatingAdd(SaturatingMultiply(bitmap_words, sizeof(uint64_t)), 64);
+				// Finalization scans the in-memory row IDs twice and only retains a
+				// min/max pair per task before constructing the bitmap.
+				row_id_scan_memory = SaturatingMultiply(TaskScheduler::GetScheduler(context).NumberOfThreads(),
+				                                        sizeof(int64_t) * 2 + 64);
 			}
-			continue;
+			auto requested = SaturatingAdd(compaction_memory, bitmap_memory);
+			requested = SaturatingAdd(requested, row_id_scan_memory);
+			auto retained = RetainedMemoryUsage();
+			if (FitsMemoryBudget(retained, requested)) {
+				auto bitmap = executor_.FinalizeRowIDBitmap(*op);
+				if (bitmap) {
+					row_id_filters_[table_id] = bitmap;
+					AccountFilterMemory(bitmap);
+				}
+				// A full-width materialization is the final scan even without a
+				// row-id bitmap. A pruned one needs the bitmap; if it could not be
+				// built, forward its single-column filters to the original scan.
+				if (!scanner->IsPruned() || bitmap) {
+					continue;
+				}
+			} else {
+				if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
+					std::cerr << "[RPT-Memory] finalization skipped table=" << table_id << " requested=" << requested
+					          << " retained=" << retained << " budget=" << memory_budget_ << '\n';
+				}
+				if (!scanner->IsPruned()) {
+					continue;
+				}
+			}
 		}
 
 		// Non-materialized destinations stay on the disk-scan path: forward
@@ -75,13 +150,22 @@ TableTransferResult ExcitationGraphManager::GetTableResult(idx_t table_id, Logic
 	// source table's *sample*, so it has false negatives and can wrongly empty a
 	// non-empty join). Only a materialized scanner with Count()==0 below, or a
 	// pushed filter that empties the scan at execution, may drop all rows.
+	// A direct CHUNK_GET is already an in-memory DuckDB table. Leave its owning
+	// node intact while the scanner still borrows that collection. If pending
+	// filters caused Compact() to create an RPT-owned replacement, the normal
+	// MemoryScan path below is safe and reuses the filtered data.
 	auto *scanner = executor_.Find(op);
+	if (IsDirectColumnDataGet(op) && (!scanner || !executor_.OwnsMaterializedData(op))) {
+		return {TableTransferResult::Kind::DefaultScan, nullptr, nullptr, nullptr, false};
+	}
+
 	if (scanner && scanner->IsMaterialized()) {
 		if (scanner->Count() == 0) {
-			return {TableTransferResult::Kind::Empty, nullptr, nullptr, nullptr};
+			return {TableTransferResult::Kind::Empty, nullptr, nullptr, nullptr, false};
 		}
 		if (!scanner->IsPruned()) {
-			return {TableTransferResult::Kind::MemoryScan, scanner, nullptr, nullptr};
+			return {TableTransferResult::Kind::MemoryScan, scanner, nullptr, nullptr,
+			        executor_.OwnsMaterializedData(op)};
 		}
 		// Pruned scanner falls back to disk scan with injected filters.
 	}
@@ -96,7 +180,7 @@ TableTransferResult ExcitationGraphManager::GetTableResult(idx_t table_id, Logic
 	if (df_it != direct_filters_.end()) {
 		df = &df_it->second;
 	}
-	return {TableTransferResult::Kind::DefaultScan, nullptr, std::move(rid), df};
+	return {TableTransferResult::Kind::DefaultScan, nullptr, std::move(rid), df, false};
 }
 
 //===--------------------------------------------------------------------===//
@@ -218,6 +302,9 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 	auto *source_op = table_operator_manager.GetTableOperator(source_table_id);
 	if (source_op && !build_specs.empty()) {
 		built_filters = executor_.BuildTransferFilters(*source_op, build_specs);
+		for (auto &filter : built_filters) {
+			AccountFilterMemory(filter);
+		}
 	}
 
 	vector<shared_ptr<GraphEdge>> effective;

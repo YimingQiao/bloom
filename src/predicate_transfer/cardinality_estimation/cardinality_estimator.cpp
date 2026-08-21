@@ -1,12 +1,13 @@
 #include "predicate_transfer/cardinality_estimation/cardinality_estimator.hpp"
+#include "predicate_transfer/rpt_result_collector.hpp"
 
 #include "duckdb/execution/executor.hpp"
-#include "duckdb/execution/operator/helper/physical_result_collector.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_data.hpp"
 #include "duckdb/main/materialized_query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 namespace duckdb {
 
@@ -32,7 +33,7 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 	auto previous_profiler = client_data.profiler;
 	client_data.profiler = make_shared_ptr<QueryProfiler>(context);
 	Executor executor(context);
-	auto collector = PhysicalResultCollector::GetResultCollector(context, data);
+	auto collector = GetRPTResultCollector(context, data);
 	executor.Initialize(std::move(collector));
 
 	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
@@ -48,7 +49,7 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 	auto &mat_result = result->Cast<MaterializedQueryResult>();
 	auto result_cdc = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
 	if (!result_cdc) {
-		result_cdc = make_shared_ptr<ColumnDataCollection>(context, col_types);
+		result_cdc = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context), col_types);
 	}
 	client_data.profiler = std::move(previous_profiler);
 	return result_cdc;

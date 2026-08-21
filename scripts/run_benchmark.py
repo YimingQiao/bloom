@@ -14,6 +14,7 @@ import argparse
 import os
 import re
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 
@@ -131,6 +132,15 @@ WORKLOADS = {
 }
 
 
+def can_open_read_write(database: Path) -> bool:
+    """Return whether the runner can open an existing cache read-write."""
+    try:
+        with database.open("r+b"):
+            return True
+    except OSError:
+        return False
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", choices=sorted(WORKLOADS), default="imdb")
@@ -172,14 +182,18 @@ def write_benchmark_root(
     bench_dir = root / "benchmark" / workload
     bench_dir.mkdir(parents=True)
 
-    # Keep the benchmark runner's cache path isolated. The individual database
-    # symlink points either to the persistent Bloom cache or to --db, so an
-    # external database never replaces a shared cache entry.
+    # Keep the benchmark runner's cache path isolated. A writable database gets
+    # an individual symlink, so the runner can replace only that link after an
+    # open failure. A read-only database is attached below without a cache link.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     benchmark_data = root / "duckdb_benchmark_data"
     benchmark_data.mkdir()
     database = db or (DATA_DIR / spec["cache"]).resolve()
-    (benchmark_data / spec["cache"]).symlink_to(database)
+
+    db_exists = database.is_file()
+    database_is_read_only = db_exists and not can_open_read_write(database)
+    if not database_is_read_only:
+        (benchmark_data / spec["cache"]).symlink_to(database)
 
     if "load_sql" in spec:
         (bench_dir / "load.sql").write_text(spec["load_sql"] + "\n", encoding="utf-8")
@@ -187,7 +201,6 @@ def write_benchmark_root(
     else:
         load_path = str(spec["load_file"])
 
-    db_exists = database.exists()
     requires = ([required_extension] if required_extension else []) + (
         [] if db_exists else spec["require"]
     )
@@ -214,7 +227,32 @@ def write_benchmark_root(
             "",
         ]
         lines += [f"require {r}" for r in requires]
-        lines += ["", f"cache {spec['cache']}", "", f"load {load_path}", "", f"run {query_file}"]
+        if database_is_read_only:
+            # The native benchmark runner opens `cache` databases read-write.
+            # Use an in-memory connection with a read-only attachment when the
+            # existing database cannot be opened that way (e.g. an external
+            # Codex workspace path). This also prevents the runner's broad
+            # open-error recovery from replacing the cache link with an empty
+            # database and unexpectedly executing the remote load SQL.
+            database_sql = str(database).replace("'", "''")
+            lines += [
+                "",
+                "storage transient",
+                "",
+                "init",
+                f"ATTACH '{database_sql}' AS bloom_benchmark_db (READ_ONLY);",
+                "USE bloom_benchmark_db;",
+                "",
+                f"run {query_file}",
+            ]
+        else:
+            lines += ["", f"cache {spec['cache']}"]
+            if not db_exists:
+                lines += ["", f"load {load_path}"]
+            # An existing cache must never fall through to remote regeneration
+            # merely because the runner failed to open it. With no load query,
+            # that condition becomes a visible benchmark ERROR below.
+            lines += ["", f"run {query_file}"]
         answer = spec["answers"] / f"{query_id}.csv" if spec["answers"] else None
         if answer and answer.is_file():
             lines += ["", f"result {answer}"]
@@ -293,9 +331,9 @@ def main():
                 "warning: this benchmark_runner only supports its default "
                 "five timed runs; ignoring --timed-runs",
             )
-        if args.out:
-            args.out.parent.mkdir(parents=True, exist_ok=True)
-            command.append(f"--out={args.out.resolve()}")
+        result_path = args.out.resolve() if args.out else benchmark_root / "runner_results.out"
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        command.append(f"--out={result_path}")
         if args.log:
             args.log.parent.mkdir(parents=True, exist_ok=True)
             command.append(f"--log={args.log.resolve()}")
@@ -307,7 +345,32 @@ def main():
         env["RPT_ENABLE"] = "0" if args.baseline else "1"
         env["RPT_SAMPLE_MODE"] = args.sampling_mode
         env["RPT_SAMPLE_SEED"] = str(args.sample_seed)
-        return subprocess.run(command, env=env, check=False).returncode
+        completed = subprocess.run(command, env=env, check=False)
+        if completed.returncode != 0:
+            return completed.returncode
+
+        # benchmark_runner reports per-benchmark initialization/query failures
+        # as text in --out but can still exit zero. A successful timing file is
+        # non-empty and contains only floating-point seconds.
+        if not result_path.is_file():
+            print(f"benchmark runner failed: no timing output at {result_path}", file=sys.stderr)
+            return 1
+        result_lines = [
+            line.strip()
+            for line in result_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+        invalid_results = []
+        for line in result_lines:
+            try:
+                float(line)
+            except ValueError:
+                invalid_results.append(line)
+        if not result_lines or invalid_results:
+            detail = invalid_results[0] if invalid_results else "no timing rows"
+            print(f"benchmark runner failed: {detail}; see {result_path}", file=sys.stderr)
+            return 1
+        return 0
 
 
 if __name__ == "__main__":

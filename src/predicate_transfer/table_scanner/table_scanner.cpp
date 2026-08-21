@@ -7,6 +7,7 @@
 #include "duckdb/parallel/task_executor.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/storage/buffer_manager.hpp"
 
 #include <functional>
 
@@ -181,7 +182,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 	unique_ptr<ColumnDataCollection> new_data;
 	if (!filters_.Empty() || pending_expression) {
 		// New CDC matches the (possibly narrowed) chunk schema that Scan emits.
-		new_data = make_uniq<ColumnDataCollection>(context_, chunk.GetTypes());
+		new_data = make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), chunk.GetTypes());
 	}
 
 	auto task_count = RPTScanTaskCount(context_, *data);
@@ -215,7 +216,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 				unique_ptr<DataChunk> projection_chunk;
 				if (!pending_expression->projection_map.empty()) {
 					projection_chunk = make_uniq<DataChunk>();
-					projection_chunk->Initialize(Allocator::DefaultAllocator(), chunk.GetTypes());
+					projection_chunk->Initialize(BufferAllocator::Get(context_), chunk.GetTypes());
 				}
 				local_projection_chunks.push_back(std::move(projection_chunk));
 			}
@@ -235,7 +236,8 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 			new_data.reset();
 			local_collections.reserve(task_count);
 			for (idx_t task_id = 0; task_id < task_count; task_id++) {
-				local_collections.push_back(make_uniq<ColumnDataCollection>(context_, chunk.GetTypes()));
+				local_collections.push_back(
+				    make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), chunk.GetTypes()));
 			}
 		}
 
@@ -295,7 +297,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 			global_aggregate_state->Combine(*aggregate_state);
 		}
 		if (!local_collections.empty()) {
-			new_data = make_uniq<ColumnDataCollection>(context_, chunk.GetTypes());
+			new_data = make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), chunk.GetTypes());
 			for (auto &local_collection : local_collections) {
 				new_data->Combine(*local_collection);
 			}
@@ -311,7 +313,7 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 			min_max_types.push_back(aggr_expr->GetReturnType());
 		}
 		DataChunk final_min_max;
-		final_min_max.Initialize(Allocator::DefaultAllocator(), min_max_types);
+		final_min_max.Initialize(BufferAllocator::Get(context_), min_max_types);
 		global_aggregate_state->Finalize(final_min_max);
 
 		for (idx_t stats_idx = 0; stats_idx < collected_request_indices.size(); stats_idx++) {

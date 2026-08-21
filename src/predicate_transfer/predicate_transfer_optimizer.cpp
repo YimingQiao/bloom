@@ -4,12 +4,15 @@
 #include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/filter/table_filter.hpp"
 
+#include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
+#include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/binder.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/common/string_util.hpp"
 
 #include "duckdb/optimizer/column_binding_replacer.hpp"
@@ -17,6 +20,8 @@
 #include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/config.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 namespace duckdb {
 
@@ -26,6 +31,51 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	}
 	for (auto &child : op.children) {
 		if (ContainsRecursiveCTE(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! RPT executes predicates while sampling and materializing during
+//! optimization. A volatile expression (nextval, random, or a side-effecting
+//! UDF) must therefore stay on DuckDB's normal execution path, where it is
+//! evaluated exactly as prescribed by the final physical plan.
+static bool ContainsVolatileExpression(LogicalOperator &op) {
+	bool found = false;
+	LogicalOperatorVisitor::EnumerateExpressions(op, [&](unique_ptr<Expression> *expression) {
+		if (*expression && (*expression)->IsVolatile()) {
+			found = true;
+		}
+	});
+	if (found) {
+		return true;
+	}
+	for (auto &child : op.children) {
+		if (ContainsVolatileExpression(*child)) {
+			return true;
+		}
+	}
+	return false;
+}
+
+//! Prepared samples are keyed to committed table storage, while optimizer-time
+//! materialization and late row IDs would observe transaction-local state.
+//! Avoid mixing those snapshots: leave the entire scope to DuckDB until the
+//! transaction has been committed or rolled back.
+static bool HasUncommittedChanges(const LogicalOperator &op, ClientContext &context) {
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto table = op.Cast<LogicalGet>().GetTable();
+		if (table) {
+			auto &storage = table->GetStorage();
+			auto &transaction = DuckTransaction::Get(context, storage.GetAttached());
+			if (transaction.ChangesMade()) {
+				return true;
+			}
+		}
+	}
+	for (auto &child : op.children) {
+		if (HasUncommittedChanges(*child, context)) {
 			return true;
 		}
 	}
@@ -344,6 +394,20 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		return plan;
 	}
 
+	if (HasUncommittedChanges(*plan, optimizer.context)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: uncommitted_changes\n");
+		}
+		return plan;
+	}
+
+	if (ContainsVolatileExpression(*plan)) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[RPT-Excitation] scope skipped: volatile_expression\n");
+		}
+		return plan;
+	}
+
 	if (config.enable_materialized_cte_lifting) {
 		// Lift optimizer-time-safe LOGICAL_MATERIALIZED_CTE nodes before
 		// building the PT graph. Unsafe definitions remain in the plan for
@@ -394,6 +458,10 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 	}
 
 	graph_manager->Build(*plan);
+	auto &excitation_manager = static_cast<ExcitationGraphManager &>(*graph_manager);
+	if (excitation_manager.WholeQueryMemoryFallback()) {
+		return plan;
+	}
 
 	if (ClientConfig::GetConfig(optimizer.context).enable_profiler || config.log_transfer_steps) {
 		cached_debug_info = GetDebugInfo();
@@ -427,47 +495,14 @@ string PredicateTransferOptimizer::GetDebugInfo() const {
 }
 
 //===--------------------------------------------------------------------===//
-// Helper: select and reorder columns from a ColumnDataCollection
-//===--------------------------------------------------------------------===//
-static unique_ptr<ColumnDataCollection> SelectColumns(ColumnDataCollection &src, const vector<idx_t> &col_positions) {
-	auto &src_types = src.Types();
-	vector<LogicalType> dst_types;
-	for (auto pos : col_positions) {
-		dst_types.push_back(src_types[pos]);
-	}
-
-	auto result = make_uniq<ColumnDataCollection>(Allocator::DefaultAllocator(), dst_types);
-
-	ColumnDataScanState scan_state;
-	src.InitializeScan(scan_state);
-
-	DataChunk src_chunk, dst_chunk;
-	src_chunk.Initialize(Allocator::DefaultAllocator(), src_types);
-	dst_chunk.Initialize(Allocator::DefaultAllocator(), dst_types);
-
-	while (true) {
-		src_chunk.Reset();
-		src.Scan(scan_state, src_chunk);
-		if (src_chunk.size() == 0) {
-			break;
-		}
-
-		dst_chunk.Reset();
-		dst_chunk.SetCardinalityUnsafe(src_chunk.size());
-		for (idx_t i = 0; i < col_positions.size(); i++) {
-			dst_chunk.data[i].Reference(src_chunk.data[col_positions[i]]);
-		}
-		result->Append(dst_chunk);
-	}
-	return result;
-}
-
-//===--------------------------------------------------------------------===//
 // Build a LogicalColumnDataGet that replaces a materialized subtree.
 // Strips the rowid column and produces columns matching `wanted_bindings`.
 //===--------------------------------------------------------------------===//
-static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const vector<ColumnBinding> &wanted_bindings,
-                                                   const vector<LogicalType> &wanted_types, TableIndex table_index) {
+static unique_ptr<LogicalOperator> BuildMemoryScan(ExcitationGraphManager &manager, TableScanner &scanner,
+                                                   bool owns_materialized_data,
+                                                   const vector<ColumnBinding> &wanted_bindings,
+                                                   const vector<LogicalType> &wanted_types, TableIndex table_index,
+                                                   TableIndex input_table_index) {
 	// A MemoryScan replaces the subtree with a flat ColumnDataGet exposing
 	// exactly wanted_bindings/wanted_types. If the source op reports a
 	// different number of bindings than types (seen when an upstream pass left
@@ -480,17 +515,17 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 	const auto &output_bindings = scanner.GetOutputBindings();
 	auto rowid_chunk_col = scanner.GetRowIdChunkCol();
 
-	// Build lookup: output_binding → chunk column index (excluding rowid)
+	// Build lookup: output_binding → raw collection column index. The rowid is
+	// intentionally not exposed to the replacement operator.
 	unordered_map<ColumnBinding, idx_t, ColumnBindingHashFunc> binding_to_col;
-	idx_t col_idx = 0;
 	for (idx_t i = 0; i < output_bindings.size(); i++) {
 		if (i == rowid_chunk_col) {
 			continue;
 		}
-		binding_to_col[output_bindings[i]] = col_idx++;
+		binding_to_col[output_bindings[i]] = i;
 	}
 
-	// Map each wanted binding → position in the data (post-rowid-strip)
+	// Map each wanted binding directly to its position in the raw data.
 	vector<idx_t> col_positions;
 	for (auto &b : wanted_bindings) {
 		auto it = binding_to_col.find(b);
@@ -501,41 +536,54 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(TableScanner &scanner, const 
 		}
 	}
 
-	// Build the strip list: all columns except rowid
-	vector<idx_t> strip_positions;
-	for (idx_t i = 0; i < output_bindings.size(); i++) {
-		if (i != rowid_chunk_col) {
-			strip_positions.push_back(i);
-		}
-	}
-
-	// Check if we need reordering beyond just stripping rowid
-	bool needs_reorder = (col_positions.size() != strip_positions.size());
-	for (idx_t i = 0; !needs_reorder && i < col_positions.size(); i++) {
-		if (col_positions[i] != i) {
-			needs_reorder = true;
-		}
-	}
-
-	auto data = scanner.TakeData();
-	if (!data) {
+	auto *scanner_data = scanner.GetData();
+	if (!scanner_data) {
 		return nullptr;
 	}
-
-	unique_ptr<ColumnDataCollection> final_data;
-	if (!needs_reorder) {
-		// Just strip rowid
-		final_data = SelectColumns(*data, strip_positions);
-	} else {
-		// Strip rowid + reorder in one pass: compose strip_positions[col_positions[i]]
-		vector<idx_t> combined;
-		for (auto pos : col_positions) {
-			combined.push_back(strip_positions[pos]);
+	bool needs_projection = col_positions.size() != scanner_data->Types().size();
+	for (idx_t i = 0; !needs_projection && i < col_positions.size(); i++) {
+		if (col_positions[i] != i) {
+			needs_projection = true;
 		}
-		final_data = SelectColumns(*data, combined);
 	}
 
-	return make_uniq<LogicalColumnDataGet>(table_index, wanted_types, std::move(final_data));
+	if (!needs_projection && scanner_data->Types() == wanted_types) {
+		// The common full-width path already has the exact output layout. Hand
+		// ownership to the logical scan instead of copying the entire collection
+		// during rewrite; this avoids a second table-sized memory peak.
+		auto data = scanner.TakeData();
+		D_ASSERT(data);
+		data = manager.RetainMaterializedDataForExecution(std::move(data), owns_materialized_data);
+		optionally_owned_ptr<ColumnDataCollection> owned(std::move(data));
+		return make_uniq<LogicalColumnDataGet>(table_index, wanted_types, std::move(owned));
+	}
+
+	for (idx_t i = 0; i < col_positions.size(); i++) {
+		if (col_positions[i] >= scanner_data->Types().size() ||
+		    scanner_data->Types()[col_positions[i]] != wanted_types[i]) {
+			return nullptr;
+		}
+	}
+
+	// Rowid stripping and uncommon column reordering are represented as a
+	// logical projection over the same collection. This keeps rewrite
+	// allocation bounded instead of copying every row into a second CDC.
+	auto input_types = scanner_data->Types();
+	auto data = scanner.TakeData();
+	D_ASSERT(data);
+	data = manager.RetainMaterializedDataForExecution(std::move(data), owns_materialized_data);
+	optionally_owned_ptr<ColumnDataCollection> owned(std::move(data));
+	auto scan = make_uniq<LogicalColumnDataGet>(input_table_index, std::move(input_types), std::move(owned));
+	vector<unique_ptr<Expression>> expressions;
+	expressions.reserve(col_positions.size());
+	for (idx_t i = 0; i < col_positions.size(); i++) {
+		expressions.push_back(make_uniq<BoundColumnRefExpression>(
+		    wanted_types[i], ColumnBinding(input_table_index, ProjectionIndex(col_positions[i]))));
+	}
+	auto projection = make_uniq<LogicalProjection>(table_index, std::move(expressions));
+	projection->children.push_back(std::move(scan));
+	projection->ResolveOperatorTypes();
+	return unique_ptr<LogicalOperator>(std::move(projection));
 }
 
 static LogicalGet *FindLeafGet(LogicalOperator &op) {
@@ -549,7 +597,8 @@ static LogicalGet *FindLeafGet(LogicalOperator &op) {
 	return &leaf->Cast<LogicalGet>();
 }
 
-static void InjectDefaultScanFilters(LogicalGet &get, const shared_ptr<RPTFilter> &row_id_filter,
+static void InjectDefaultScanFilters(ExcitationGraphManager &manager, LogicalGet &get,
+                                     const shared_ptr<RPTFilter> &row_id_filter,
                                      const vector<DirectFilterInfo> *direct_filters) {
 	auto &column_ids = get.GetMutableColumnIds();
 
@@ -567,8 +616,9 @@ static void InjectDefaultScanFilters(LogicalGet &get, const shared_ptr<RPTFilter
 			row_id_col_index = column_ids.size();
 			column_ids.push_back(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID));
 		}
+		auto retained_filter = manager.RetainFilterForExecution(row_id_filter);
 		get.table_filters.PushFilter(ProjectionIndex(row_id_col_index),
-		                             RPTTableFilter::MakeOptional(row_id_filter, LogicalType::ROW_TYPE));
+		                             RPTTableFilter::MakeOptional(std::move(retained_filter), LogicalType::ROW_TYPE));
 	}
 
 	if (!direct_filters) {
@@ -581,7 +631,9 @@ static void InjectDefaultScanFilters(LogicalGet &get, const shared_ptr<RPTFilter
 		}
 		auto col_id = column_ids[pos].GetPrimaryIndex();
 		auto key_type = (col_id < get.returned_types.size()) ? get.returned_types[col_id] : LogicalType::BIGINT;
-		get.table_filters.PushFilter(ProjectionIndex(pos), RPTTableFilter::MakeOptional(df.filter, key_type));
+		auto retained_filter = manager.RetainFilterForExecution(df.filter);
+		get.table_filters.PushFilter(ProjectionIndex(pos),
+		                             RPTTableFilter::MakeOptional(std::move(retained_filter), key_type));
 	}
 }
 
@@ -639,7 +691,9 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			op->ResolveOperatorTypes();
 			auto old_bindings = op->GetColumnBindings();
 			auto new_table_index = optimizer.binder.GenerateTableIndex();
-			if (auto scan = BuildMemoryScan(*result.scanner, old_bindings, op->types, new_table_index)) {
+			auto input_table_index = optimizer.binder.GenerateTableIndex();
+			if (auto scan = BuildMemoryScan(excitation_mgr, *result.scanner, result.owns_materialized_data,
+			                                old_bindings, op->types, new_table_index, input_table_index)) {
 				auto new_bindings = scan->GetColumnBindings();
 				D_ASSERT(old_bindings.size() == new_bindings.size());
 				for (idx_t i = 0; i < old_bindings.size(); i++) {
@@ -662,7 +716,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 				fprintf(stderr, "\t[RewriteQueryPlan] table_id=%lu → DefaultScan\n", table_id);
 			}
 			if (auto *get = FindLeafGet(*op)) {
-				InjectDefaultScanFilters(*get, result.row_id_filter, result.direct_filters);
+				InjectDefaultScanFilters(excitation_mgr, *get, result.row_id_filter, result.direct_filters);
 			}
 			return op;
 		}
@@ -676,6 +730,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 	EmptyResultPullup empty_result_pullup;
 	plan = empty_result_pullup.Optimize(std::move(plan));
 	excitation_mgr.ClearMaterializedScanners();
+	excitation_mgr.FinalizeMemoryReservationForExecution();
 	return plan;
 }
 

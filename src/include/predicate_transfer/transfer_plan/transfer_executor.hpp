@@ -55,11 +55,17 @@ public:
 	                           const shared_ptr<RPTFilter> &filter, size_t identity_hash = 0);
 
 	TableScanner *Find(LogicalOperator &op) const;
+	//! Bytes owned by RPT-created materializations. Collections borrowed from an
+	//! existing CHUNK_GET are excluded unless compaction replaces them.
+	idx_t MaterializedMemoryUsage() const;
+	bool OwnsMaterializedData(LogicalOperator &op) const;
+	void Remove(LogicalOperator &op);
 	bool Has(LogicalOperator &op) const {
 		return Find(op) != nullptr;
 	}
 	void Clear() {
 		scanners_.clear();
+		borrowed_data_.clear();
 	}
 
 private:
@@ -67,6 +73,7 @@ private:
 	ClientContext &context_;
 	const RPTOptimizerConfig &config_;
 	unordered_map<LogicalOperator *, unique_ptr<TableScanner>> scanners_;
+	unordered_map<LogicalOperator *, const ColumnDataCollection *> borrowed_data_;
 };
 
 } // namespace duckdb

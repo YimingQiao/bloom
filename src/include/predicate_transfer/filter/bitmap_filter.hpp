@@ -54,6 +54,9 @@ public:
 
 	FilterPropagateResult CheckStatistics(const BaseStatistics &stats) override;
 	size_t Hash() const override;
+	idx_t MemoryUsage() const override {
+		return 64 + BlockCount() * sizeof(uint64_t);
+	}
 	optional_idx ExactDistinctCount() const override;
 	string ToString() const override;
 
