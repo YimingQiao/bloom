@@ -94,7 +94,7 @@ jobs:
         env:
           CCACHE_BASEDIR: ${{ github.workspace }}
           CCACHE_DIR: ${{ runner.temp }}/ccache
-          CCACHE_HASHDIR: 'false'
+          CCACHE_NOHASHDIR: 'true'
           CCACHE_TEMPDIR: ${{ runner.temp }}/ccache-tmp
         run: |
           cmake \
@@ -115,7 +115,7 @@ jobs:
         env:
           CCACHE_BASEDIR: ${{ runner.temp }}/bloom-base
           CCACHE_DIR: ${{ runner.temp }}/ccache
-          CCACHE_HASHDIR: 'false'
+          CCACHE_NOHASHDIR: 'true'
           CCACHE_TEMPDIR: ${{ runner.temp }}/ccache-tmp
         run: |
           cmake \
