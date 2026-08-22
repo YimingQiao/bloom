@@ -2,6 +2,7 @@
 
 [![Version: 0.0.2](https://img.shields.io/badge/version-0.0.2-blue)](extension_config.cmake)
 [![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 Bloom speeds up complex join queries in DuckDB by moving selective filters
 across the join graph. Built on **robust predicate transfer (RPT)**, it uses
