@@ -243,3 +243,14 @@ projection, grouping, or aggregation. Across ten CEB Stack q15 variants, it
 improved geomean runtime by 1.263x over standard Bloom with identical results. The
 extra bitmap construction is not universally beneficial, so enable it per
 workload after benchmarking.
+
+## Related projects
+
+Bloom, BloomPG, and Bloom for Apache DataFusion are sibling projects exploring
+robust predicate transfer across different query engines.
+
+- [Bloom](https://github.com/YimingQiao/bloom) — DuckDB extension
+  (this repository).
+- [BloomPG](https://github.com/YimingQiao/bloompg) — PostgreSQL extension.
+- [Bloom for Apache DataFusion](https://github.com/YimingQiao/datafusion-bloom)
+  — Apache DataFusion library.
