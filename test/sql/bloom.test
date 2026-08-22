@@ -5,24 +5,24 @@
 require bloom
 
 query I
-SELECT current_setting('enable_rpt');
+SELECT current_setting('enable_bloom');
 ----
 true
 
 query T
-SELECT current_setting('rpt_sample_cache_dir');
+SELECT current_setting('bloom_sample_cache_dir');
 ----
 auto
 
 query T
-SELECT current_setting('rpt_memory_limit');
+SELECT current_setting('bloom_memory_limit');
 ----
 auto
 
 query III
-SELECT current_setting('rpt_sample_size'),
-       current_setting('rpt_sample_memory_cache'),
-       current_setting('rpt_late_materialize');
+SELECT current_setting('bloom_sample_size'),
+       current_setting('bloom_sample_memory_cache'),
+       current_setting('bloom_late_materialize');
 ----
 10000	true	false
 
@@ -68,11 +68,11 @@ WHERE r.keep AND l.middle_col >= 0;
 ----
 100	495000	1188	296
 
-# RPT's large retained objects must use DuckDB's non-spill BufferAllocator.
+# Bloom's large retained objects must use DuckDB's non-spill BufferAllocator.
 # EXECUTE lazily optimizes the prepared statement, after which its physical
 # plan keeps the rewritten memory scans alive until DEALLOCATE.
 statement ok
-SET rpt_sample_memory_cache = false;
+SET bloom_sample_memory_cache = false;
 
 statement ok
 CREATE TEMP TABLE rpt_allocator_baseline AS
@@ -123,7 +123,7 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# DuckDB can reduce an operator's temporary-memory reservation to zero. RPT
+# DuckDB can reduce an operator's temporary-memory reservation to zero. Bloom
 # must then keep the original plan instead of materializing or spilling.
 statement ok
 SET debug_force_external = true;
@@ -151,7 +151,7 @@ statement ok
 DEALLOCATE rpt_allocator_fallback;
 
 # DuckDB may retain or release one small allocator block around prepared-plan
-# destruction. The materialized RPT footprint measured above is larger than
+# destruction. The materialized Bloom footprint measured above is larger than
 # this tolerance, so the bound still detects retained transfer state.
 query II
 SELECT (abs(memory_usage_bytes - bytes) <= 65536)::INTEGER,
@@ -165,9 +165,9 @@ statement ok
 SET debug_force_external = false;
 
 statement ok
-SET rpt_sample_memory_cache = true;
+SET bloom_sample_memory_cache = true;
 
-# EXPLAIN must preserve DuckDB's native scans instead of running RPT's
+# EXPLAIN must preserve DuckDB's native scans instead of running Bloom's
 # optimizer-time sampling and replacing them with COLUMN_DATA_SCAN nodes.
 query II
 EXPLAIN SELECT count(*)
@@ -185,11 +185,11 @@ WHERE r.keep;
 ----
 analyzed_plan	<REGEX>:.*Table Scan.*
 
-# A zero RPT budget must take the whole-query fallback before sampling or the
+# A zero Bloom budget must take the whole-query fallback before sampling or the
 # first materialization. Keep this query non-volatile so it reaches the memory
 # admission path rather than the volatile-expression guard below.
 statement ok
-SET rpt_memory_limit = '0B';
+SET bloom_memory_limit = '0B';
 
 query II
 SELECT count(*), sum(l.id)
@@ -200,13 +200,13 @@ WHERE r.keep;
 100	495000
 
 statement ok
-SET rpt_memory_limit = 'auto';
+SET bloom_memory_limit = 'auto';
 
 # Prepared samples and row-id bitmaps must not inspect uncommitted table state:
 # cached samples can omit local values, and local row IDs occupy a high,
-# disjoint range. The complete RPT scope must stay on DuckDB's original path.
+# disjoint range. The complete Bloom scope must stay on DuckDB's original path.
 statement ok
-SET rpt_late_materialize = true;
+SET bloom_late_materialize = true;
 
 statement ok
 BEGIN TRANSACTION;
@@ -229,10 +229,10 @@ statement ok
 ROLLBACK;
 
 statement ok
-SET rpt_late_materialize = false;
+SET bloom_late_materialize = false;
 
 # Sampling and transfer execute predicates during optimization. Volatile
-# expressions must bypass RPT even with memory available, or their side effects
+# expressions must bypass Bloom even with memory available, or their side effects
 # would occur once during optimization and again in the final query.
 statement ok
 CREATE SEQUENCE rpt_volatile_sequence START 1;
@@ -280,7 +280,7 @@ SELECT n FROM range_cte;
 ----
 6
 
-# RPT is fail-closed outside its validated domain. These plans must be left
+# Bloom is fail-closed outside its validated domain. These plans must be left
 # untouched and retain DuckDB's native semantics.
 query I
 WITH RECURSIVE countdown(n) AS (
@@ -392,7 +392,7 @@ WHERE r.keep;
 two
 
 # DuckDB rewrites large IN lists into uniquely-owned CHUNK_GET collections.
-# RPT must keep an unfiltered collection under its original logical owner;
+# Bloom must keep an unfiltered collection under its original logical owner;
 # replacing the node with a non-owning MemoryScan would leave a dangling CDC.
 statement ok
 CREATE TABLE rpt_chunk_sales(customer_id INTEGER, item_sk INTEGER, date_sk INTEGER, price INTEGER);
@@ -461,10 +461,10 @@ statement ok
 SET threads = 1;
 
 statement ok
-SET enable_rpt = false;
+SET enable_bloom = false;
 
 query I
-SELECT current_setting('enable_rpt');
+SELECT current_setting('enable_bloom');
 ----
 false
 
@@ -486,9 +486,9 @@ WHERE r.keep AND l.middle_col >= 0;
 100	495000	1188	296
 
 statement ok
-SET enable_rpt = true;
+SET enable_bloom = true;
 
 query I
-SELECT current_setting('enable_rpt');
+SELECT current_setting('enable_bloom');
 ----
 true

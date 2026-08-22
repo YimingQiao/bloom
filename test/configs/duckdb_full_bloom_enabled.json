@@ -1,5 +1,5 @@
 {
-  "description": "Load Bloom and enable RPT for every DuckDB test database.",
+  "description": "Load and enable Bloom for every DuckDB test database.",
   "statically_loaded_extensions": [
     "core_functions",
     "bloom"
@@ -7,7 +7,7 @@
   "summarize_failures": true,
   "skip_tests": [
     {
-      "reason": "These tests assert DuckDB's native optimizer plan shape. Bloom intentionally rewrites scans, CTEs, joins, and empty inputs when RPT is enabled; the same files remain covered by the RPT-disabled full-suite run.",
+      "reason": "These tests assert DuckDB's native optimizer plan shape. Bloom intentionally rewrites scans, CTEs, joins, and empty inputs when enabled; the same files remain covered by the Bloom-disabled full-suite run.",
       "paths": [
         "test/optimizer/cte_inlining.test",
         "test/optimizer/joins/delim_join_dont_explode.test_slow",

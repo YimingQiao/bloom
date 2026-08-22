@@ -89,7 +89,7 @@ unique_ptr<QueryResult> RPTResultCollector::GetResult(GlobalSinkState &state) co
 	auto &global = state.Cast<RPTCollectorGlobalState>();
 	auto context = global.context.lock();
 	if (!context) {
-		throw InternalException("RPT result collector lost its ClientContext");
+		throw InternalException("Bloom result collector lost its ClientContext");
 	}
 	if (!global.collection) {
 		global.collection = CreateRPTCollection(*context);
@@ -103,7 +103,7 @@ unique_ptr<QueryResult> RPTResultCollector::GetResult(GlobalSinkState &state) co
 unique_ptr<PhysicalOperator> GetRPTResultCollector(ClientContext &context, PreparedStatementData &data) {
 	auto &root = data.physical_plan->Root();
 	// A non-parallel sink preserves order for the few optimizer-time plans where
-	// DuckDB requires it. RPT does not need the batch collector's parallelism.
+	// DuckDB requires it. Bloom does not need the batch collector's parallelism.
 	auto parallel = !PhysicalPlanGenerator::PreserveInsertionOrder(context, root);
 	return make_uniq<RPTResultCollector>(*data.physical_plan, data, parallel);
 }

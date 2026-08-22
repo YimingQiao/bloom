@@ -64,7 +64,7 @@ void TableOperatorManager::Build(LogicalOperator &plan) {
 void TableOperatorManager::ComputeCDCAliasGroups() {
 	// Group tables by the pointer to their underlying ColumnDataCollection.
 	// Two LogicalColumnDataGet ops that share a CDC (common_subplan fan-out)
-	// end up with different table_indexes but the same data, and RPT must
+	// end up with different table_indexes but the same data, and Bloom must
 	// not propagate filters between them: the "filtered cardinality" of one
 	// through the other is trivially the unfiltered cardinality.
 	// Walk down through FILTER wrappers to find an underlying CHUNK_GET.

@@ -19,7 +19,7 @@ namespace duckdb {
 
 //! A CTE is "self-selective" when a FILTER sits above a GROUP BY on the
 //! left spine — the aggregation already compresses rows and the filter
-//! drops them further, so RPT materialisation of the internals rarely
+//! drops them further, so Bloom materialisation of the internals rarely
 //! pays off.
 //! Any AGGREGATE_AND_GROUP_BY anywhere in the subtree.
 static bool ContainsAggregate(const LogicalOperator &op) {
@@ -104,7 +104,7 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperat
 	// self-contained and cannot be executed during optimization.
 	if (ContainsCTERef(*op->children[0])) {
 		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: unresolved_cte_dependency\n",
+			fprintf(stderr, "[Bloom-Excitation] CTE %llu retained: unresolved_cte_dependency\n",
 			        static_cast<unsigned long long>(cte_index.index));
 		}
 		op->children[1] = Lift(std::move(op->children[1]));
@@ -117,19 +117,19 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperat
 	                          (config.skip_cte_with_agg && ContainsAggregate(*op->children[0]));
 	if (skip_for_aggregate) {
 		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: aggregate_cte_not_eagerly_lifted\n",
+			fprintf(stderr, "[Bloom-Excitation] CTE %llu retained: aggregate_cte_not_eagerly_lifted\n",
 			        static_cast<unsigned long long>(cte_index.index));
 		}
 		op->children[1] = Lift(std::move(op->children[1]));
 		return op;
 	}
 
-	// 1. Check the untouched logical definition before running child RPT or
+	// 1. Check the untouched logical definition before running child Bloom or
 	//    constructing a physical plan.
 	string unsafe_reason;
 	if (!IsSafeForOptimizerExecution(*op->children[0], unsafe_reason)) {
 		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] CTE %llu retained: %s\n",
+			fprintf(stderr, "[Bloom-Excitation] CTE %llu retained: %s\n",
 			        static_cast<unsigned long long>(cte_index.index), unsafe_reason.c_str());
 		}
 		op->children[1] = Lift(std::move(op->children[1]));

@@ -5,112 +5,112 @@
 require bloom
 
 query T
-SELECT current_setting('rpt_sample_cache_dir');
+SELECT current_setting('bloom_sample_cache_dir');
 ----
 auto
 
 query TTTIIII
-SELECT current_setting('rpt_sample_mode'),
-       current_setting('rpt_instant_access'),
-       current_setting('rpt_excitation_mode'),
-       current_setting('rpt_instant_snapshot'),
-       current_setting('rpt_instant_access_points'),
-       current_setting('rpt_instant_rows_per_access'),
-       current_setting('rpt_sample_seed');
+SELECT current_setting('bloom_sample_mode'),
+       current_setting('bloom_instant_access'),
+       current_setting('bloom_excitation_mode'),
+       current_setting('bloom_instant_snapshot'),
+       current_setting('bloom_instant_access_points'),
+       current_setting('bloom_instant_rows_per_access'),
+       current_setting('bloom_sample_seed');
 ----
 prepared	scattered	table_size	false	256	32	2
 
 query III
-SELECT current_setting('rpt_sample_size'),
-       current_setting('rpt_sample_memory_cache'),
-       current_setting('rpt_late_materialize');
+SELECT current_setting('bloom_sample_size'),
+       current_setting('bloom_sample_memory_cache'),
+       current_setting('bloom_late_materialize');
 ----
 10000	true	false
 
 query II
-SELECT current_setting('rpt_instant_block_windows'),
-       current_setting('rpt_instant_parquet_row_groups');
+SELECT current_setting('bloom_instant_block_windows'),
+       current_setting('bloom_instant_parquet_row_groups');
 ----
 16	8
 
 # Preloading must not build a missing prepared sample.
 query I
-SELECT loaded_samples FROM rpt_preload_samples();
+SELECT loaded_samples FROM bloom_preload_samples();
 ----
 0
 
 statement error
-SET rpt_sample_mode = 'unknown';
+SET bloom_sample_mode = 'unknown';
 ----
-rpt_sample_mode must be 'prepared' or 'instant'
+bloom_sample_mode must be 'prepared' or 'instant'
 
 statement error
-SET rpt_instant_access = 'unknown';
+SET bloom_instant_access = 'unknown';
 ----
-rpt_instant_access must be 'scattered' or 'block'
+bloom_instant_access must be 'scattered' or 'block'
 
 statement error
-SET rpt_excitation_mode = 'unknown';
+SET bloom_excitation_mode = 'unknown';
 ----
-rpt_excitation_mode must be 'table_size' or 'join_key_ndv'
+bloom_excitation_mode must be 'table_size' or 'join_key_ndv'
 
 statement error
-SET rpt_memory_limit = 'unknown';
+SET bloom_memory_limit = 'unknown';
 ----
 Memory must have a number (e.g. 1GB)
 
 statement error
-SET rpt_memory_limit = '';
+SET bloom_memory_limit = '';
 ----
-rpt_memory_limit must be 'auto' or a non-negative memory size
+bloom_memory_limit must be 'auto' or a non-negative memory size
 
 statement error
-SET rpt_memory_limit = '-1GB';
+SET bloom_memory_limit = '-1GB';
 ----
-rpt_memory_limit must be 'auto' or a non-negative memory size
+bloom_memory_limit must be 'auto' or a non-negative memory size
 
 statement ok
-SET rpt_excitation_mode = 'join_key_ndv';
+SET bloom_excitation_mode = 'join_key_ndv';
 
 query T
-SELECT current_setting('rpt_excitation_mode');
+SELECT current_setting('bloom_excitation_mode');
 ----
 join_key_ndv
 
 statement ok
-SET rpt_excitation_mode = 'table_size';
+SET bloom_excitation_mode = 'table_size';
 
 statement error
-SET rpt_sample_size = 0;
+SET bloom_sample_size = 0;
 ----
-rpt_sample_size must be between 1 and 1000000000
+bloom_sample_size must be between 1 and 1000000000
 
 statement error
-SET rpt_sample_rate = 1.5;
+SET bloom_sample_rate = 1.5;
 ----
-rpt_sample_rate must be finite and between 0 and 1
+bloom_sample_rate must be finite and between 0 and 1
 
 statement error
-SET rpt_instant_access_points = 0;
+SET bloom_instant_access_points = 0;
 ----
-rpt_instant_access_points must be between 1 and 1000000
+bloom_instant_access_points must be between 1 and 1000000
 
 statement error
-SET rpt_instant_rows_per_access = 0;
+SET bloom_instant_rows_per_access = 0;
 ----
-rpt_instant_rows_per_access must be between 1 and 1000000
+bloom_instant_rows_per_access must be between 1 and 1000000
 
 statement error
-SET rpt_instant_block_windows = 0;
+SET bloom_instant_block_windows = 0;
 ----
-rpt_instant_block_windows must be between 1 and 1000000
+bloom_instant_block_windows must be between 1 and 1000000
 
 statement error
-SET rpt_instant_parquet_row_groups = 0;
+SET bloom_instant_parquet_row_groups = 0;
 ----
-rpt_instant_parquet_row_groups must be between 1 and 1000000
+bloom_instant_parquet_row_groups must be between 1 and 1000000
 
 statement error
-SET rpt_excitation_threshold = 1.1;
+SET bloom_excitation_threshold = 1.1;
 ----
-rpt_excitation_threshold must be finite and between 0 and 1
+bloom_excitation_threshold must be finite and between 0 and 1

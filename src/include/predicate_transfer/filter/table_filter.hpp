@@ -5,7 +5,7 @@
 
 namespace duckdb {
 
-//! Adapts an RPT Bloom/bitmap filter to DuckDB's expression table-filter API.
+//! Adapts a Bloom-owned bloom or bitmap filter to DuckDB's expression table-filter API.
 class RPTTableFilter {
 public:
 	RPTTableFilter(shared_ptr<RPTFilter> filter, LogicalType input_type)

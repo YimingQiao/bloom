@@ -9,7 +9,7 @@ namespace duckdb {
 
 class RPTFilter;
 
-//! Cross-flooding-round cache for built RPT transfer filters.
+//! Cross-flooding-round cache for built Bloom transfer filters.
 //!
 //! The per-step cache used to key by source `ColumnBinding` (table_index,
 //! column_index). Two aliases of a lifted CTE — same underlying data,

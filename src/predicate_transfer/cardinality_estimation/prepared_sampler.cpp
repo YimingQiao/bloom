@@ -53,14 +53,14 @@ public:
 
 static bool SamplingLogEnabled(ClientContext &context) {
 	Value setting;
-	return context.TryGetCurrentSetting("rpt_log_transfer_steps", setting) && setting.GetValue<bool>();
+	return context.TryGetCurrentSetting("bloom_log_transfer_steps", setting) && setting.GetValue<bool>();
 }
 
 static string SampleCacheKey(TableCatalogEntry &table, const RPTSamplingConfig &config) {
 	// Prepared samples contain every physical column in storage order, so the
 	// identity is independent of any one query's projected column set.
 	auto &catalog = table.ParentCatalog();
-	string key = "rpt_sample_v4|" + catalog.GetName();
+	string key = "bloom_sample_v4|" + catalog.GetName();
 	key += "|path=" + catalog.GetDBPath();
 	key += "|" + table.schema.name + "|" + table.name;
 	key += "|rows=" + std::to_string(table.GetStorage().GetTotalRows());
@@ -88,7 +88,7 @@ static string SampleCachePath(ClientContext &context, TableCatalogEntry &table, 
 		if (database_path.empty() || database_path == ":memory:") {
 			return "";
 		}
-		cache_dir = database_path + ".rpt_samples";
+		cache_dir = database_path + ".bloom_samples";
 	}
 	auto hash = Hash(key.c_str(), key.size());
 	auto &fs = FileSystem::GetFileSystem(context);
@@ -203,7 +203,7 @@ static void LogPreparedSample(ClientContext &context, const RPTSamplingConfig &c
 	}
 	D_ASSERT(STANDARD_VECTOR_SIZE > 0);
 	auto chunks = sample_rows / STANDARD_VECTOR_SIZE + (sample_rows % STANDARD_VECTOR_SIZE != 0);
-	std::cerr << "  [RPT-SampleBuild] table=" << table_name << " mode=prepared source=" << source
+	std::cerr << "  [Bloom-SampleBuild] table=" << table_name << " mode=prepared source=" << source
 	          << " rows=" << sample_rows << "/" << total_rows << " chunks=" << chunks << " seed=" << config.seed
 	          << " effective_seed=" << table_seed << " elapsed=" << elapsed_ms << "ms\n";
 }
@@ -281,7 +281,7 @@ shared_ptr<ColumnDataCollection> GetOrCreatePreparedSample(ClientContext &contex
 		if (SamplingLogEnabled(context)) {
 			auto persist_ms =
 			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - persist_started);
-			std::cerr << "  [RPT-SamplePersist] table=" << table_name << " elapsed=" << persist_ms.count() << "ms\n";
+			std::cerr << "  [Bloom-SamplePersist] table=" << table_name << " elapsed=" << persist_ms.count() << "ms\n";
 		}
 	}
 	return sample;

@@ -46,7 +46,7 @@ The extension is written to
 
 ```sql
 LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
-SELECT current_setting('enable_rpt');
+SELECT current_setting('enable_bloom');
 ```
 
 ## Benchmarks
@@ -112,7 +112,7 @@ Databases and sample caches are kept under `.bench_cache/`. Pass `--db` to use
 an existing database. CEB SQL is downloaded and checksum-verified automatically.
 
 The Performance Regression workflow runs the complete JOB and TPC-H SF1
-workloads against the base commit, the candidate, and the candidate with RPT
+workloads against the base commit, the candidate, and the candidate with Bloom
 disabled. It reports Bloom's total and per-query-geomean speedups over DuckDB,
 as well as commit-to-commit query slowdowns of at least 10%. CI fails when a
 workload's commit-to-commit query-time geomean increases by at least 10% or
@@ -122,29 +122,29 @@ workload's commit-to-commit query-time geomean increases by at least 10% or
 
 Bloom works without tuning. Prepared sampling is the default: a 10K-row
 reservoir per table is persisted and reused across queries. Set
-`rpt_sample_mode` to `instant` to use a fresh, query-local sample from native
+`bloom_sample_mode` to `instant` to use a fresh, query-local sample from native
 DuckDB storage or one or more Parquet files without using a prepared sample.
 
 The main settings are:
 
 ```sql
-SET enable_rpt = false;
-SET rpt_memory_limit = '512MB';
-SET rpt_late_materialize = true;
-SET rpt_sample_cache_dir = '/path/to/cache';
-SET rpt_sample_mode = 'instant';
-SET rpt_excitation_mode = 'join_key_ndv';
+SET enable_bloom = false;
+SET bloom_memory_limit = '512MB';
+SET bloom_late_materialize = true;
+SET bloom_sample_cache_dir = '/path/to/cache';
+SET bloom_sample_mode = 'instant';
+SET bloom_excitation_mode = 'join_key_ndv';
 ```
 
-`enable_rpt` defaults to `true`; disable it for troubleshooting or an A/B
-comparison. `rpt_memory_limit` defaults to `auto`, which admits optimizer-time
-RPT work against at most 25% of currently available DuckDB operator memory.
+`enable_bloom` defaults to `true`; disable it for troubleshooting or an A/B
+comparison. `bloom_memory_limit` defaults to `auto`, which admits optimizer-time
+Bloom work against at most 25% of currently available DuckDB operator memory.
 Each phase must also obtain its complete share from DuckDB's temporary-memory
-manager. RPT's large sample/materialized collections and filter payloads use
+manager. Bloom's large sample/materialized collections and filter payloads use
 DuckDB's non-spill `BufferAllocator`, so they count against the database-wide
 memory limit without becoming temporary-storage blocks; large task-local build
 states are included in admission estimates. If admission fails
-before the first materialization, RPT keeps DuckDB's original plan; after
+before the first materialization, Bloom keeps DuckDB's original plan; after
 transfer has begun it stops adding new transfer rounds. The reservation for
 tables and filters retained by the rewritten plan remains active until those
 execution objects are destroyed. Set the limit to `0B` to force the fallback
@@ -152,35 +152,91 @@ path. Allocation failures that occur after admission are reported to the query;
 they are not silently converted into a fallback.
 
 `EXPLAIN`, queries containing volatile expressions, and reads from a database
-with uncommitted changes bypass RPT and remain on DuckDB's native path. This
+with uncommitted changes bypass Bloom and remain on DuckDB's native path. This
 prevents optimizer-time execution from evaluating side effects or mixing
 prepared samples with transaction-local state.
 
-`rpt_sample_cache_dir` defaults to `auto`, which stores samples
-under `<database>.rpt_samples/`. Set another directory to share a cache, or `''`
-to disable disk caching. Prepared samples are keyed by `rpt_sample_seed`, whose
+`bloom_sample_cache_dir` defaults to `auto`, which stores samples
+under `<database>.bloom_samples/`. Set another directory to share a cache, or `''`
+to disable disk caching. Prepared samples are keyed by `bloom_sample_seed`, whose
 cross-workload-validated default is `2`; changing the seed creates an independent
 cache entry and never reuses the previous sample. The optional
-`rpt_sample_memory_cache` also keeps DuckDB's conservative
+`bloom_sample_memory_cache` also keeps DuckDB's conservative
 `ObjectCache` eviction reservation in addition to the sample's allocator charge;
 set it to `false` on especially tight memory limits while retaining disk caching.
 
-`rpt_sample_mode` accepts `prepared` (the default) and `instant`.
+`bloom_sample_mode` accepts `prepared` (the default) and `instant`.
 
-`rpt_excitation_mode` selects how repeated transfers decide whether a join-key
+`bloom_excitation_mode` selects how repeated transfers decide whether a join-key
 domain contains new information. It accepts `table_size` (the default) and
 `join_key_ndv`; the latter uses exact NDV changes for supported single-column
 integer equality domains and falls back safely when an exact domain is not
 available.
 
+## Observability
+
+Bloom exposes its optimizer decisions through DuckDB's structured logging.
+Collection is disabled by default. Enable it, run the workload you want to
+inspect, and query the events from SQL:
+
+```sql
+CALL enable_logging('Bloom', storage = 'memory');
+CALL truncate_duckdb_logs();
+
+-- Run the queries to diagnose here.
+
+SELECT *
+FROM duckdb_logs_parsed('Bloom')
+ORDER BY connection_id, query_id, event_sequence;
+
+CALL disable_logging();
+```
+
+For example, a selective two-table join can produce this timeline:
+
+| event_sequence | event | status | transfer | effect |
+|---:|---|---|---|---|
+| 1 | `start` | `running` | | Bloom started with the configured modes and memory budget. |
+| 2 | `transfer` | `applied` | `demo_right` -> `demo_left` | Estimated destination rows fell from 10000 to 122. |
+| 3 | `transfer` | `applied` | `demo_left` -> `demo_right` | Estimated destination rows fell from 122 to 100. |
+| 4 | `transfer_complete` | `applied` | | Two sources and two transfers completed. |
+
+The log shows why Bloom did not run (`skipped.reason`), which tables exchanged
+filters and how their estimated cardinalities changed (`transfer`), where a
+memory admission stopped (`memory_stop`), and the final work and timing summary
+(`transfer_complete`). `whole_query_fallback` means no Bloom work was retained
+and DuckDB's original plan ran; `partial_stop` means completed transfers were
+kept. Use `event_sequence` for order within a query—a relation has no inherent
+row order. `connection_id` and `query_id` identify the query, while less common
+event-specific values are available in the `info` map. `EXPLAIN` emits no Bloom
+events.
+
+DuckDB can persist the same events to a file instead:
+
+```sql
+CALL enable_logging(
+    'Bloom',
+    storage = 'file',
+    storage_path = 'bloom-monitor.csv'
+);
+```
+
+Logging has non-zero cost when enabled. Prefer memory storage for temporary
+diagnosis, use file storage only when persistence is required, and keep logging
+disabled for performance benchmarks. DuckDB's logging storage is separate from
+`bloom_memory_limit`, so clear or rotate it as needed.
+
+`SET bloom_log_transfer_steps = true` remains available as a separate option for
+verbose, human-readable diagnostics on stderr.
+
 ## Late materialization
 
-`rpt_late_materialize` is experimental and defaults to `false`. When enabled,
-RPT materializations keep only transfer columns and row IDs where possible;
+`bloom_late_materialize` is experimental and defaults to `false`. When enabled,
+Bloom materializations keep only transfer columns and row IDs where possible;
 the resulting row-ID bitmap filters DuckDB's original table scan, which reads
 output-only columns during normal query execution. This is most useful when a
 large transfer source has wide or string payload columns used only by the final
 projection, grouping, or aggregation. Across ten CEB Stack q15 variants, it
-improved geomean runtime by 1.263x over normal RPT with identical results. The
+improved geomean runtime by 1.263x over standard Bloom with identical results. The
 extra bitmap construction is not universally beneficial, so enable it per
 workload after benchmarking.

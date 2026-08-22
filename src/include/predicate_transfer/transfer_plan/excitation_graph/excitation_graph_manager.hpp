@@ -122,7 +122,7 @@ private:
 	idx_t execution_action_count_ = 0;
 	idx_t execution_round_count_ = 0;
 
-	//! RPT uses FORCE_MATERIALIZED in-memory collections. Admission is therefore
+	//! Bloom uses FORCE_MATERIALIZED in-memory collections. Admission is therefore
 	//! query-global and happens before every potentially large allocation; there
 	//! is deliberately no spill path.
 	idx_t memory_budget_ = 0;
@@ -133,6 +133,7 @@ private:
 	unordered_set<const ColumnDataCollection *> execution_collections_;
 	unordered_set<const RPTFilter *> execution_filters_;
 	idx_t materialized_source_count_ = 0;
+	idx_t structured_log_sequence_ = 0;
 	bool memory_stopped_ = false;
 };
 

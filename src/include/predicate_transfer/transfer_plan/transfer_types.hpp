@@ -1,5 +1,5 @@
 //===----------------------------------------------------------------------===//
-//                         RPT Extension
+//                         Bloom Extension
 //
 // predicate_transfer/transfer_types.hpp
 //

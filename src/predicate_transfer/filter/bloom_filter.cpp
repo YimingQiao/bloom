@@ -146,7 +146,7 @@ DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &co
     : context_(context), lower_bound_(lower_bound), upper_bound_(upper_bound),
       filter_(PrefixRangeFilter::CreatePrefixRangeFilter(key_type)) {
 	if (!filter_) {
-		throw InternalException("RPT: DuckDB prefix-range filter does not support type %s", key_type.ToString());
+		throw InternalException("Bloom: DuckDB prefix-range filter does not support type %s", key_type.ToString());
 	}
 	D_ASSERT(lower_bound <= upper_bound);
 	auto min_value = Value::BIGINT(lower_bound).DefaultCastAs(key_type);
@@ -161,7 +161,7 @@ DuckDBPrefixRangeFilterAdapter::DuckDBPrefixRangeFilterAdapter(ClientContext &co
 int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols, SelectionVector &results,
                                            size_t &result_count) const {
 	if (bound_cols.size() != 1) {
-		throw InternalException("RPT: prefix-range filter requires one key column");
+		throw InternalException("Bloom: prefix-range filter requires one key column");
 	}
 	result_count = filter_->LookupKeys(chunk.data[bound_cols[0]], results, chunk.size());
 	return static_cast<int>(chunk.size());
@@ -181,7 +181,7 @@ int DuckDBPrefixRangeFilterAdapter::Lookup(DataChunk &chunk, const vector<idx_t>
 
 void DuckDBPrefixRangeFilterAdapter::Insert(DataChunk &chunk, const vector<idx_t> &bound_cols) {
 	if (bound_cols.size() != 1) {
-		throw InternalException("RPT: prefix-range filter requires one key column");
+		throw InternalException("Bloom: prefix-range filter requires one key column");
 	}
 	if (!build_state_) {
 		build_state_ = filter_->InitializeBuildState(context_);
@@ -201,7 +201,7 @@ idx_t DuckDBPrefixRangeFilterAdapter::GetBuildStateSize() const {
 void DuckDBPrefixRangeFilterAdapter::InsertBuildState(DataChunk &chunk, const vector<idx_t> &bound_cols,
                                                       PrefixRangeFilter::BuildState &state, bool parallel) const {
 	if (bound_cols.size() != 1) {
-		throw InternalException("RPT: prefix-range filter requires one key column");
+		throw InternalException("Bloom: prefix-range filter requires one key column");
 	}
 	if (parallel) {
 		filter_->InsertKeysParallel(chunk.data[bound_cols[0]], state);

@@ -28,9 +28,9 @@
 #endif
 #endif
 
-// Define RPT_USE_DUCKDB_BF to use DuckDB's built-in bloom filter.
-// Undefine to use CacheSectorizedBF (RPT's split-sector bloom filter).
-#define RPT_USE_DUCKDB_BF
+// Define BLOOM_USE_DUCKDB_BF to use DuckDB's built-in bloom filter.
+// Undefine to use CacheSectorizedBF (Bloom's split-sector bloom filter).
+#define BLOOM_USE_DUCKDB_BF
 
 namespace duckdb {
 
@@ -40,7 +40,7 @@ public:
 };
 
 //===----------------------------------------------------------------------===//
-// CacheSectorizedBF — RPT's split-sector BF (uint32_t, dual-sector, 7 bits/hash)
+// CacheSectorizedBF — Bloom's split-sector BF (uint32_t, dual-sector, 7 bits/hash)
 //===----------------------------------------------------------------------===//
 class CacheSectorizedBF : public RPTFilter {
 public:
@@ -282,7 +282,7 @@ private:
 //===----------------------------------------------------------------------===//
 // Macro switch: select active BF implementation
 //===----------------------------------------------------------------------===//
-#ifdef RPT_USE_DUCKDB_BF
+#ifdef BLOOM_USE_DUCKDB_BF
 using ActiveBloomFilter = DuckDBBloomFilterAdapter;
 #else
 using ActiveBloomFilter = CacheSectorizedBF;

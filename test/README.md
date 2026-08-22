@@ -16,4 +16,4 @@ make test_debug -j"$(nproc)"
 ```
 
 The manual `DuckDB Full Compatibility` GitHub Actions workflow runs DuckDB's
-full SQL test suite with Bloom loaded, both with RPT disabled and enabled.
+full SQL test suite with Bloom loaded, both with Bloom disabled and enabled.

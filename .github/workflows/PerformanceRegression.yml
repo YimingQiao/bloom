@@ -54,7 +54,7 @@ jobs:
       - name: Set benchmark paths
         run: |
           echo "BASE_DIR=${RUNNER_TEMP}/bloom-base" >> "${GITHUB_ENV}"
-          echo "RPT_SAMPLE_CACHE_DIR=${RUNNER_TEMP}/rpt-samples" >> "${GITHUB_ENV}"
+          echo "BLOOM_SAMPLE_CACHE_DIR=${RUNNER_TEMP}/bloom-samples" >> "${GITHUB_ENV}"
 
       - name: Install build dependencies
         run: |
@@ -139,7 +139,7 @@ jobs:
 
       - name: Compare commits and DuckDB baseline
         run: |
-          mkdir -p "${RPT_SAMPLE_CACHE_DIR}"
+          mkdir -p "${BLOOM_SAMPLE_CACHE_DIR}"
           python3 scripts/compare_performance.py \
             --base-runner "${BASE_DIR}/build/performance/benchmark/benchmark_runner" \
             --candidate-runner build/performance/benchmark/benchmark_runner \

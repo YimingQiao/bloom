@@ -8,7 +8,7 @@ statement ok
 SET threads = 8;
 
 statement ok
-SET rpt_excitation_mode = 'join_key_ndv';
+SET bloom_excitation_mode = 'join_key_ndv';
 
 statement ok
 CREATE TABLE rpt_bigint_source AS

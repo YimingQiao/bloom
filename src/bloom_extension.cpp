@@ -4,6 +4,7 @@
 #include "predicate_transfer/cardinality_estimation/prepared_sampler.hpp"
 #include "predicate_transfer/config.hpp"
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
+#include "predicate_transfer/bloom_log.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -78,18 +79,18 @@ static string ReadChoice(const Value &value, const char *setting, const char *le
 }
 
 static RPTSamplingMode ReadSampleMode(const Value &value) {
-	return ReadChoice(value, "rpt_sample_mode", "prepared", "instant") == "prepared" ? RPTSamplingMode::PREPARED
-	                                                                                 : RPTSamplingMode::INSTANT;
+	return ReadChoice(value, "bloom_sample_mode", "prepared", "instant") == "prepared" ? RPTSamplingMode::PREPARED
+	                                                                                   : RPTSamplingMode::INSTANT;
 }
 
 static RPTInstantAccessMode ReadInstantAccess(const Value &value) {
-	return ReadChoice(value, "rpt_instant_access", "scattered", "block") == "scattered"
+	return ReadChoice(value, "bloom_instant_access", "scattered", "block") == "scattered"
 	           ? RPTInstantAccessMode::SCATTERED
 	           : RPTInstantAccessMode::BLOCK;
 }
 
 static RPTExcitationMode ReadExcitationMode(const Value &value) {
-	return ReadChoice(value, "rpt_excitation_mode", "table_size", "join_key_ndv") == "table_size"
+	return ReadChoice(value, "bloom_excitation_mode", "table_size", "join_key_ndv") == "table_size"
 	           ? RPTExcitationMode::TABLE_SIZE
 	           : RPTExcitationMode::JOIN_KEY_NDV;
 }
@@ -101,7 +102,7 @@ static optional_idx ReadRPTMemoryLimit(const Value &value) {
 		return optional_idx();
 	}
 	if (limit.empty() || limit.front() == '-' || limit == "none" || limit == "null") {
-		throw InvalidInputException("rpt_memory_limit must be 'auto' or a non-negative memory size");
+		throw InvalidInputException("bloom_memory_limit must be 'auto' or a non-negative memory size");
 	}
 	return optional_idx(DBConfig::ParseMemoryLimit(limit));
 }
@@ -130,23 +131,23 @@ static void ValidateUnsignedRange(Value &value, const char *setting, idx_t maxim
 }
 
 static void ValidateSampleSize(ClientContext &, SetScope, Value &value) {
-	ValidateUnsignedRange(value, "rpt_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
+	ValidateUnsignedRange(value, "bloom_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
 }
 
 static void ValidateInstantAccessPoints(ClientContext &, SetScope, Value &value) {
-	ValidateUnsignedRange(value, "rpt_instant_access_points", 1000000);
+	ValidateUnsignedRange(value, "bloom_instant_access_points", 1000000);
 }
 
 static void ValidateInstantRowsPerAccess(ClientContext &, SetScope, Value &value) {
-	ValidateUnsignedRange(value, "rpt_instant_rows_per_access", 1000000);
+	ValidateUnsignedRange(value, "bloom_instant_rows_per_access", 1000000);
 }
 
 static void ValidateInstantBlockWindows(ClientContext &, SetScope, Value &value) {
-	ValidateUnsignedRange(value, "rpt_instant_block_windows", 1000000);
+	ValidateUnsignedRange(value, "bloom_instant_block_windows", 1000000);
 }
 
 static void ValidateInstantParquetRowGroups(ClientContext &, SetScope, Value &value) {
-	ValidateUnsignedRange(value, "rpt_instant_parquet_row_groups", 1000000);
+	ValidateUnsignedRange(value, "bloom_instant_parquet_row_groups", 1000000);
 }
 
 static void ValidateUnitInterval(Value &value, const char *setting) {
@@ -157,11 +158,11 @@ static void ValidateUnitInterval(Value &value, const char *setting) {
 }
 
 static void ValidateSampleRate(ClientContext &, SetScope, Value &value) {
-	ValidateUnitInterval(value, "rpt_sample_rate");
+	ValidateUnitInterval(value, "bloom_sample_rate");
 }
 
 static void ValidateExcitationThreshold(ClientContext &, SetScope, Value &value) {
-	ValidateUnitInterval(value, "rpt_excitation_threshold");
+	ValidateUnitInterval(value, "bloom_excitation_threshold");
 }
 
 BloomOptimizerExtension::BloomOptimizerExtension() {
@@ -196,13 +197,13 @@ static void RPTSamplePreloadFunction(ClientContext &context, TableFunctionInput 
 	}
 	Value setting;
 	RPTSamplingConfig sampling;
-	if (context.TryGetCurrentSetting("rpt_sample_size", setting)) {
+	if (context.TryGetCurrentSetting("bloom_sample_size", setting)) {
 		sampling.target_rows = setting.GetValue<idx_t>();
 	}
-	if (context.TryGetCurrentSetting("rpt_sample_cache_dir", setting)) {
+	if (context.TryGetCurrentSetting("bloom_sample_cache_dir", setting)) {
 		sampling.prepared_cache_dir = setting.ToString();
 	}
-	if (context.TryGetCurrentSetting("rpt_sample_seed", setting)) {
+	if (context.TryGetCurrentSetting("bloom_sample_seed", setting)) {
 		sampling.seed = setting.GetValue<idx_t>();
 	}
 	auto loaded = PreloadPreparedSamples(context, sampling);
@@ -214,74 +215,74 @@ static void RPTSamplePreloadFunction(ClientContext &context, TableFunctionInput 
 
 void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	Value setting;
-	if (input.context.TryGetCurrentSetting("enable_rpt", setting) && !setting.GetValue<bool>()) {
+	if (input.context.TryGetCurrentSetting("enable_bloom", setting) && !setting.GetValue<bool>()) {
 		return;
 	}
-	// EXPLAIN must only inspect DuckDB's native plan. RPT executes selected
+	// EXPLAIN must only inspect DuckDB's native plan. Bloom executes selected
 	// subtrees during optimization, which would make even a plain EXPLAIN scan
 	// data and evaluate volatile expressions. EXPLAIN ANALYZE follows the same
-	// rule so every EXPLAIN variant consistently bypasses RPT.
+	// rule so every EXPLAIN variant consistently bypasses Bloom.
 	if (plan->type == LogicalOperatorType::LOGICAL_EXPLAIN) {
 		return;
 	}
 
 	RPTOptimizerConfig config;
-	if (input.context.TryGetCurrentSetting("rpt_memory_limit", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_memory_limit", setting)) {
 		config.memory_limit = ReadRPTMemoryLimit(setting);
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_cache_dir", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_sample_cache_dir", setting)) {
 		config.sampling.prepared_cache_dir = setting.ToString();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_size", setting)) {
-		ValidateUnsignedRange(setting, "rpt_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
+	if (input.context.TryGetCurrentSetting("bloom_sample_size", setting)) {
+		ValidateUnsignedRange(setting, "bloom_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
 		config.sampling.target_rows = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_rate", setting)) {
-		ValidateUnitInterval(setting, "rpt_sample_rate");
+	if (input.context.TryGetCurrentSetting("bloom_sample_rate", setting)) {
+		ValidateUnitInterval(setting, "bloom_sample_rate");
 		config.sampling.intermediate_rate = setting.GetValue<double>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_mode", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_sample_mode", setting)) {
 		config.sampling.mode = ReadSampleMode(setting);
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_access", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_instant_access", setting)) {
 		config.sampling.instant_access = ReadInstantAccess(setting);
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_snapshot", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_instant_snapshot", setting)) {
 		config.sampling.instant_snapshot = setting.GetValue<bool>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_access_points", setting)) {
-		ValidateUnsignedRange(setting, "rpt_instant_access_points", 1000000);
+	if (input.context.TryGetCurrentSetting("bloom_instant_access_points", setting)) {
+		ValidateUnsignedRange(setting, "bloom_instant_access_points", 1000000);
 		config.sampling.instant_access_points = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_rows_per_access", setting)) {
-		ValidateUnsignedRange(setting, "rpt_instant_rows_per_access", 1000000);
+	if (input.context.TryGetCurrentSetting("bloom_instant_rows_per_access", setting)) {
+		ValidateUnsignedRange(setting, "bloom_instant_rows_per_access", 1000000);
 		config.sampling.instant_rows_per_access = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_block_windows", setting)) {
-		ValidateUnsignedRange(setting, "rpt_instant_block_windows", 1000000);
+	if (input.context.TryGetCurrentSetting("bloom_instant_block_windows", setting)) {
+		ValidateUnsignedRange(setting, "bloom_instant_block_windows", 1000000);
 		config.sampling.instant_block_windows = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_instant_parquet_row_groups", setting)) {
-		ValidateUnsignedRange(setting, "rpt_instant_parquet_row_groups", 1000000);
+	if (input.context.TryGetCurrentSetting("bloom_instant_parquet_row_groups", setting)) {
+		ValidateUnsignedRange(setting, "bloom_instant_parquet_row_groups", 1000000);
 		config.sampling.instant_parquet_row_groups = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_seed", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_sample_seed", setting)) {
 		config.sampling.seed = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_sample_memory_cache", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_sample_memory_cache", setting)) {
 		config.sampling.prepared_memory_cache = setting.GetValue<bool>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_log_transfer_steps", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_log_transfer_steps", setting)) {
 		config.log_transfer_steps = setting.GetValue<bool>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_excitation_threshold", setting)) {
-		ValidateUnitInterval(setting, "rpt_excitation_threshold");
+	if (input.context.TryGetCurrentSetting("bloom_excitation_threshold", setting)) {
+		ValidateUnitInterval(setting, "bloom_excitation_threshold");
 		config.excitation_threshold = setting.GetValue<double>();
 	}
-	if (input.context.TryGetCurrentSetting("rpt_excitation_mode", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_excitation_mode", setting)) {
 		config.excitation_mode = ReadExcitationMode(setting);
 	}
-	if (input.context.TryGetCurrentSetting("rpt_late_materialize", setting)) {
+	if (input.context.TryGetCurrentSetting("bloom_late_materialize", setting)) {
 		config.late_materialize_flag = setting.GetValue<bool>();
 	}
 
@@ -298,69 +299,70 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
+	RegisterBloomLogType(db);
 
-	config.AddExtensionOption("enable_rpt", "Enable the Robust Predicate Transfer optimizer", LogicalType::BOOLEAN,
-	                          Value::BOOLEAN(EnvFlagDefault("RPT_ENABLE", true)));
+	config.AddExtensionOption("enable_bloom", "Enable the Bloom optimizer", LogicalType::BOOLEAN,
+	                          Value::BOOLEAN(EnvFlagDefault("BLOOM_ENABLE", true)));
 	config.AddExtensionOption(
-	    "rpt_memory_limit",
-	    "Maximum in-memory budget for optimizer-time RPT work ('auto' uses 25% of available operator memory)",
-	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_MEMORY_LIMIT", "auto")), ValidateRPTMemoryLimit);
-	config.AddExtensionOption("rpt_sample_cache_dir",
+	    "bloom_memory_limit",
+	    "Maximum in-memory budget for optimizer-time Bloom work ('auto' uses 25% of available operator memory)",
+	    LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_MEMORY_LIMIT", "auto")), ValidateRPTMemoryLimit);
+	config.AddExtensionOption("bloom_sample_cache_dir",
 	                          "Prepared-sample cache directory ('auto' stores it beside the database)",
-	                          LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_CACHE_DIR", "auto")));
-	config.AddExtensionOption("rpt_sample_size", "Target rows for prepared, block, and Parquet sampling",
-	                          LogicalType::UBIGINT, Value::UBIGINT(EnvUBigIntDefault("RPT_SAMPLE_SIZE", 10000)),
+	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_CACHE_DIR", "auto")));
+	config.AddExtensionOption("bloom_sample_size", "Target rows for prepared, block, and Parquet sampling",
+	                          LogicalType::UBIGINT, Value::UBIGINT(EnvUBigIntDefault("BLOOM_SAMPLE_SIZE", 10000)),
 	                          ValidateSampleSize);
-	config.AddExtensionOption("rpt_sample_rate",
+	config.AddExtensionOption("bloom_sample_rate",
 	                          "Chunk-sampling fraction for estimating cardinalities of already-materialized "
 	                          "intermediate data",
-	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("RPT_SAMPLE_RATE", 0.01)),
+	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("BLOOM_SAMPLE_RATE", 0.01)),
 	                          ValidateSampleRate);
-	config.AddExtensionOption("rpt_sample_mode", "Base-table sampling mode: 'prepared' or 'instant'",
-	                          LogicalType::VARCHAR, Value(EnvStringDefault("RPT_SAMPLE_MODE", "prepared")),
+	config.AddExtensionOption("bloom_sample_mode", "Base-table sampling mode: 'prepared' or 'instant'",
+	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_MODE", "prepared")),
 	                          ValidateSampleMode);
 	config.AddExtensionOption(
-	    "rpt_instant_access",
+	    "bloom_instant_access",
 	    "Native-storage instant access policy: 'scattered' (resident data) or 'block' (cold data)",
-	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_INSTANT_ACCESS", "scattered")), ValidateInstantAccess);
+	    LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_INSTANT_ACCESS", "scattered")), ValidateInstantAccess);
 	config.AddExtensionOption(
-	    "rpt_instant_snapshot",
+	    "bloom_instant_snapshot",
 	    "Use the active transaction snapshot for native instant samples instead of direct base-storage reads",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_INSTANT_SNAPSHOT", false)));
-	config.AddExtensionOption("rpt_instant_access_points",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_INSTANT_SNAPSHOT", false)));
+	config.AddExtensionOption("bloom_instant_access_points",
 	                          "Stratified access points used by scattered instant sampling", LogicalType::UBIGINT,
-	                          Value::UBIGINT(EnvUBigIntDefault("RPT_INSTANT_ACCESS_POINTS", 256)),
+	                          Value::UBIGINT(EnvUBigIntDefault("BLOOM_INSTANT_ACCESS_POINTS", 256)),
 	                          ValidateInstantAccessPoints);
 	config.AddExtensionOption(
-	    "rpt_instant_rows_per_access", "Contiguous rows decoded at each scattered access point", LogicalType::UBIGINT,
-	    Value::UBIGINT(EnvUBigIntDefault("RPT_INSTANT_ROWS_PER_ACCESS", 32)), ValidateInstantRowsPerAccess);
-	config.AddExtensionOption("rpt_instant_block_windows", "Block-aligned windows used by cold instant sampling",
-	                          LogicalType::UBIGINT, Value::UBIGINT(EnvUBigIntDefault("RPT_INSTANT_BLOCK_WINDOWS", 16)),
-	                          ValidateInstantBlockWindows);
+	    "bloom_instant_rows_per_access", "Contiguous rows decoded at each scattered access point", LogicalType::UBIGINT,
+	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_INSTANT_ROWS_PER_ACCESS", 32)), ValidateInstantRowsPerAccess);
 	config.AddExtensionOption(
-	    "rpt_instant_parquet_row_groups", "Stratified Parquet row groups sampled per table", LogicalType::UBIGINT,
-	    Value::UBIGINT(EnvUBigIntDefault("RPT_INSTANT_PARQUET_ROW_GROUPS", 8)), ValidateInstantParquetRowGroups);
-	config.AddExtensionOption("rpt_sample_seed", "Reproducible base-table sample seed", LogicalType::UBIGINT,
-	                          Value::UBIGINT(EnvUBigIntDefault("RPT_SAMPLE_SEED", 2)));
-	config.AddExtensionOption("rpt_sample_memory_cache",
+	    "bloom_instant_block_windows", "Block-aligned windows used by cold instant sampling", LogicalType::UBIGINT,
+	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_INSTANT_BLOCK_WINDOWS", 16)), ValidateInstantBlockWindows);
+	config.AddExtensionOption(
+	    "bloom_instant_parquet_row_groups", "Stratified Parquet row groups sampled per table", LogicalType::UBIGINT,
+	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_INSTANT_PARQUET_ROW_GROUPS", 8)), ValidateInstantParquetRowGroups);
+	config.AddExtensionOption("bloom_sample_seed", "Reproducible base-table sample seed", LogicalType::UBIGINT,
+	                          Value::UBIGINT(EnvUBigIntDefault("BLOOM_SAMPLE_SEED", 2)));
+	config.AddExtensionOption("bloom_sample_memory_cache",
 	                          "Cache prepared samples in the process object cache to skip disk reloads across queries "
 	                          "(advanced)",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_SAMPLE_MEMORY_CACHE", true)));
-	config.AddExtensionOption("rpt_log_transfer_steps", "Log the transfer plan to stderr for debugging",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LOG_TRANSFER_STEPS", false)));
-	config.AddExtensionOption("rpt_excitation_threshold", "Re-excite below this fraction of the preceding cardinality",
-	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("RPT_EXCITATION_THRESHOLD", 1.0)),
-	                          ValidateExcitationThreshold);
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SAMPLE_MEMORY_CACHE", true)));
+	config.AddExtensionOption("bloom_log_transfer_steps", "Log the transfer plan to stderr for debugging",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LOG_TRANSFER_STEPS", false)));
 	config.AddExtensionOption(
-	    "rpt_excitation_mode",
+	    "bloom_excitation_threshold", "Re-excite below this fraction of the preceding cardinality", LogicalType::DOUBLE,
+	    Value::DOUBLE(EnvDoubleDefault("BLOOM_EXCITATION_THRESHOLD", 1.0)), ValidateExcitationThreshold);
+	config.AddExtensionOption(
+	    "bloom_excitation_mode",
 	    "Repeated-transfer information criterion: 'table_size' or exact 'join_key_ndv' equality domains",
-	    LogicalType::VARCHAR, Value(EnvStringDefault("RPT_EXCITATION_MODE", "table_size")), ValidateExcitationMode);
+	    LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_EXCITATION_MODE", "table_size")), ValidateExcitationMode);
 	config.AddExtensionOption(
-	    "rpt_late_materialize",
+	    "bloom_late_materialize",
 	    "Experimental: materialize transfer keys and row IDs, then filter the original table scan",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("RPT_LATE_MATERIALIZE", false)));
+	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LATE_MATERIALIZE", false)));
 
-	TableFunction preload_samples("rpt_preload_samples", {}, RPTSamplePreloadFunction, RPTSamplePreloadBind,
+	TableFunction preload_samples("bloom_preload_samples", {}, RPTSamplePreloadFunction, RPTSamplePreloadBind,
 	                              RPTSamplePreloadInit);
 	loader.RegisterFunction(preload_samples);
 

@@ -413,7 +413,7 @@ vector<shared_ptr<RPTFilter>> TransferExecutor::BuildTransferFilters(LogicalOper
 			return std::chrono::duration<double, std::milli>(end - begin).count();
 		};
 		auto finished = Clock::now();
-		std::cerr << "    [RPT-FilterBuildTiming] rows=" << total_rows << " specs=" << specs.size()
+		std::cerr << "    [Bloom-FilterBuildTiming] rows=" << total_rows << " specs=" << specs.size()
 		          << " tasks=" << task_count << " shared_prefix=" << shared_state_specs.size()
 		          << " setup=" << elapsed(started, setup_finished)
 		          << "ms compact=" << elapsed(setup_finished, compact_finished)

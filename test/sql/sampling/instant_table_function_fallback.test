@@ -5,7 +5,7 @@
 require bloom
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 query I
 SELECT count(*)

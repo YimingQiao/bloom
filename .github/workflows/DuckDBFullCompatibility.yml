@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 240
     env:
       BUILD_DIR: build/fulltest
-      RPT_SAMPLE_CACHE_DIR: ${{ github.workspace }}/build/fulltest-rpt-samples
+      BLOOM_SAMPLE_CACHE_DIR: ${{ github.workspace }}/build/fulltest-bloom-samples
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -63,10 +63,10 @@ jobs:
           "$BUILD_DIR/test/unittest" --list-tests '*' > "$RUNNER_TEMP/duckdb-tests.tsv"
           test "$(wc -l < "$RUNNER_TEMP/duckdb-tests.tsv")" -gt 1000
 
-      - name: Run full suite with Bloom loaded and RPT disabled
+      - name: Run full suite with Bloom loaded and Bloom disabled
         if: inputs.mode == 'both' || inputs.mode == 'disabled'
         env:
-          RPT_ENABLE: "0"
+          BLOOM_ENABLE: "0"
         run: |
           python3 duckdb/scripts/ci/run_tests.py \
             --workers 4 \
@@ -75,10 +75,10 @@ jobs:
             "$BUILD_DIR/test/unittest" \
             '*'
 
-      - name: Run full suite with Bloom RPT enabled
+      - name: Run full suite with Bloom enabled
         if: inputs.mode == 'both' || inputs.mode == 'enabled'
         env:
-          RPT_ENABLE: "1"
+          BLOOM_ENABLE: "1"
         run: |
           python3 duckdb/scripts/ci/run_tests.py \
             --workers 4 \

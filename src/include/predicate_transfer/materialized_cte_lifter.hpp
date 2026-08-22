@@ -38,7 +38,7 @@ private:
 	//! return the resulting ColumnDataCollection.
 	unique_ptr<ColumnDataCollection> ExecutePlan(unique_ptr<LogicalOperator> plan);
 
-	//! Reject a logical CTE definition before any child RPT or physical
+	//! Reject a logical CTE definition before any child Bloom or physical
 	//! planning when it contains a join that could require DuckDB's outer
 	//! query Executor.
 	bool IsSafeForOptimizerExecution(const LogicalOperator &op, string &unsafe_reason) const;

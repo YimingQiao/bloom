@@ -1,0 +1,191 @@
+# name: test/sql/transfer/structured_logging.test
+# description: Bloom emits SQL-queryable transfer and memory-admission events
+# group: [transfer]
+
+require bloom
+
+require noforcestorage
+
+statement ok
+SET threads = 1;
+
+statement ok
+SET bloom_sample_mode = 'instant';
+
+statement ok
+CREATE TABLE rpt_log_left AS
+SELECT i::INTEGER id, ('payload_' || i)::VARCHAR payload
+FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_log_right AS
+SELECT i::INTEGER id, i < 100 AS keep
+FROM range(10000) t(i);
+
+statement ok
+CALL enable_logging('Bloom', storage = 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# EXPLAIN bypasses Bloom entirely and must not manufacture monitoring events.
+query II
+EXPLAIN SELECT count(*)
+FROM rpt_log_left l
+JOIN rpt_log_right r ON l.id = r.id
+WHERE r.keep;
+----
+physical_plan	<REGEX>:.*Seq Scan.*
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Bloom');
+----
+0
+
+statement ok con2
+SET bloom_sample_mode = 'instant';
+
+query I con2
+SELECT count(*)
+FROM rpt_log_left l
+JOIN rpt_log_right r ON l.id = r.id
+WHERE r.keep;
+----
+100
+
+query III
+SELECT count_if(event = 'start'),
+       count_if(event = 'transfer') > 0,
+       count_if(event = 'transfer_complete')
+FROM duckdb_logs_parsed('Bloom');
+----
+1	true	1
+
+# Event causality must be explicit; neither timestamps nor relation row order
+# are a stable sequence. Each query starts at 1 and emits unique contiguous IDs.
+query IIIII
+SELECT min(event_sequence) = 1,
+       max(event_sequence) = count(*),
+       count(DISTINCT event_sequence) = count(*),
+       arg_min(event, event_sequence) = 'start',
+       arg_max(event, event_sequence) = 'transfer_complete'
+FROM duckdb_logs_parsed('Bloom');
+----
+true	true	true	true	true
+
+query IIIIIIIII
+SELECT connection_id <> current_connection_id(),
+       query_id IS NOT NULL,
+       round_id > 0,
+       step_id IS NOT NULL,
+       source_rows > 0,
+       estimated_destination_rows_before >= estimated_destination_rows_after,
+       info['key_count']::UBIGINT > 0,
+       info['destination_active_after']::BOOLEAN IS NOT NULL,
+       round_elapsed_ms >= 0
+FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'transfer'
+ORDER BY event_sequence
+LIMIT 1;
+----
+true	true	true	true	true	true	true	true	true
+
+query IIIIIIII
+SELECT rounds_considered > 0,
+       transfer_count > 0,
+       completed_sources > 0,
+       retained_bytes > 0,
+       budget_bytes > 0,
+       elapsed_ms >= 0,
+       info['init_ms']::DOUBLE >= 0,
+       round_elapsed_ms IS NULL
+FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'transfer_complete';
+----
+true	true	true	true	true	true	true	true
+
+# An eligible join that stays on DuckDB's native path must say why. Reading
+# the log itself must not recursively create another skipped event.
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT count(*)
+FROM rpt_log_left l
+JOIN rpt_log_right r ON l.id = r.id
+WHERE r.keep AND random() >= 0;
+----
+100
+
+query TTTTI
+SELECT event, phase, status, reason, event_sequence
+FROM duckdb_logs_parsed('Bloom');
+----
+skipped	eligibility	skipped	volatile_expression	1
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Bloom');
+----
+1
+
+# Admission denial before the first source must be visible as a whole-query
+# fallback while the native DuckDB plan still returns the correct result.
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+SET bloom_memory_limit = '0B';
+
+query I
+SELECT count(*)
+FROM rpt_log_left l
+JOIN rpt_log_right r ON l.id = r.id
+WHERE r.keep;
+----
+100
+
+query TTTIIIII
+SELECT event,
+       phase,
+       status,
+       event_sequence,
+       (requested_bytes > 0)::INTEGER,
+       retained_bytes,
+       budget_bytes,
+       completed_sources
+FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'memory_stop';
+----
+memory_stop	sample_admission	whole_query_fallback	2	1	0	0	0
+
+query I
+SELECT count(*)
+FROM duckdb_logs_parsed('Bloom')
+WHERE event IN ('transfer', 'transfer_complete');
+----
+0
+
+# Disabled logging must not emit Bloom rows. This also exercises the default
+# fast path used by applications that do not opt into observability.
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL disable_logging();
+
+statement ok
+SET bloom_memory_limit = 'auto';
+
+query I
+SELECT count(*)
+FROM rpt_log_left l
+JOIN rpt_log_right r ON l.id = r.id
+WHERE r.keep;
+----
+100
+
+query I
+SELECT count(*)
+FROM duckdb_logs_parsed('Bloom');
+----
+0

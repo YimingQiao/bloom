@@ -1,5 +1,5 @@
 # name: test/sql/transfer/low_memory_recovery.test
-# description: keep RPT bounded and recoverable when transfer memory is scarce
+# description: keep Bloom bounded and recoverable when transfer memory is scarce
 # group: [transfer]
 
 require bloom
@@ -36,19 +36,19 @@ statement ok
 SET threads = 1;
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
-SET rpt_instant_access = 'scattered';
+SET bloom_instant_access = 'scattered';
 
 statement ok
-SET rpt_instant_access_points = 4;
+SET bloom_instant_access_points = 4;
 
 statement ok
-SET rpt_instant_rows_per_access = 64;
+SET bloom_instant_rows_per_access = 64;
 
 statement ok
-SET rpt_sample_memory_cache = false;
+SET bloom_sample_memory_cache = false;
 
 # ============================================================================
 # Native reference and whole-query admission fallback
@@ -62,14 +62,14 @@ WHERE tag = 'ALLOCATOR';
 
 # DuckDB can retain or release one 64 KiB allocator block as prepared plans and
 # worker state are created. Cleanup checks allow only that native-runtime noise;
-# retained RPT plans below are required to exceed it.
+# retained Bloom plans below are required to exceed it.
 
 # Measure the allocator footprint of DuckDB's native prepared plan. Every
 # whole-query fallback below must retain this footprint within one allocator
-# block, rather than merely returning the same result while keeping RPT objects
+# block, rather than merely returning the same result while keeping Bloom objects
 # alive.
 statement ok
-SET enable_rpt = false;
+SET enable_bloom = false;
 
 statement ok
 PREPARE rpt_low_native AS
@@ -110,11 +110,11 @@ WHERE tag = 'ALLOCATOR';
 1	1
 
 statement ok
-SET enable_rpt = true;
+SET enable_bloom = true;
 
 # A non-zero budget below the sample estimate falls back before sampling.
 statement ok
-SET rpt_memory_limit = '64KB';
+SET bloom_memory_limit = '64KB';
 
 statement ok
 PREPARE rpt_low_sample_fallback AS
@@ -153,7 +153,7 @@ WHERE tag = 'ALLOCATOR';
 # Sampling fits, but the first wide source does not. This is a distinct
 # pre-materialization fallback and must still match the native plan footprint.
 statement ok
-SET rpt_memory_limit = '13MB';
+SET bloom_memory_limit = '13MB';
 
 statement ok
 PREPARE rpt_low_materialize_fallback AS
@@ -189,13 +189,13 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# DuckDB can independently deny RPT's temporary-memory reservation even when
-# the explicit RPT limit is generous. That denial is also a native fallback.
+# DuckDB can independently deny Bloom's temporary-memory reservation even when
+# the explicit Bloom limit is generous. That denial is also a native fallback.
 statement ok
 SET debug_force_external = true;
 
 statement ok
-SET rpt_memory_limit = '32MB';
+SET bloom_memory_limit = '32MB';
 
 statement ok
 PREPARE rpt_low_reservation_fallback AS
@@ -238,10 +238,10 @@ SET debug_force_external = false;
 # Retained-plan memory ladder and repeated cleanup
 # ============================================================================
 
-# A generous RPT budget establishes how much memory the complete rewrite
+# A generous Bloom budget establishes how much memory the complete rewrite
 # retains in its prepared physical plan.
 statement ok
-SET rpt_memory_limit = '32MB';
+SET bloom_memory_limit = '32MB';
 
 statement ok
 PREPARE rpt_low_full AS
@@ -283,10 +283,10 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# This budget admits the first wide source but not the second one. RPT must
+# This budget admits the first wide source but not the second one. Bloom must
 # stop expanding the transfer, keep the completed work, and execute correctly.
 statement ok
-SET rpt_memory_limit = '14.4MB';
+SET bloom_memory_limit = '14.4MB';
 
 statement ok
 PREPARE rpt_low_partial AS
@@ -301,7 +301,7 @@ EXECUTE rpt_low_partial;
 ----
 800	409600	409600
 
-# Partial transfer retains some RPT data, but less than the complete rewrite,
+# Partial transfer retains some Bloom data, but less than the complete rewrite,
 # and the non-spill allocator never has temporary storage.
 query III
 SELECT (memory.memory_usage_bytes - baseline.bytes - native.bytes > 65536)::INTEGER,
@@ -356,7 +356,7 @@ WHERE tag = 'ALLOCATOR';
 # Before any source is completed, no budget means a whole-query fallback.
 # Its prepared plan must retain exactly the native footprint.
 statement ok
-SET rpt_memory_limit = '0B';
+SET bloom_memory_limit = '0B';
 
 statement ok
 SET threads = 1;
@@ -431,7 +431,7 @@ WHERE w1.keep AND w2.keep;
 
 # Changing execution width can lazily retain one small DuckDB allocator block
 # on some platforms (notably Windows). Bound that native runtime noise well
-# below the measured RPT footprint, then make the warmed state the baseline.
+# below the measured Bloom footprint, then make the warmed state the baseline.
 query II
 SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
@@ -469,7 +469,7 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# In automatic mode RPT receives only a fraction of DuckDB's currently
+# In automatic mode Bloom receives only a fraction of DuckDB's currently
 # available operator memory. A wide, parallel transfer must be rejected by
 # admission while the original query still runs within the global limit.
 statement ok
@@ -479,7 +479,7 @@ statement ok
 SET threads = 8;
 
 statement ok
-SET rpt_memory_limit = 'auto';
+SET bloom_memory_limit = 'auto';
 
 statement ok
 PREPARE rpt_low_auto_fallback AS
@@ -519,7 +519,7 @@ WHERE tag = 'ALLOCATOR';
 # Database-wide budget contention across connections
 # ============================================================================
 
-# Temporary-memory reservations are database-wide. Keep a large RPT rewrite
+# Temporary-memory reservations are database-wide. Keep a large Bloom rewrite
 # alive on one connection, then verify that another connection's auto budget is
 # computed from the remaining memory and retains only its native plan.
 statement ok
@@ -529,22 +529,22 @@ statement ok con1
 SET threads = 4;
 
 statement ok con1
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok con1
-SET rpt_instant_access = 'scattered';
+SET bloom_instant_access = 'scattered';
 
 statement ok con1
-SET rpt_instant_access_points = 4;
+SET bloom_instant_access_points = 4;
 
 statement ok con1
-SET rpt_instant_rows_per_access = 64;
+SET bloom_instant_rows_per_access = 64;
 
 statement ok con1
-SET rpt_sample_memory_cache = false;
+SET bloom_sample_memory_cache = false;
 
 statement ok con1
-SET rpt_memory_limit = '48MB';
+SET bloom_memory_limit = '48MB';
 
 statement ok con1
 PREPARE rpt_low_pressure_holder AS
@@ -580,7 +580,7 @@ statement ok con2
 SET threads = 8;
 
 statement ok con2
-SET enable_rpt = false;
+SET enable_bloom = false;
 
 statement ok con2
 PREPARE rpt_low_contended_native AS
@@ -622,25 +622,25 @@ WHERE memory.tag = 'ALLOCATOR';
 1
 
 statement ok con2
-SET enable_rpt = true;
+SET enable_bloom = true;
 
 statement ok con2
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok con2
-SET rpt_instant_access = 'scattered';
+SET bloom_instant_access = 'scattered';
 
 statement ok con2
-SET rpt_instant_access_points = 4;
+SET bloom_instant_access_points = 4;
 
 statement ok con2
-SET rpt_instant_rows_per_access = 64;
+SET bloom_instant_rows_per_access = 64;
 
 statement ok con2
-SET rpt_sample_memory_cache = false;
+SET bloom_sample_memory_cache = false;
 
 statement ok con2
-SET rpt_memory_limit = 'auto';
+SET bloom_memory_limit = 'auto';
 
 statement ok con2
 PREPARE rpt_low_contended_auto AS
@@ -656,7 +656,7 @@ EXECUTE rpt_low_contended_auto;
 800	409600	409600
 
 # Concurrent native prepared plans can differ by one small allocator block.
-# Allow 64 KiB of native-plan noise; the smallest retained RPT rewrite measured
+# Allow 64 KiB of native-plan noise; the smallest retained Bloom rewrite measured
 # above is hundreds of KiB larger than this fallback footprint.
 query II
 SELECT (abs(memory.memory_usage_bytes - baseline.bytes - pressure.bytes - native.bytes) <= 65536)::INTEGER,
@@ -697,7 +697,7 @@ WHERE tag = 'ALLOCATOR';
 # ============================================================================
 
 # Variable-width values can exceed the conservative admission estimate while
-# materialization is already running. RPT is deliberately non-spill: propagate
+# materialization is already running. Bloom is deliberately non-spill: propagate
 # DuckDB's OOM instead of hiding it or silently restarting the query.
 statement ok
 SET memory_limit = '32MB';
@@ -706,7 +706,7 @@ statement ok
 SET threads = 1;
 
 statement ok
-SET rpt_memory_limit = '16MB';
+SET bloom_memory_limit = '16MB';
 
 statement error
 SELECT count(*), sum(length(w1.payload))
@@ -729,9 +729,9 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# Recovery must include RPT itself, not only trivial native statements.
+# Recovery must include Bloom itself, not only trivial native statements.
 statement ok
-SET rpt_memory_limit = '14.4MB';
+SET bloom_memory_limit = '14.4MB';
 
 query III
 SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
@@ -755,7 +755,7 @@ statement ok
 SET threads = 4;
 
 statement ok
-SET rpt_memory_limit = '28MB';
+SET bloom_memory_limit = '28MB';
 
 statement error
 SELECT count(*), sum(length(w1.payload))
@@ -766,7 +766,7 @@ WHERE w1.id % 4 != 3;
 Out of Memory Error
 
 # The failed transfer must release its executor state and leave the connection
-# usable. With RPT forced to the original plan, the same query fits in 32 MB.
+# usable. With Bloom forced to the original plan, the same query fits in 32 MB.
 query I
 SELECT 42;
 ----
@@ -781,7 +781,7 @@ WHERE tag = 'ALLOCATOR';
 1	1
 
 statement ok
-SET rpt_memory_limit = '0B';
+SET bloom_memory_limit = '0B';
 
 query II
 SELECT count(*), sum(length(w1.payload))

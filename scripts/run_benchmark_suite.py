@@ -50,8 +50,8 @@ def parse_args():
 
 def run_config(args, threads, sampling_mode, baseline=False):
     """Run one configuration and return {query: median_seconds}."""
-    rpt_tag = "rpt" if sampling_mode == "prepared" else f"rpt_{sampling_mode}"
-    tag = f"{args.workload}_{'base' if baseline else rpt_tag}_t{threads}"
+    bloom_tag = "bloom" if sampling_mode == "prepared" else f"bloom_{sampling_mode}"
+    tag = f"{args.workload}_{'base' if baseline else bloom_tag}_t{threads}"
     command = [
         sys.executable,
         str(RUNNER),
@@ -106,10 +106,10 @@ def require_same_queries(left_name, left, right_name, right):
     return sorted(left)
 
 
-def summarize_baseline(threads, rpt, base):
-    queries = require_same_queries("Bloom", rpt, "baseline", base)
-    speedups = [base[query] / rpt[query] for query in queries]
-    total_rpt = sum(rpt[query] for query in queries)
+def summarize_baseline(threads, bloom, base):
+    queries = require_same_queries("Bloom", bloom, "baseline", base)
+    speedups = [base[query] / bloom[query] for query in queries]
+    total_rpt = sum(bloom[query] for query in queries)
     total_base = sum(base[query] for query in queries)
     faster = sum(speedup > 1.0 for speedup in speedups)
     return (
@@ -142,9 +142,9 @@ def main():
             instant = run_config(args, threads, "instant")
             rows.append(summarize_sampling(threads, prepared, instant))
             continue
-        rpt = run_config(args, threads, args.sampling_mode)
+        bloom = run_config(args, threads, args.sampling_mode)
         base = run_config(args, threads, args.sampling_mode, baseline=True)
-        rows.append(summarize_baseline(threads, rpt, base))
+        rows.append(summarize_baseline(threads, bloom, base))
 
     if args.comparison == "sampling":
         print(

@@ -7,7 +7,7 @@ require bloom
 require parquet
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
 SET threads = 8;
@@ -26,10 +26,10 @@ COPY (
 
 # More requested row groups than sample rows must not create zero-row work.
 statement ok
-SET rpt_sample_size = 1;
+SET bloom_sample_size = 1;
 
 statement ok
-SET rpt_instant_parquet_row_groups = 64;
+SET bloom_instant_parquet_row_groups = 64;
 
 query II
 SELECT count(*), sum(l.id)
@@ -41,10 +41,10 @@ WHERE r.keep AND l.payload >= 0;
 
 # Exercise all eight row-group work units on the calling thread.
 statement ok
-SET rpt_sample_size = 64;
+SET bloom_sample_size = 64;
 
 statement ok
-SET rpt_instant_parquet_row_groups = 8;
+SET bloom_instant_parquet_row_groups = 8;
 
 statement ok
 SET async_threads = 0;

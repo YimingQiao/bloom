@@ -10,7 +10,7 @@ belongs under the dated directory in `experiments/`.
   latter with `--comparison sampling`.
 - `compare_performance.py`: compare base and candidate Bloom benchmark runners
   across full JOB and TPC-H SF1 workloads, then compare the candidate with the
-  same DuckDB runner with RPT disabled. It reports absolute total and
+  same DuckDB runner with Bloom disabled. It reports absolute total and
   per-query-geomean speedups, reports commit-to-commit query slowdowns of at
   least 10%, and fails on a commit-to-commit workload geomean increase of at
   least 10% or 50ms.
@@ -19,7 +19,7 @@ belongs under the dated directory in `experiments/`.
   read-only to a transient runner database; they are never silently regenerated.
   The wrapper also returns a failure when DuckDB's benchmark runner records an
   `ERROR`, even if the native runner itself exits successfully. Pass
-  `--late-materialize` to benchmark RPT's experimental rowid-based path.
+  `--late-materialize` to benchmark Bloom's experimental rowid-based path.
 - `summarize_benchmark.py`: aggregate benchmark timing files.
 - `package_release_artifacts.py`: assemble local release bundles.
 

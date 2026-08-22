@@ -3,7 +3,7 @@
 
 The comparison intentionally covers only JOB and TPC-H SF1. Each round runs
 the full workload with the base Bloom runner, candidate Bloom runner, and the
-candidate runner with RPT disabled. The order alternates for both comparisons.
+candidate runner with Bloom disabled. The order alternates for both comparisons.
 A commit-to-commit query slowdown of at least 10% is reported, while the CI
 gate follows DuckDB's aggregate policy: fail when the workload geomean grows
 by at least 10% or 50ms. The DuckDB comparison reports Bloom's absolute

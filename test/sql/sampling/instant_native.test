@@ -5,7 +5,7 @@
 require bloom
 
 statement ok
-SET rpt_sample_mode = 'prepared';
+SET bloom_sample_mode = 'prepared';
 
 statement ok
 CREATE TABLE rpt_native_left AS
@@ -32,20 +32,20 @@ WHERE r.keep AND l.middle_col >= 0;
 100	495000	1188	296
 
 statement ok
-SET rpt_sample_cache_dir = '{TEST_DIR}/instant_native_samples';
+SET bloom_sample_cache_dir = '{TEST_DIR}/instant_native_samples';
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
-SET rpt_sample_size = 1000;
+SET bloom_sample_size = 1000;
 
 statement ok
-SET rpt_instant_access_points = 1;
+SET bloom_instant_access_points = 1;
 
 # One access spans several DuckDB vectors.
 statement ok
-SET rpt_instant_rows_per_access = 4096;
+SET bloom_instant_rows_per_access = 4096;
 
 statement ok
 SET async_threads = 0;
@@ -60,12 +60,12 @@ WHERE r.keep AND l.middle_col >= 0;
 
 # Instant mode must not create a prepared sample as a fallback.
 query I
-SELECT loaded_samples FROM rpt_preload_samples();
+SELECT loaded_samples FROM bloom_preload_samples();
 ----
 0
 
 statement ok
-SET rpt_instant_access = 'block';
+SET bloom_instant_access = 'block';
 
 query IIII
 SELECT count(*), sum(l.id), sum(length(l.payload)), sum(l.tail_col)

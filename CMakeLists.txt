@@ -29,6 +29,7 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/filter/table_filter.cpp
     src/predicate_transfer/materialized_cte_lifter.cpp
     src/predicate_transfer/predicate_transfer_optimizer.cpp
+    src/predicate_transfer/bloom_log.cpp
     src/predicate_transfer/rpt_result_collector.cpp
     src/predicate_transfer/table_operator_manager.cpp
     src/predicate_transfer/table_scanner/filter_set.cpp

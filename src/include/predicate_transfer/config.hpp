@@ -56,25 +56,25 @@ struct RPTSamplingConfig {
 
 class RPTOptimizerConfig {
 public:
-	//! Query-local memory budget for optimizer-time RPT work. Invalid means
+	//! Query-local memory budget for optimizer-time Bloom work. Invalid means
 	//! "auto": use a conservative fraction of currently available DuckDB
-	//! operator memory. RPT collections stay in memory and never spill.
+	//! operator memory. Bloom collections stay in memory and never spill.
 	optional_idx memory_limit;
 	bool late_materialize_flag = false;
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
-	//! These tables benefit from early termination; RPT materialisation would defeat it.
+	//! These tables benefit from early termination; Bloom materialisation would defeat it.
 	bool enable_table_protection = false;
-	//! Skip RPT when the plan contains a pure range-inequality join
+	//! Skip Bloom when the plan contains a pure range-inequality join
 	//! (<, >, <=, >=) with no equality key. Mixed joins that also contain an
-	//! equality condition remain eligible for RPT on their equality graph.
+	//! equality condition remain eligible for Bloom on their equality graph.
 	bool skip_on_inequality_join = true;
-	//! Skip RPT entirely when the plan contains any set operator
+	//! Skip Bloom entirely when the plan contains any set operator
 	//! (UNION / UNION ALL / INTERSECT / EXCEPT). Those plans split into
 	//! independent sub-branches that don't benefit from cross-branch BF transfer.
 	bool skip_on_set_operator = true;
 	//! Do not optimizer-time lift a CTE definition when it contains a filter
 	//! above an aggregation. Such CTEs are self-selective; eager execution and
-	//! RPT materialisation of their internals rarely pay off.
+	//! Bloom materialisation of their internals rarely pay off.
 	bool skip_cte_with_filter_agg = true;
 	//! Do not optimizer-time lift any CTE definition that contains an
 	//! aggregation, even without a filter above it. Stronger than
@@ -87,9 +87,9 @@ public:
 	//! optimizer-time lifting off until its nested execution participates in the
 	//! same memory admission as the outer transfer scope.
 	bool enable_materialized_cte_lifting = false;
-	//! Skip RPT when the scope's join tree is fully left-deep (every join's
+	//! Skip Bloom when the scope's join tree is fully left-deep (every join's
 	//! right input is a base table / CTE scan). Such plans already get most of
-	//! their benefit from join-side filter pushdown; RPT's materialization
+	//! their benefit from join-side filter pushdown; Bloom's materialization
 	//! overhead rarely pays off.
 	bool skip_left_deep_join_tree = true;
 
@@ -100,7 +100,7 @@ public:
 	//! (observed: IMDB 21a/21c/27a/27c regress ~2x).
 	bool bundle_composite_edges = true;
 
-	//! Enable cross-source RPT filter cache. Two sources with equal lineage
+	//! Enable cross-source Bloom filter cache. Two sources with equal lineage
 	//! snapshots on the same canonical columns (e.g. the two aliases of a
 	//! lifted CTE) share a single built BF instead of each rebuilding it.
 	bool enable_filter_cache = true;
@@ -109,8 +109,8 @@ public:
 	//! Log transfer-plan generation to stderr: initial cardinalities, each
 	//! flooding round (source pick, estimates, filter-cache hits) and the final
 	//! ExcitationTimeline. Works for both the oracle and the sampling estimator
-	//! and does not require the profiler (SET rpt_log_transfer_steps=true or
-	//! env RPT_LOG_TRANSFER_STEPS=1). Used to diff oracle vs sampling paths.
+	//! and does not require the profiler (SET bloom_log_transfer_steps=true or
+	//! env BLOOM_LOG_TRANSFER_STEPS=1). Used to diff oracle vs sampling paths.
 	bool log_transfer_steps = false;
 	//! Excitation threshold: re-excite if cardinality drops below this ratio of baseline
 	double excitation_threshold = 1.0;

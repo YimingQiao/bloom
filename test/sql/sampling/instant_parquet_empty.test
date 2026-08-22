@@ -7,7 +7,7 @@ require bloom
 require parquet
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
 COPY (

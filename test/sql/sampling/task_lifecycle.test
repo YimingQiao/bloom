@@ -23,19 +23,19 @@ statement ok
 CHECKPOINT;
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
-SET rpt_instant_access = 'scattered';
+SET bloom_instant_access = 'scattered';
 
 statement ok
-SET rpt_sample_size = 257;
+SET bloom_sample_size = 257;
 
 statement ok
-SET rpt_instant_access_points = 8;
+SET bloom_instant_access_points = 8;
 
 statement ok
-SET rpt_instant_rows_per_access = 257;
+SET bloom_instant_rows_per_access = 257;
 
 # The caller must drain all queued work when no background worker exists.
 statement ok

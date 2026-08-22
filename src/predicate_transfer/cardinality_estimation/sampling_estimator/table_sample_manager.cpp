@@ -45,7 +45,7 @@ idx_t TableSampleManager::MemoryUsage() const {
 
 bool TableSampleManager::LogEnabled() const {
 	Value setting;
-	return context_.TryGetCurrentSetting("rpt_log_transfer_steps", setting) && setting.GetValue<bool>();
+	return context_.TryGetCurrentSetting("bloom_log_transfer_steps", setting) && setting.GetValue<bool>();
 }
 
 //! True when a logical column reference could not be mapped to the sample
@@ -116,7 +116,7 @@ unique_ptr<Expression> TableSampleManager::BuildLocalPredicate(const Entry &samp
 	const LogicalGet *get = nullptr;
 	const LogicalOperator *node = &op;
 	if (emit_log) {
-		std::cerr << "  [RPT-Sample] op=" << static_cast<int>(op.type) << " sample_rows=" << sample.sampled_rows
+		std::cerr << "  [Bloom-Sample] op=" << static_cast<int>(op.type) << " sample_rows=" << sample.sampled_rows
 		          << " needed_storage_cols=(";
 		for (idx_t i = 0; i < sample.needed_storage_columns.size(); i++) {
 			if (i > 0) {
@@ -224,7 +224,7 @@ void TableSampleManager::EnsureLocalFilter(Entry &sample, const LogicalOperator 
 		if (LogEnabled()) {
 			auto elapsed =
 			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evaluate_started).count();
-			std::cerr << "  [RPT-SampleEvaluate] table=" << sample.table_name
+			std::cerr << "  [Bloom-SampleEvaluate] table=" << sample.table_name
 			          << " phase=local rows=" << sample.sampled_rows << " survivors=" << sample.local_survivors
 			          << " elapsed=" << elapsed << "ms" << '\n';
 		}
@@ -279,10 +279,11 @@ void TableSampleManager::EnsureLocalFilter(Entry &sample, const LogicalOperator 
 	if (log) {
 		auto elapsed =
 		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - evaluate_started).count();
-		std::cerr << "    [RPT-Sample] predicates=" << predicate_count << " survivors=" << survivors << "/"
+		std::cerr << "    [Bloom-Sample] predicates=" << predicate_count << " survivors=" << survivors << "/"
 		          << sample.sampled_rows << '\n';
-		std::cerr << "  [RPT-SampleEvaluate] table=" << sample.table_name << " phase=local rows=" << sample.sampled_rows
-		          << " survivors=" << survivors << " elapsed=" << elapsed << "ms" << '\n';
+		std::cerr << "  [Bloom-SampleEvaluate] table=" << sample.table_name
+		          << " phase=local rows=" << sample.sampled_rows << " survivors=" << survivors << " elapsed=" << elapsed
+		          << "ms" << '\n';
 	}
 }
 
@@ -334,7 +335,7 @@ void TableSampleManager::LogInstantSample(const Entry &sample, const InstantSamp
 		break;
 	}
 	auto source = InstantSampleSourceName(result.source);
-	std::cerr << "  [RPT-SampleBuild] table=" << sample.table_name << " mode=instant source=" << source
+	std::cerr << "  [Bloom-SampleBuild] table=" << sample.table_name << " mode=instant source=" << source
 	          << " rows=" << sample.sampled_rows << "/" << sample.total_rows
 	          << " accesses=" << sample.sample_access_points << "/" << target_accesses
 	          << " rows_per_access=" << rows_per_access << " seed=" << config_.seed << " effective_seed=" << table_seed
@@ -344,9 +345,9 @@ void TableSampleManager::LogInstantSample(const Entry &sample, const InstantSamp
 		          << " candidate_rows=" << result.candidate_rows;
 	}
 	std::cerr << '\n';
-	std::cerr << "    [RPT-Sample] predicates=" << predicate_count << " survivors=" << sample.local_survivors << "/"
+	std::cerr << "    [Bloom-Sample] predicates=" << predicate_count << " survivors=" << sample.local_survivors << "/"
 	          << sample.sampled_rows << '\n';
-	std::cerr << "  [RPT-SamplePhysical] table=" << sample.table_name;
+	std::cerr << "  [Bloom-SamplePhysical] table=" << sample.table_name;
 	if (result.source != InstantSampleSource::PARQUET) {
 		std::cerr << " consistency=" << (config_.instant_snapshot ? "snapshot" : "storage_direct");
 	}
@@ -358,7 +359,7 @@ void TableSampleManager::LogInstantSample(const Entry &sample, const InstantSamp
 	          << "ms append=" << result.append_ms << "ms combine=" << result.combine_ms
 	          << "ms task_wall_sum=" << result.task_wall_ms << "ms total=" << result.scan_ms << "ms\n";
 	if (!result.selected_row_offsets.empty()) {
-		std::cerr << "  [RPT-SampleRanges] table=" << sample.table_name
+		std::cerr << "  [Bloom-SampleRanges] table=" << sample.table_name
 		          << " selected=" << result.selected_row_offsets.size() << "/" << result.candidate_chunks
 		          << " row_offsets=(";
 		for (idx_t i = 0; i < result.selected_row_offsets.size(); i++) {
@@ -376,7 +377,7 @@ void TableSampleManager::AdoptInstantSample(Entry &sample, InstantSampleResult r
 	D_ASSERT(result.source != InstantSampleSource::UNKNOWN);
 	if (!result) {
 		if (LogEnabled()) {
-			std::cerr << "  [RPT-SampleUnavailable] table=" << sample.table_name
+			std::cerr << "  [Bloom-SampleUnavailable] table=" << sample.table_name
 			          << " mode=instant reason=" << result.unavailable_reason << '\n';
 		}
 		return;

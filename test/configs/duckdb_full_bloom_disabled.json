@@ -1,5 +1,5 @@
 {
-  "description": "Load Bloom for every DuckDB test database but keep RPT disabled.",
+  "description": "Load Bloom for every DuckDB test database but keep Bloom disabled.",
   "statically_loaded_extensions": [
     "core_functions",
     "bloom"
@@ -7,13 +7,13 @@
   "summarize_failures": true,
   "skip_tests": [
     {
-      "reason": "Bloom's extension self-test intentionally asserts that RPT is enabled by default.",
+      "reason": "Bloom's extension self-test intentionally asserts that Bloom is enabled by default.",
       "paths": [
         "test/sql/bloom.test"
       ]
     },
     {
-      "reason": "Prepared-cache persistence tests require enabled RPT queries to create their sample files.",
+      "reason": "Prepared-cache persistence tests require enabled Bloom queries to create their sample files.",
       "paths": [
         "test/sql/sampling/prepared_seed_cache.test",
         "test/sql/sampling/prepared_target_cache.test"

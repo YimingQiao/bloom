@@ -1,5 +1,6 @@
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
 #include "predicate_transfer/materialized_cte_lifter.hpp"
+#include "predicate_transfer/bloom_log.hpp"
 #include "predicate_transfer/table_operator_manager.hpp"
 #include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/filter/table_filter.hpp"
@@ -37,7 +38,7 @@ static bool ContainsRecursiveCTE(const LogicalOperator &op) {
 	return false;
 }
 
-//! RPT executes predicates while sampling and materializing during
+//! Bloom executes predicates while sampling and materializing during
 //! optimization. A volatile expression (nextval, random, or a side-effecting
 //! UDF) must therefore stay on DuckDB's normal execution path, where it is
 //! evaluated exactly as prescribed by the final physical plan.
@@ -97,7 +98,26 @@ static bool IsReadOnlyParquetScan(const LogicalGet &get) {
 	return false;
 }
 
-//! RPT executes selected subtrees during optimization. Keep that execution
+//! Structured skip events are useful only for scopes that could plausibly run
+//! Bloom. Requiring two supported sources keeps log-introspection table functions
+//! from generating new Bloom rows while they scan the existing ones.
+static idx_t CountMonitorableBloomSources(const LogicalOperator &op, bool allow_parquet) {
+	idx_t count = 0;
+	if (op.type == LogicalOperatorType::LOGICAL_GET) {
+		auto &get = op.Cast<LogicalGet>();
+		if (get.GetTable() || (allow_parquet && IsReadOnlyParquetScan(get))) {
+			count++;
+		}
+	} else if (op.type == LogicalOperatorType::LOGICAL_CHUNK_GET) {
+		count++;
+	}
+	for (auto &child : op.children) {
+		count += CountMonitorableBloomSources(*child, allow_parquet);
+	}
+	return count;
+}
+
+//! Bloom executes selected subtrees during optimization. Keep that execution
 //! away from plan nodes that cannot be evaluated as a self-contained snapshot:
 //! recursive scopes and non-catalog table functions. DML/trigger plans are
 //! also outside the extension's analytical-query scope. Catalog table scans
@@ -178,7 +198,7 @@ static bool IsRangeInequality(ExpressionType comparison_type) {
 }
 
 //! Pure range-inequality join at or below `op`, with the same CTE-boundary
-//! behaviour. A mixed join with at least one equality key is not pure: RPT can
+//! behaviour. A mixed join with at least one equality key is not pure: Bloom can
 //! still use its equality graph while ignoring the range condition.
 static bool HasPureInequalityJoin(const LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_MATERIALIZED_CTE ||
@@ -344,7 +364,7 @@ static idx_t LeftPipelineTable(const LogicalOperator &op) {
 }
 
 //! Tables whose scan shares a pipeline with an early-terminating operator
-//! (TOP_N / LIMIT / MARK join) — RPT skips their excitation.
+//! (TOP_N / LIMIT / MARK join) — Bloom skips their excitation.
 static unordered_set<idx_t> ComputeProtectedTables(const LogicalOperator &plan) {
 	unordered_set<idx_t> protect;
 	auto try_mark = [&](const LogicalOperator &op) {
@@ -369,42 +389,43 @@ static unordered_set<idx_t> ComputeProtectedTables(const LogicalOperator &plan) 
 }
 
 unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<LogicalOperator> plan) {
-	// RPT may introduce and then pull up LogicalEmptyResult nodes. Respect
+	auto monitor_skips = BloomStructuredLoggingEnabled(optimizer.context) && CountJoins(*plan) > 0 &&
+	                     CountMonitorableBloomSources(*plan, config.sampling.mode == RPTSamplingMode::INSTANT) >= 2;
+	auto log_skip = [&](const char *reason) {
+		if (config.log_transfer_steps) {
+			fprintf(stderr, "[Bloom-Excitation] scope skipped: %s\n", reason);
+		}
+		if (monitor_skips) {
+			LogBloomSkipped(optimizer.context, 1, "eligibility", reason);
+		}
+	};
+
+	// Bloom may introduce and then pull up LogicalEmptyResult nodes. Respect
 	// DuckDB's explicit optimizer setting: doing that rewrite when
 	// empty_result_pullup is disabled can suppress errors in unreachable
 	// branches and observably change query semantics.
 	if (optimizer.OptimizerDisabled(OptimizerType::EMPTY_RESULT_PULLUP)) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: empty_result_pullup_disabled\n");
-		}
+		log_skip("empty_result_pullup_disabled");
 		return plan;
 	}
 
 	if (ContainsRecursiveCTE(*plan)) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: recursive_cte\n");
-		}
+		log_skip("recursive_cte");
 		return plan;
 	}
 
 	if (auto reason = FindUnsupportedPlanFeature(*plan, config.sampling.mode == RPTSamplingMode::INSTANT)) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: %s\n", reason);
-		}
+		log_skip(reason);
 		return plan;
 	}
 
 	if (HasUncommittedChanges(*plan, optimizer.context)) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: uncommitted_changes\n");
-		}
+		log_skip("uncommitted_changes");
 		return plan;
 	}
 
 	if (ContainsVolatileExpression(*plan)) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: volatile_expression\n");
-		}
+		log_skip("volatile_expression");
 		return plan;
 	}
 
@@ -418,18 +439,14 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 			// A retained CTE still separates definition and consumer binding
 			// scopes. Safe sibling CTEs may already have been lifted, but the
 			// remaining parent scope must stay intact.
-			if (config.log_transfer_steps) {
-				fprintf(stderr, "[RPT-Excitation] scope skipped: unsafe_materialized_cte_retained\n");
-			}
+			log_skip("unsafe_materialized_cte_retained");
 			return plan;
 		}
 	} else if (ContainsMaterializedCTE(*plan)) {
 		// Without lifting, the CTE definition and its consumer are separate
 		// binding scopes. Do not let graph construction cross that boundary;
 		// leave the complete plan to DuckDB's normal runtime CTE executor.
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: materialized_cte_lifting_disabled\n");
-		}
+		log_skip("materialized_cte_lifting_disabled");
 		return plan;
 	}
 
@@ -445,9 +462,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		skip_reason = "left_deep_join_tree";
 	}
 	if (skip_reason) {
-		if (config.log_transfer_steps) {
-			fprintf(stderr, "[RPT-Excitation] scope skipped: %s\n", skip_reason);
-		}
+		log_skip(skip_reason);
 		return plan;
 	}
 
@@ -457,7 +472,10 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	}
 
-	graph_manager->Build(*plan);
+	if (!graph_manager->Build(*plan)) {
+		log_skip("no_transfer_graph");
+		return plan;
+	}
 	auto &excitation_manager = static_cast<ExcitationGraphManager &>(*graph_manager);
 	if (excitation_manager.WholeQueryMemoryFallback()) {
 		return plan;
@@ -703,7 +721,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			}
 			// A wanted binding is missing from the materialized data (seen with
 			// late materialization). Never splice a null into the plan — keep
-			// the original subtree; it is correct, just without the RPT rewrite.
+			// the original subtree; it is correct, just without the Bloom rewrite.
 			if (enable_profiler) {
 				fprintf(stderr, "\t[RewriteQueryPlan] table_id=%lu → MemoryScan FAILED, falling back to Passthrough\n",
 				        table_id);

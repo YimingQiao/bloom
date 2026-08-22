@@ -43,7 +43,7 @@ bool TableMaterialization::LogEnabled() const {
 		return true;
 	}
 	Value v;
-	return context_.TryGetCurrentSetting("rpt_log_transfer_steps", v) && v.GetValue<bool>();
+	return context_.TryGetCurrentSetting("bloom_log_transfer_steps", v) && v.GetValue<bool>();
 }
 
 //===--------------------------------------------------------------------===//
@@ -108,7 +108,7 @@ TableMaterialization::TableMaterialization(Optimizer &optimizer, ClientContext &
 			}
 			D_ASSERT(binding_idx != DConstants::INVALID_INDEX);
 			if (binding_idx == DConstants::INVALID_INDEX) {
-				throw InternalException("RPT could not bind CHUNK_GET filter column %s", cref.Binding().ToString());
+				throw InternalException("Bloom could not bind CHUNK_GET filter column %s", cref.Binding().ToString());
 			}
 			expr = make_uniq<BoundReferenceExpression>(cref.GetAlias(), cref.GetReturnType(),
 			                                           current_positions[binding_idx]);
@@ -288,7 +288,7 @@ static void CollectMaterializeGets(LogicalOperator &op, unordered_map<idx_t, Log
 }
 
 //! Log which storage columns each GET in the materialize subtree reads and the
-//! exact filters attached to each column. Logging both before and after RPT
+//! exact filters attached to each column. Logging both before and after Bloom
 //! injection separates DuckDB's local predicates from transfer filters.
 static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 	unordered_map<idx_t, LogicalGet *> gets;

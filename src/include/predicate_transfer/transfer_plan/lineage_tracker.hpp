@@ -28,7 +28,7 @@ namespace duckdb {
 //!     another key (for example A.x -> B.x, then B.y -> C.y).
 //!   - Table granularity: per-lineage_id only.
 //!
-//! Select via -DRPT_LINEAGE_TABLE_GRANULARITY at build time.
+//! Select via -DBLOOM_LINEAGE_TABLE_GRANULARITY at build time.
 class LineageTracker {
 public:
 	using LineageSet = unordered_set<idx_t>;
@@ -37,7 +37,7 @@ public:
 	// lineage_ids (which for non-aliases equals table_ids).
 	using TableSet = LineageSet;
 
-#ifdef RPT_LINEAGE_TABLE_GRANULARITY
+#ifdef BLOOM_LINEAGE_TABLE_GRANULARITY
 	static constexpr bool kColumnGranular = false;
 #else
 	static constexpr bool kColumnGranular = true;

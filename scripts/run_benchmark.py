@@ -2,8 +2,8 @@
 """Run one workload through DuckDB's same-process native benchmark runner.
 
 The Bloom extension is statically linked into the runner, so every query runs
-with predicate transfer enabled; pass --baseline to disable it (RPT_ENABLE=0).
-A temporary benchmark root is synthesized per run; databases and RPT sample
+with predicate transfer enabled; pass --baseline to disable it (BLOOM_ENABLE=0).
+A temporary benchmark root is synthesized per run; databases and Bloom sample
 caches persist in .bench_cache/data. Existing databases are read sequentially
 into the OS page cache before the runner starts, then the runner discards one
 query warmup before its timed runs. This protocol is distinct from the
@@ -168,11 +168,11 @@ def parse_args():
     parser.add_argument("--sample-seed", type=int, default=2, help="Sampling seed (default: 2)")
     parser.add_argument("--out", type=Path)
     parser.add_argument("--log", type=Path)
-    parser.add_argument("--baseline", action="store_true", help="Run with RPT_ENABLE=0")
+    parser.add_argument("--baseline", action="store_true", help="Run with BLOOM_ENABLE=0")
     parser.add_argument(
         "--late-materialize",
         action="store_true",
-        help="Enable RPT rowid-based late materialization",
+        help="Enable Bloom rowid-based late materialization",
     )
     return parser.parse_args()
 
@@ -345,13 +345,13 @@ def main():
             command.append(f"--log={args.log.resolve()}")
 
         env = os.environ.copy()
-        sample_dir = ROOT / ".bench_cache" / "rpt_samples"
+        sample_dir = ROOT / ".bench_cache" / "bloom_samples"
         sample_dir.mkdir(parents=True, exist_ok=True)
-        env.setdefault("RPT_SAMPLE_CACHE_DIR", str(sample_dir))
-        env["RPT_ENABLE"] = "0" if args.baseline else "1"
-        env["RPT_LATE_MATERIALIZE"] = "1" if args.late_materialize else "0"
-        env["RPT_SAMPLE_MODE"] = args.sampling_mode
-        env["RPT_SAMPLE_SEED"] = str(args.sample_seed)
+        env.setdefault("BLOOM_SAMPLE_CACHE_DIR", str(sample_dir))
+        env["BLOOM_ENABLE"] = "0" if args.baseline else "1"
+        env["BLOOM_LATE_MATERIALIZE"] = "1" if args.late_materialize else "0"
+        env["BLOOM_SAMPLE_MODE"] = args.sampling_mode
+        env["BLOOM_SAMPLE_SEED"] = str(args.sample_seed)
         completed = subprocess.run(command, env=env, check=False)
         if completed.returncode != 0:
             return completed.returncode

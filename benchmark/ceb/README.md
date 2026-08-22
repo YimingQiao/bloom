@@ -59,7 +59,7 @@ and the expected number of timed runs:
 
 ```bash
 python3 scripts/summarize_benchmark.py \
-  --rpt-log benchmark_results/ceb_imdb_rpt_t1.log \
+  --bloom-log benchmark_results/ceb_imdb_bloom_t1.log \
   --baseline-log benchmark_results/ceb_imdb_base_t1.log \
   --expected-queries 3133 \
   --timed-runs 5
@@ -88,6 +88,6 @@ python3 scripts/validate_ceb_results.py \
   --output benchmark_results/ceb_imdb_result_validation.jsonl
 ```
 
-The validator runs every query in separate DuckDB processes with RPT disabled
+The validator runs every query in separate DuckDB processes with Bloom disabled
 and enabled, then compares the CSV rows as multisets. Separate processes keep
 the two optimizer executions isolated. Its JSONL output is resumable.

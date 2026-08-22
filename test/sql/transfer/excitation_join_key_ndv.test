@@ -8,7 +8,7 @@ statement ok
 SET threads = 8;
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
 CREATE TABLE rpt_domain_a AS
@@ -29,7 +29,7 @@ FROM range(20) t(i);
 # while B's bridge NDV remains ten. The NDV mode can prove that B -> C carries
 # no new equality-domain information; both modes must retain identical results.
 statement ok
-SET rpt_excitation_mode = 'table_size';
+SET bloom_excitation_mode = 'table_size';
 
 query I
 SELECT count(*)
@@ -41,7 +41,7 @@ WHERE a.k < 5 AND c.keep;
 200
 
 statement ok
-SET rpt_excitation_mode = 'join_key_ndv';
+SET bloom_excitation_mode = 'join_key_ndv';
 
 query I
 SELECT count(*)

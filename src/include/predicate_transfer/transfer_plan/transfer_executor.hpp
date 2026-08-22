@@ -55,7 +55,7 @@ public:
 	                           const shared_ptr<RPTFilter> &filter, size_t identity_hash = 0);
 
 	TableScanner *Find(LogicalOperator &op) const;
-	//! Bytes owned by RPT-created materializations. Collections borrowed from an
+	//! Bytes owned by Bloom-created materializations. Collections borrowed from an
 	//! existing CHUNK_GET are excluded unless compaction replaces them.
 	idx_t MaterializedMemoryUsage() const;
 	bool OwnsMaterializedData(LogicalOperator &op) const;

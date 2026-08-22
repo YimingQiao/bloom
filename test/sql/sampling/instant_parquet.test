@@ -7,10 +7,10 @@ require bloom
 require parquet
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
-SET rpt_instant_parquet_row_groups = 4;
+SET bloom_instant_parquet_row_groups = 4;
 
 statement ok
 SET threads = 8;
@@ -49,7 +49,7 @@ WHERE l.bucket < 50 AND r.keep;
 
 # A single row-group work unit follows the same executor path.
 statement ok
-SET rpt_instant_parquet_row_groups = 1;
+SET bloom_instant_parquet_row_groups = 1;
 
 query II
 SELECT count(*), sum(l.id)

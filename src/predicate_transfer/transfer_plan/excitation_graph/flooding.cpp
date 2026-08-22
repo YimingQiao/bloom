@@ -1,5 +1,6 @@
 #include "predicate_transfer/transfer_plan/excitation_graph/excitation_graph_manager.hpp"
 #include "predicate_transfer/cardinality_estimation/sampling_estimator/sampling_estimator.hpp"
+#include "predicate_transfer/bloom_log.hpp"
 #include "predicate_transfer/table_operator_manager.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
@@ -62,7 +63,7 @@ void ExcitationGraphManager::InitializeMemoryBudget() {
 	}
 	auto state = TemporaryMemoryManager::Get(context).Register(context);
 	memory_state_ = shared_ptr<TemporaryMemoryState>(std::move(state));
-	// RPT cannot make progress on a partial reservation because it deliberately
+	// Bloom cannot make progress on a partial reservation because it deliberately
 	// has no spill path. Do not claim DuckDB's per-operator minimum as usable;
 	// every phase below must obtain its complete projected peak.
 	memory_state_->SetMinimumReservation(0);
@@ -244,7 +245,7 @@ bool ExcitationGraphManager::FitsMemoryBudget(idx_t retained, idx_t additional) 
 	auto required = retained + additional;
 	ResizeMemoryReservation(required);
 	if (config.log_transfer_steps) {
-		std::cerr << "[RPT-Memory] admission required=" << required
+		std::cerr << "[Bloom-Memory] admission required=" << required
 		          << " reservation=" << (memory_state_ ? memory_state_->GetReservation() : 0)
 		          << " budget=" << memory_budget_ << '\n';
 	}
@@ -283,20 +284,20 @@ shared_ptr<RPTFilter> ExcitationGraphManager::RetainFilterForExecution(shared_pt
 void ExcitationGraphManager::FinalizeMemoryReservationForExecution() {
 	D_ASSERT(execution_memory_used_ <= memory_budget_);
 	if (execution_memory_used_ > memory_budget_) {
-		throw OutOfMemoryException("RPT retained %s for execution, exceeding its %s memory budget",
+		throw OutOfMemoryException("Bloom retained %s for execution, exceeding its %s memory budget",
 		                           StringUtil::BytesToHumanReadableString(execution_memory_used_),
 		                           StringUtil::BytesToHumanReadableString(memory_budget_));
 	}
 	if (execution_memory_used_ > 0) {
 		D_ASSERT(memory_state_);
 		if (!memory_state_) {
-			throw InternalException("RPT retained execution memory without a temporary-memory state");
+			throw InternalException("Bloom retained execution memory without a temporary-memory state");
 		}
 		memory_state_->SetMinimumReservation(execution_memory_used_);
 	}
 	ResizeMemoryReservation(execution_memory_used_);
 	if (execution_memory_used_ > 0 && memory_state_->GetReservation() < execution_memory_used_) {
-		throw OutOfMemoryException("DuckDB could reserve only %s of the %s retained by RPT for query execution",
+		throw OutOfMemoryException("DuckDB could reserve only %s of the %s retained by Bloom for query execution",
 		                           StringUtil::BytesToHumanReadableString(memory_state_->GetReservation()),
 		                           StringUtil::BytesToHumanReadableString(execution_memory_used_));
 	}
@@ -304,12 +305,13 @@ void ExcitationGraphManager::FinalizeMemoryReservationForExecution() {
 
 void ExcitationGraphManager::StopForMemory(const char *phase, idx_t requested, idx_t retained) {
 	memory_stopped_ = true;
+	auto whole_query_fallback = materialized_source_count_ == 0;
 	if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
-		std::cerr << "[RPT-Memory] transfer stopped phase=" << phase << " requested=" << requested
+		std::cerr << "[Bloom-Memory] transfer stopped phase=" << phase << " requested=" << requested
 		          << " retained=" << retained << " budget=" << memory_budget_
 		          << " completed_sources=" << materialized_source_count_ << '\n';
 	}
-	if (materialized_source_count_ == 0) {
+	if (whole_query_fallback) {
 		result_transfer_steps.clear();
 		executor_.Clear();
 		cascade_filters_.clear();
@@ -321,6 +323,10 @@ void ExcitationGraphManager::StopForMemory(const char *phase, idx_t requested, i
 		estimator_.reset();
 		ResizeMemoryReservation(0);
 	}
+	// Release abandoned query-local state before asking the log storage for
+	// memory on the whole-query fallback path.
+	LogBloomMemoryStopped(context, ++structured_log_sequence_, phase, whole_query_fallback, requested, retained,
+	                      memory_budget_, materialized_source_count_);
 }
 
 //===--------------------------------------------------------------------===//
@@ -565,7 +571,7 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		bool reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
 			auto dest_name = TableOperatorManager::GetTableName(*dest_op);
-			std::cerr << "  [RPT-Estimate] dest=[" << neighbor_id << "] name=" << dest_name
+			std::cerr << "  [Bloom-Estimate] dest=[" << neighbor_id << "] name=" << dest_name
 			          << " prior=" << static_cast<idx_t>(prior_card) << " baseline=" << static_cast<idx_t>(last_card)
 			          << " estimate=" << static_cast<idx_t>(current_card)
 			          << " decision_boundary=" << static_cast<idx_t>(last_card * config.excitation_threshold)
@@ -618,7 +624,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	row_id_filters_.clear();
 	direct_filters_.clear();
 
-	bool rpt_log = ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps;
+	bool bloom_diagnostic_log = ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps;
+	bool bloom_structured_log = BloomStructuredLoggingEnabled(context);
+	bool bloom_timing = bloom_diagnostic_log || bloom_structured_log;
 
 	// Per-phase wall-clock accounting, printed with the transfer log. All
 	// timestamps are taken only when logging is enabled.
@@ -628,9 +636,15 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	};
 	double init_ms = 0, mat_ms = 0, bf_ms = 0, est_ms = 0, finalize_ms = 0;
 
-	auto t_init = SteadyClock::now();
+	auto t_init = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
 	InitializeMemoryBudget();
 	auto estimated_sample_memory = EstimateInitialSampleMemory();
+	if (bloom_structured_log) {
+		LogBloomStarted(context, ++structured_log_sequence_,
+		                config.sampling.mode == RPTSamplingMode::PREPARED ? "prepared" : "instant",
+		                config.excitation_mode == RPTExcitationMode::TABLE_SIZE ? "table_size" : "join_key_ndv",
+		                config.sampling.target_rows, estimated_sample_memory, memory_budget_);
+	}
 	if (memory_budget_ == 0 || !FitsMemoryBudget(0, estimated_sample_memory)) {
 		StopForMemory("sample_admission", estimated_sample_memory, 0);
 		return;
@@ -642,12 +656,12 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		StopForMemory("sample_actual", 0, sampled_memory);
 		return;
 	}
-	if (rpt_log) {
+	if (bloom_timing) {
 		init_ms = elapsed_ms(t_init, SteadyClock::now());
 	}
 
-	if (rpt_log) {
-		std::cerr << "[RPT-SamplingConfig] mode="
+	if (bloom_diagnostic_log) {
+		std::cerr << "[Bloom-SamplingConfig] mode="
 		          << (config.sampling.mode == RPTSamplingMode::PREPARED ? "prepared" : "instant")
 		          << " target_rows=" << config.sampling.target_rows;
 		if (config.sampling.mode == RPTSamplingMode::INSTANT) {
@@ -666,7 +680,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			std::cerr << " exact_domains=" << equality_domains_.TrackedDomainCount();
 		}
 		std::cerr << '\n';
-		std::cerr << "[RPT-Excitation] === Initial table cardinalities ===" << '\n';
+		std::cerr << "[Bloom-Excitation] === Initial table cardinalities ===" << '\n';
 		vector<idx_t> table_ids;
 		table_ids.reserve(state_.Cardinalities().size());
 		for (auto &entry : state_.Cardinalities()) {
@@ -682,10 +696,11 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			          << "  baseline=" << static_cast<idx_t>(state_.Baseline(tid)) << (active ? "  ACTIVE" : "")
 			          << '\n';
 		}
-		std::cerr << "[RPT-Excitation] active_nodes count: " << state_.ActiveTableCount() << '\n';
+		std::cerr << "[Bloom-Excitation] active_nodes count: " << state_.ActiveTableCount() << '\n';
 	}
 
 	idx_t excitation_round = 0;
+	idx_t structured_transfer_count = 0;
 	std::stringstream execution_history;
 
 	// Main adaptive-excitation loop:
@@ -698,27 +713,27 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		idx_t table_id = state_.PopSmallestActiveTable();
 
 		excitation_round++;
-		if (rpt_log) {
+		if (bloom_diagnostic_log) {
 			execution_history << "R" << excitation_round << ":S" << table_id;
 		}
-		if (rpt_log) {
+		if (bloom_diagnostic_log) {
 			auto *src_op = table_operator_manager.GetTableOperator(table_id);
 			std::string src_name = src_op ? TableOperatorManager::GetTableName(*src_op) : "?";
-			std::cerr << "[RPT-Excitation] --- Round " << excitation_round << ": source=[" << table_id << "] "
+			std::cerr << "[Bloom-Excitation] --- Round " << excitation_round << ": source=[" << table_id << "] "
 			          << src_name << "  card=" << static_cast<idx_t>(state_.Cardinality(table_id))
 			          << "  remaining_active=" << state_.ActiveTableCount() << '\n';
 		}
 
 		auto informative_candidates = CollectOutgoingEdges(table_id);
 		if (informative_candidates.empty()) {
-			if (rpt_log) {
+			if (bloom_diagnostic_log) {
 				execution_history << ":no_edges;";
 			}
 			continue;
 		}
 
 		if (state_.Cardinality(table_id) == 0.0) {
-			if (rpt_log) {
+			if (bloom_diagnostic_log) {
 				execution_history << ":zero{";
 				for (auto &edge : informative_candidates) {
 					AppendEdgeSignature(execution_history, table_id, *edge);
@@ -732,7 +747,28 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			step.depends_on = state_.Dependencies(table_id);
 			step.create_bf = informative_candidates;
 
+			unordered_map<idx_t, idx_t> destination_rows_before;
+			if (bloom_structured_log) {
+				for (auto &edge : informative_candidates) {
+					destination_rows_before.emplace(edge->destination,
+					                                static_cast<idx_t>(state_.Cardinality(edge->destination)));
+				}
+			}
 			PropagateZeroCardinality(table_id, informative_candidates);
+			if (bloom_structured_log) {
+				auto *source_op = table_operator_manager.GetTableOperator(table_id);
+				auto source_name = source_op ? TableOperatorManager::GetTableName(*source_op) : string("?");
+				for (auto &edge : informative_candidates) {
+					auto *destination_op = table_operator_manager.GetTableOperator(edge->destination);
+					auto destination_name =
+					    destination_op ? TableOperatorManager::GetTableName(*destination_op) : string("?");
+					LogBloomTransfer(context, ++structured_log_sequence_, excitation_round, step.id, table_id,
+					                 source_name, edge->destination, destination_name, 0,
+					                 destination_rows_before.at(edge->destination), 0, edge->source_columns.size(),
+					                 false, 0);
+					structured_transfer_count++;
+				}
+			}
 			result_transfer_steps.push_back(std::move(step));
 			continue;
 		}
@@ -756,7 +792,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		} else if (registered_scanner && !executor_.OwnsMaterializedData(*source_op) &&
 		           registered_scanner->NeedsCompaction()) {
 			// CHUNK_GET is already in memory and remains owned by DuckDB. Applying
-			// pending filters creates exactly one RPT-owned compacted collection.
+			// pending filters creates exactly one Bloom-owned compacted collection.
 			auto *borrowed = registered_scanner->GetData();
 			collection_memory = borrowed ? borrowed->AllocationSize() : 0;
 			collection_copies = 1;
@@ -772,9 +808,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			break;
 		}
 
-		auto t_mat = SteadyClock::now();
+		auto t_mat = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
 		PrepareSourceTable(table_id);
-		double round_mat = rpt_log ? elapsed_ms(t_mat, SteadyClock::now()) : 0;
+		double round_mat = bloom_timing ? elapsed_ms(t_mat, SteadyClock::now()) : 0;
 		auto estimated_source_card = state_.Cardinality(table_id);
 		mat_ms += round_mat;
 		auto *source_scanner = executor_.Find(*source_op);
@@ -797,8 +833,8 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		}
 		materialized_source_count_++;
 		state_.CommitBaseline(table_id);
-		if (rpt_log && source_op) {
-			std::cerr << "  [RPT-Materialized] source=[" << table_id
+		if (bloom_diagnostic_log && source_op) {
+			std::cerr << "  [Bloom-Materialized] source=[" << table_id
 			          << "] name=" << TableOperatorManager::GetTableName(*source_op)
 			          << " estimated=" << static_cast<idx_t>(estimated_source_card)
 			          << " actual=" << (source_scanner ? source_scanner->Count() : 0) << '\n';
@@ -809,21 +845,21 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		step.table = source_op;
 		step.depends_on = state_.Dependencies(table_id);
 
-		auto t_bf = SteadyClock::now();
+		auto t_bf = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
 		auto effective_candidates = ActivateTables(table_id, informative_candidates);
-		double round_bf = rpt_log ? elapsed_ms(t_bf, SteadyClock::now()) : 0;
+		double round_bf = bloom_timing ? elapsed_ms(t_bf, SteadyClock::now()) : 0;
 		bf_ms += round_bf;
 		if (effective_candidates.empty()) {
-			if (rpt_log) {
+			if (bloom_diagnostic_log) {
 				execution_history << ":materialized_no_effective;";
 			}
-			if (rpt_log) {
+			if (bloom_diagnostic_log) {
 				std::cerr << "    [timing] materialize=" << round_mat << "ms build_bf=" << round_bf << "ms" << '\n';
 			}
 			continue;
 		}
 		step.create_bf = effective_candidates;
-		if (rpt_log) {
+		if (bloom_diagnostic_log) {
 			execution_history << ":actions{";
 			for (auto &edge : effective_candidates) {
 				AppendEdgeSignature(execution_history, table_id, *edge);
@@ -832,16 +868,38 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			execution_history << "};";
 		}
 
-		auto t_est = SteadyClock::now();
+		unordered_map<idx_t, idx_t> destination_rows_before;
+		if (bloom_structured_log) {
+			for (auto &edge : effective_candidates) {
+				destination_rows_before.emplace(edge->destination,
+				                                static_cast<idx_t>(state_.Cardinality(edge->destination)));
+			}
+		}
+		auto t_est = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
 		UpdateNeighborCardinalities(effective_candidates);
-		double round_est = rpt_log ? elapsed_ms(t_est, SteadyClock::now()) : 0;
+		double round_est = bloom_timing ? elapsed_ms(t_est, SteadyClock::now()) : 0;
 		est_ms += round_est;
-		if (rpt_log) {
+		if (bloom_structured_log) {
+			auto source_name = TableOperatorManager::GetTableName(*source_op);
+			auto source_rows = source_scanner ? source_scanner->Count() : 0;
+			for (auto &edge : effective_candidates) {
+				auto *destination_op = table_operator_manager.GetTableOperator(edge->destination);
+				auto destination_name =
+				    destination_op ? TableOperatorManager::GetTableName(*destination_op) : string("?");
+				LogBloomTransfer(context, ++structured_log_sequence_, excitation_round, step.id, table_id, source_name,
+				                 edge->destination, destination_name, source_rows,
+				                 destination_rows_before.at(edge->destination),
+				                 static_cast<idx_t>(state_.Cardinality(edge->destination)), edge->source_columns.size(),
+				                 state_.IsActive(edge->destination), round_mat + round_bf + round_est);
+				structured_transfer_count++;
+			}
+		}
+		if (bloom_diagnostic_log) {
 			std::cerr << "    [timing] materialize=" << round_mat << "ms build_bf=" << round_bf
 			          << "ms re_estimate=" << round_est << "ms" << '\n';
 		}
 
-		if (rpt_log) {
+		if (bloom_diagnostic_log) {
 			for (auto &edge : effective_candidates) {
 				auto *dest_op = table_operator_manager.GetTableOperator(edge->destination);
 				std::string dest_name = dest_op ? TableOperatorManager::GetTableName(*dest_op) : "?";
@@ -854,7 +912,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 
 		result_transfer_steps.push_back(std::move(step));
 	}
-	if (rpt_log) {
+	if (bloom_diagnostic_log) {
 		execution_history_ = execution_history.str();
 		execution_round_count_ = excitation_round;
 	}
@@ -862,13 +920,20 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		return;
 	}
 
-	auto t_fin = SteadyClock::now();
+	auto t_fin = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
 	GenerateJoinStageExecutionPlan();
-	if (rpt_log) {
+	if (bloom_timing) {
 		finalize_ms = elapsed_ms(t_fin, SteadyClock::now());
-		std::cerr << "[RPT-Timing] init_estimates=" << init_ms << "ms materialize=" << mat_ms << "ms build_bf=" << bf_ms
-		          << "ms re_estimate=" << est_ms << "ms finalize=" << finalize_ms
+	}
+	if (bloom_diagnostic_log) {
+		std::cerr << "[Bloom-Timing] init_estimates=" << init_ms << "ms materialize=" << mat_ms
+		          << "ms build_bf=" << bf_ms << "ms re_estimate=" << est_ms << "ms finalize=" << finalize_ms
 		          << "ms total=" << (init_ms + mat_ms + bf_ms + est_ms + finalize_ms) << "ms" << '\n';
+	}
+	if (bloom_structured_log) {
+		LogBloomTransferCompleted(context, ++structured_log_sequence_, memory_stopped_, excitation_round,
+		                          structured_transfer_count, materialized_source_count_, RetainedMemoryUsage(),
+		                          memory_budget_, init_ms, mat_ms, bf_ms, est_ms, finalize_ms);
 	}
 }
 

@@ -5,16 +5,16 @@
 require bloom
 
 statement ok
-SET rpt_sample_mode = 'prepared';
+SET bloom_sample_mode = 'prepared';
 
 statement ok
-SET rpt_sample_cache_dir = '{TEST_DIR}/prepared_seed_samples';
+SET bloom_sample_cache_dir = '{TEST_DIR}/prepared_seed_samples';
 
 statement ok
-SET rpt_sample_memory_cache = false;
+SET bloom_sample_memory_cache = false;
 
 statement ok
-SET rpt_sample_size = 127;
+SET bloom_sample_size = 127;
 
 statement ok
 ATTACH '{TEST_DIR}/rpt_seed.db' AS rpt_seed_db;
@@ -35,7 +35,7 @@ statement ok
 CHECKPOINT;
 
 statement ok
-SET rpt_sample_seed = 41;
+SET bloom_sample_seed = 41;
 
 query I
 SELECT count(*)
@@ -52,15 +52,15 @@ SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
 3
 
 query I
-SELECT loaded_samples FROM rpt_preload_samples();
+SELECT loaded_samples FROM bloom_preload_samples();
 ----
 3
 
 statement ok
-SET rpt_sample_seed = 42;
+SET bloom_sample_seed = 42;
 
 query I
-SELECT loaded_samples FROM rpt_preload_samples();
+SELECT loaded_samples FROM bloom_preload_samples();
 ----
 0
 
@@ -79,6 +79,6 @@ SELECT count(*) FROM glob('{TEST_DIR}/prepared_seed_samples/*.sample');
 6
 
 query I
-SELECT loaded_samples FROM rpt_preload_samples();
+SELECT loaded_samples FROM bloom_preload_samples();
 ----
 3

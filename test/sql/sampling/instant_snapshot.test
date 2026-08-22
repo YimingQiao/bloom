@@ -5,10 +5,10 @@
 require bloom
 
 statement ok
-SET rpt_sample_mode = 'instant';
+SET bloom_sample_mode = 'instant';
 
 statement ok
-SET rpt_instant_snapshot = true;
+SET bloom_instant_snapshot = true;
 
 statement ok
 CREATE TABLE rpt_snapshot_a AS
@@ -89,7 +89,7 @@ statement ok
 ROLLBACK;
 
 statement ok
-SET rpt_instant_snapshot = false;
+SET bloom_instant_snapshot = false;
 
 query I
 SELECT count(*)

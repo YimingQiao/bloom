@@ -146,7 +146,7 @@ int BitmapFilter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_appli
                          size_t &result_count) const {
 	int count = static_cast<int>(chunk.size());
 	if (bound_cols_applied.size() != 1) {
-		throw InternalException("RPT: Bitmap Filter needs bound_cols_applied.size() == 1!");
+		throw InternalException("Bloom: Bitmap Filter needs bound_cols_applied.size() == 1!");
 	}
 	auto &v = chunk.data[bound_cols_applied[0]];
 	v.Flatten();
@@ -178,7 +178,7 @@ int BitmapFilter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_appli
 		BitmapFilterLookup<uint32_t>(count, FlatVector::GetData(v), blocks, validity, results, result_count);
 		break;
 	default:
-		throw InternalException("RPT: Cannot support this vector type in bitmap filter! column index=%d, type=%s",
+		throw InternalException("Bloom: Cannot support this vector type in bitmap filter! column index=%d, type=%s",
 		                        bound_cols_applied[0], v.GetType().ToString());
 	}
 
@@ -189,7 +189,7 @@ int BitmapFilter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_appli
                          size_t &result_count) const {
 	int count = static_cast<int>(chunk.size());
 	if (bound_cols_applied.size() != 1) {
-		throw InternalException("RPT: Bitmap Filter needs bound_cols_applied.size() == 1!");
+		throw InternalException("Bloom: Bitmap Filter needs bound_cols_applied.size() == 1!");
 	}
 	auto &v = chunk.data[bound_cols_applied[0]];
 	v.Flatten();
@@ -221,7 +221,7 @@ int BitmapFilter::Lookup(DataChunk &chunk, const vector<idx_t> &bound_cols_appli
 		BitmapFilterLookup<uint32_t>(count, FlatVector::GetData(v), blocks, validity, results, result_count);
 		break;
 	default:
-		throw InternalException("RPT: Cannot support this vector type in bitmap filter! column index=%d, type=%s",
+		throw InternalException("Bloom: Cannot support this vector type in bitmap filter! column index=%d, type=%s",
 		                        bound_cols_applied[0], v.GetType().ToString());
 	}
 
@@ -232,7 +232,7 @@ template <bool PARALLEL>
 void BitmapFilter::InsertInternal(DataChunk &chunk, const vector<idx_t> &bound_cols_built) {
 	int count = static_cast<int>(chunk.size());
 	if (bound_cols_built.size() != 1) {
-		throw InternalException("RPT: Bitmap Filter needs bound_cols_applied.size() == 1!");
+		throw InternalException("Bloom: Bitmap Filter needs bound_cols_applied.size() == 1!");
 	}
 
 	auto &v = chunk.data[bound_cols_built[0]];
@@ -265,7 +265,7 @@ void BitmapFilter::InsertInternal(DataChunk &chunk, const vector<idx_t> &bound_c
 		BitmapFilterInsert<uint32_t, PARALLEL>(count, FlatVector::GetData(v), validity, blocks);
 		break;
 	default:
-		throw InternalException("RPT: Cannot support this vector type in bitmap filter!");
+		throw InternalException("Bloom: Cannot support this vector type in bitmap filter!");
 	}
 }
 

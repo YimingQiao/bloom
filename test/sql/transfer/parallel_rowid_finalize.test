@@ -8,7 +8,7 @@ statement ok
 SET threads = 8;
 
 statement ok
-SET rpt_late_materialize = true;
+SET bloom_late_materialize = true;
 
 statement ok
 CREATE TABLE rpt_rowid_source AS

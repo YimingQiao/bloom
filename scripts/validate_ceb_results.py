@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Compare CEB query results with Bloom RPT disabled and enabled.
+"""Compare CEB query results with Bloom disabled and enabled.
 
 CEB does not ship golden result files. This validator executes each query in
-separate DuckDB processes with Bloom RPT disabled and enabled, then compares
+separate DuckDB processes with Bloom disabled and enabled, then compares
 the CSV results as multisets.
 """
 
@@ -68,18 +68,18 @@ def sql_string(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 
-def query_sql(query_path, extension_path, enable_rpt, setup_sql):
+def query_sql(query_path, extension_path, enable_bloom, setup_sql):
     query = query_path.read_text(encoding="utf-8").strip()
     return f"""
 LOAD {sql_string(extension_path)};
-SET enable_rpt = {str(enable_rpt).lower()};
+SET enable_bloom = {str(enable_bloom).lower()};
 {setup_sql}
 {query}
 """
 
 
 def execute_query(
-    duckdb, db, extension, query_path, enable_rpt, setup_sql, env
+    duckdb, db, extension, query_path, enable_bloom, setup_sql, env
 ):
     return subprocess.run(
         [
@@ -89,7 +89,7 @@ def execute_query(
             "-noheader",
             str(db),
             "-c",
-            query_sql(query_path, extension, enable_rpt, setup_sql),
+            query_sql(query_path, extension, enable_bloom, setup_sql),
         ],
         text=True,
         capture_output=True,
@@ -150,9 +150,9 @@ def main():
         queries = queries[: args.limit]
 
     env = os.environ.copy()
-    sample_dir = ROOT / ".bench_cache" / "rpt_samples"
+    sample_dir = ROOT / ".bench_cache" / "bloom_samples"
     sample_dir.mkdir(parents=True, exist_ok=True)
-    env.setdefault("RPT_SAMPLE_CACHE_DIR", str(sample_dir))
+    env.setdefault("BLOOM_SAMPLE_CACHE_DIR", str(sample_dir))
 
     failures = 0
     for index, (relative, query_path) in enumerate(queries, 1):

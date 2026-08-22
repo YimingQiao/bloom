@@ -82,7 +82,7 @@ class SummarizeTimingsTest(unittest.TestCase):
 
 
 class DuckDBBaselineTest(unittest.TestCase):
-    def test_disables_rpt_on_candidate_runner(self):
+    def test_disables_bloom_on_candidate_runner(self):
         with TemporaryDirectory() as directory:
             args = SimpleNamespace(out_dir=Path(directory), threads=1, timed_runs=1)
             completed = SimpleNamespace(

@@ -87,7 +87,7 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 			auto *scanner = executor_.Find(*op);
 			D_ASSERT(scanner);
 			// Existing data is already retained. Compact() allocates one additional
-			// collection only when a native expression or RPT filter is pending.
+			// collection only when a native expression or Bloom filter is pending.
 			auto compaction_memory =
 			    scanner->NeedsCompaction() && scanner->GetData() ? scanner->GetData()->AllocationSize() : 0;
 			idx_t bitmap_memory = 0;
@@ -118,7 +118,7 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 				}
 			} else {
 				if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
-					std::cerr << "[RPT-Memory] finalization skipped table=" << table_id << " requested=" << requested
+					std::cerr << "[Bloom-Memory] finalization skipped table=" << table_id << " requested=" << requested
 					          << " retained=" << retained << " budget=" << memory_budget_ << '\n';
 				}
 				if (!scanner->IsPruned()) {
@@ -152,7 +152,7 @@ TableTransferResult ExcitationGraphManager::GetTableResult(idx_t table_id, Logic
 	// pushed filter that empties the scan at execution, may drop all rows.
 	// A direct CHUNK_GET is already an in-memory DuckDB table. Leave its owning
 	// node intact while the scanner still borrows that collection. If pending
-	// filters caused Compact() to create an RPT-owned replacement, the normal
+	// filters caused Compact() to create a Bloom-owned replacement, the normal
 	// MemoryScan path below is safe and reuses the filtered data.
 	auto *scanner = executor_.Find(op);
 	if (IsDirectColumnDataGet(op) && (!scanner || !executor_.OwnsMaterializedData(op))) {
@@ -345,7 +345,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		                                                      activation.sorted_dst.front(), domain_observation);
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
 			if (domain_observation.kind != EqualityDomainTracker::ObservationKind::UNTRACKED) {
-				std::cerr << "    [RPT-Domain] src=[" << source_table_id << "] dest=[" << activation.edge->destination
+				std::cerr << "    [Bloom-Domain] src=[" << source_table_id << "] dest=[" << activation.edge->destination
 				          << "] cols=" << activation.sorted_src.front().column_index << ">"
 				          << activation.sorted_dst.front().column_index
 				          << " observation=" << DomainObservationName(domain_observation.kind)
@@ -387,7 +387,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 			continue;
 		}
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
-			std::cerr << "  [RPT-Transfer] src=[" << source_table_id << "] dest=[" << activation.edge->destination
+			std::cerr << "  [Bloom-Transfer] src=[" << source_table_id << "] dest=[" << activation.edge->destination
 			          << "] source_cols=";
 			for (idx_t i = 0; i < activation.sorted_src.size(); i++) {
 				if (i > 0) {

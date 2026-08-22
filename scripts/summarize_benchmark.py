@@ -17,7 +17,7 @@ RESULT = re.compile(r"^(benchmark/\S+\.benchmark)\t(\d+)\t(\S+)\s*$")
 
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--rpt-log", type=Path, required=True)
+    parser.add_argument("--bloom-log", type=Path, required=True)
     parser.add_argument("--baseline-log", type=Path)
     parser.add_argument("--expected-queries", type=int, required=True)
     parser.add_argument("--timed-runs", type=int, default=5)
@@ -93,24 +93,24 @@ def public_side(side):
 
 def main():
     args = parse_args()
-    rpt = summarize_side(args.rpt_log, args.expected_queries, args.timed_runs)
-    output = {"rpt": public_side(rpt)}
+    bloom = summarize_side(args.bloom_log, args.expected_queries, args.timed_runs)
+    output = {"bloom": public_side(bloom)}
 
     baseline = None
     if args.baseline_log:
         baseline = summarize_side(args.baseline_log, args.expected_queries, args.timed_runs)
-        common = rpt["medians"].keys() & baseline["medians"].keys()
+        common = bloom["medians"].keys() & baseline["medians"].keys()
         comparison = {
             "common_complete_queries": len(common),
             "baseline_total_seconds": sum(baseline["medians"][query] for query in common),
-            "rpt_total_seconds": sum(rpt["medians"][query] for query in common),
+            "bloom_total_seconds": sum(bloom["medians"][query] for query in common),
             "queries_faster_with_rpt": sum(
-                baseline["medians"][query] > rpt["medians"][query] for query in common
+                baseline["medians"][query] > bloom["medians"][query] for query in common
             ),
         }
-        if comparison["rpt_total_seconds"]:
+        if comparison["bloom_total_seconds"]:
             comparison["total_speedup"] = (
-                comparison["baseline_total_seconds"] / comparison["rpt_total_seconds"]
+                comparison["baseline_total_seconds"] / comparison["bloom_total_seconds"]
             )
         output["baseline"] = public_side(baseline)
         output["comparison"] = comparison
@@ -118,7 +118,7 @@ def main():
     if args.json:
         print(json.dumps(output, indent=2, sort_keys=True))
     else:
-        for name, side in (("RPT", rpt), ("baseline", baseline)):
+        for name, side in (("Bloom", bloom), ("baseline", baseline)):
             if side is None:
                 continue
             print(
@@ -136,10 +136,10 @@ def main():
             print(
                 f"comparison: {comparison['common_complete_queries']} common queries, "
                 f"{comparison.get('total_speedup', 0):.6f}x total speedup, "
-                f"{comparison['queries_faster_with_rpt']} queries faster with RPT"
+                f"{comparison['queries_faster_with_rpt']} queries faster with Bloom"
             )
 
-    complete = rpt["complete"] and (baseline is None or baseline["complete"])
+    complete = bloom["complete"] and (baseline is None or baseline["complete"])
     if not complete and not args.allow_incomplete:
         raise SystemExit(1)
 

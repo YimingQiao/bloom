@@ -27,7 +27,7 @@ SamplingCardinalityEstimator::SamplingCardinalityEstimator(ClientContext &contex
 
 bool SamplingCardinalityEstimator::LogEnabled() const {
 	Value setting;
-	return context_.TryGetCurrentSetting("rpt_log_transfer_steps", setting) && setting.GetValue<bool>();
+	return context_.TryGetCurrentSetting("bloom_log_transfer_steps", setting) && setting.GetValue<bool>();
 }
 
 // Rewrite every BOUND_COLUMN_REF whose binding appears in `bindings` to a
@@ -228,7 +228,7 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		// we have no evidence the table is actually empty.
 		auto fallback = MaxValue<idx_t>(op.estimated_cardinality, 1);
 		if (LogEnabled()) {
-			std::cerr << "  [RPT-SampleEstimate] table=" << sample.table_name
+			std::cerr << "  [Bloom-SampleEstimate] table=" << sample.table_name
 			          << " sample_rows=0 local_survivors=0 transfer_survivors=0 estimate=" << fallback
 			          << " filters=" << filters.size() << " status=fallback" << '\n';
 		}
@@ -268,7 +268,7 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 	if (LogEnabled()) {
 		auto elapsed =
 		    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - probe_started).count();
-		std::cerr << "  [RPT-SampleEvaluate] table=" << sample.table_name
+		std::cerr << "  [Bloom-SampleEvaluate] table=" << sample.table_name
 		          << " phase=transfer filters=" << bf_filters.size() << " input=" << sample.local_survivors
 		          << " survivors=" << survivors << " elapsed=" << elapsed << "ms" << '\n';
 	}
@@ -304,7 +304,7 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		}
 	}
 	if (LogEnabled()) {
-		std::cerr << "  [RPT-SampleEstimate] table=" << sample.table_name << " sample_rows=" << sample.sampled_rows
+		std::cerr << "  [Bloom-SampleEstimate] table=" << sample.table_name << " sample_rows=" << sample.sampled_rows
 		          << " local_survivors=" << sample.local_survivors << " transfer_survivors=" << survivors
 		          << " estimate=" << est << " filters=" << bf_filters.size() << " status=" << estimate_status << '\n';
 	}
