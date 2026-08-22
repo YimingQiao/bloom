@@ -192,14 +192,17 @@ ORDER BY connection_id, query_id, event_sequence;
 CALL disable_logging();
 ```
 
-For example, a selective two-table join can produce this timeline:
+For example, selected columns from a two-table join can look like this:
 
-| event_sequence | event | status | transfer | effect |
-|---:|---|---|---|---|
-| 1 | `start` | `running` | | Bloom started with the configured modes and memory budget. |
-| 2 | `transfer` | `applied` | `demo_right` -> `demo_left` | Estimated destination rows fell from 10000 to 122. |
-| 3 | `transfer` | `applied` | `demo_left` -> `demo_right` | Estimated destination rows fell from 122 to 100. |
-| 4 | `transfer_complete` | `applied` | | Two sources and two transfers completed. |
+| event_sequence | event | source_table | destination_table | source_rows | estimated_destination_rows_before | estimated_destination_rows_after | completed_sources | transfer_count | elapsed_ms |
+|---:|---|---|---|---:|---:|---:|---:|---:|---:|
+| 1 | `start` | NULL | NULL | NULL | NULL | NULL | NULL | NULL | NULL |
+| 2 | `transfer` | `memory.main.demo_right` | `memory.main.demo_left` | 100 | 10000 | 122 | NULL | NULL | NULL |
+| 3 | `transfer` | `memory.main.demo_left` | `memory.main.demo_right` | 100 | 122 | 100 | NULL | NULL | NULL |
+| 4 | `transfer_complete` | NULL | NULL | NULL | NULL | NULL | 2 | 2 | 2.058 |
+
+All values above come from typed log columns; the elapsed time is illustrative
+and depends on the workload and machine.
 
 The log shows why Bloom did not run (`skipped.reason`), which tables exchanged
 filters and how their estimated cardinalities changed (`transfer`), where a
