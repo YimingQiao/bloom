@@ -255,3 +255,16 @@ robust predicate transfer across different query engines.
 - [BloomPG](https://github.com/YimingQiao/bloompg) — PostgreSQL extension.
 - [Bloom for Apache DataFusion](https://github.com/YimingQiao/datafusion-bloom)
   — Apache DataFusion library.
+
+## References
+
+- Yiming Qiao, Peter Boncz, and Huanchen Zhang,
+  [*Robust Predicate Transfer with Dynamic Execution*](https://duckdb.org/library/robust-predicate-transfer-vldb/),
+  PVLDB 2026.
+- Junyi Zhao, Kai Su, Yifei Yang, Xiangyao Yu, Paraschos Koutris, and Huanchen
+  Zhang,
+  [*Debunking the Myth of Join Ordering: Toward Robust SQL Analytics*](https://arxiv.org/abs/2502.15181),
+  SIGMOD 2025.
+- Yifei Yang, Hangdong Zhao, Xiangyao Yu, and Paraschos Koutris,
+  [*Predicate Transfer: Efficient Pre-Filtering on Multi-Join Queries*](https://arxiv.org/abs/2307.15255),
+  CIDR 2024.
