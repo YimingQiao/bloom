@@ -29,6 +29,9 @@ public:
 	virtual idx_t MemoryUsage() const = 0;
 	//! Exact number of non-NULL keys represented by this filter when its
 	//! physical representation can prove it. Approximate filters return invalid.
+	virtual bool IsExact() const {
+		return false;
+	}
 	virtual optional_idx ExactDistinctCount() const {
 		return optional_idx();
 	}

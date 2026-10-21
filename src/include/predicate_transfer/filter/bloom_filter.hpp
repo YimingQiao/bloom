@@ -258,6 +258,9 @@ public:
 	void MergeBuildState(PrefixRangeFilter::BuildState &state);
 	void SetValid() override;
 	size_t Hash() const override;
+	bool IsExact() const override {
+		return true;
+	}
 	optional_idx ExactDistinctCount() const override {
 		return exact_distinct_count_;
 	}

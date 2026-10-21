@@ -10,6 +10,7 @@
 #include "duckdb/storage/buffer_manager.hpp"
 
 #include <functional>
+#include <iostream>
 
 namespace duckdb {
 
@@ -330,6 +331,10 @@ TableScanner::CompactResult TableScanner::Compact(const vector<StatsRequest> &st
 	}
 
 	if (new_data) {
+		Value diagnostic;
+		if (context_.TryGetCurrentSetting("bloom_log_transfer_steps", diagnostic) && diagnostic.GetValue<bool>()) {
+			std::cerr << "    [Bloom-Compact] input=" << Count() << " output=" << new_data->Count() << '\n';
+		}
 		materialization_.ReplaceData(std::move(new_data));
 		filters_.Clear();
 	}

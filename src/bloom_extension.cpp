@@ -272,6 +272,9 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	if (input.context.TryGetCurrentSetting("bloom_sample_memory_cache", setting)) {
 		config.sampling.prepared_memory_cache = setting.GetValue<bool>();
 	}
+	if (input.context.TryGetCurrentSetting("bloom_key_lineage", setting)) {
+		config.key_lineage = setting.GetValue<bool>();
+	}
 	if (input.context.TryGetCurrentSetting("bloom_log_transfer_steps", setting)) {
 		config.log_transfer_steps = setting.GetValue<bool>();
 	}
@@ -348,6 +351,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Cache prepared samples in the process object cache to skip disk reloads across queries "
 	                          "(advanced)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SAMPLE_MEMORY_CACHE", true)));
+	config.AddExtensionOption("bloom_key_lineage", "Experimental complete-key L/C lineage with applied-filter feedback",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_KEY_LINEAGE", false)));
 	config.AddExtensionOption("bloom_log_transfer_steps", "Log the transfer plan to stderr for debugging",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LOG_TRANSFER_STEPS", false)));
 	config.AddExtensionOption(

@@ -1,0 +1,60 @@
+# name: test/sql/key_lineage.test
+# description: complete composite keys, pending feedback and independent queries under L/C
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET bloom_key_lineage=true;
+
+statement ok
+CREATE TABLE lc_a(x INTEGER,y INTEGER);
+
+statement ok
+INSERT INTO lc_a VALUES (1,1),(2,2),(1,1),(NULL,1);
+
+statement ok
+CREATE TABLE lc_b(x INTEGER,y INTEGER,z INTEGER);
+
+statement ok
+INSERT INTO lc_b VALUES (1,1,10),(1,2,20),(2,2,20),(3,3,30),(NULL,1,10);
+
+statement ok
+CREATE TABLE lc_c(z INTEGER);
+
+statement ok
+INSERT INTO lc_c VALUES (10),(10);
+
+query III rowsort
+SELECT a.x,b.y,c.z FROM lc_a a JOIN lc_b b ON a.x=b.x AND a.y=b.y JOIN lc_c c ON b.z=c.z;
+----
+1	1	10
+1	1	10
+1	1	10
+1	1	10
+
+# The next query must not reuse tokens/filters describing the old relation.
+statement ok
+INSERT INTO lc_c VALUES (20);
+
+query I
+SELECT count(*) FROM lc_a a JOIN lc_b b ON a.x=b.x AND a.y=b.y JOIN lc_c c ON b.z=c.z;
+----
+5
+
+# A narrower complete key does not inherit an arbitrary composite constraint.
+query I
+SELECT count(*) FROM lc_a a JOIN lc_b b ON a.x=b.x JOIN lc_c c ON b.z=c.z;
+----
+7
+
+statement ok
+DELETE FROM lc_c;
+
+query I
+SELECT count(*) FROM lc_a a JOIN lc_b b ON a.x=b.x AND a.y=b.y JOIN lc_c c ON b.z=c.z;
+----
+0
+
+statement ok
+RESET bloom_key_lineage;

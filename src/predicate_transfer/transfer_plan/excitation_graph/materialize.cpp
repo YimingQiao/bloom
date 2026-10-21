@@ -67,7 +67,7 @@ idx_t ExcitationGraphManager::ComputeBaseTableRowIdSpan(const LogicalOperator &o
 void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 	for (auto &entry : cascade_filters_) {
 		idx_t table_id = entry.first;
-		if (state_.HasCardinality(table_id) && state_.Cardinality(table_id) == 0.0) {
+		if (!config.key_lineage && state_.HasCardinality(table_id) && state_.Cardinality(table_id) == 0.0) {
 			continue;
 		}
 		auto &cascade_filters = entry.second;
@@ -236,6 +236,40 @@ void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 	executor_.EnsureMaterialized(*op, required);
 }
 
+// Pending receipt is deliberately separate from satisfied constraints. GET
+// pushdown uses threshold 1.0 (mandatory evaluation); residual/composite
+// predicates remain on the scanner and are evaluated by Compact().
+bool ExcitationGraphManager::CommitKeyFilters(idx_t table_id) {
+	auto *op = table_operator_manager.GetTableOperator(table_id);
+	auto *scanner = executor_.Find(*op);
+	D_ASSERT(scanner && scanner->IsMaterialized());
+	bool initial = key_processed_.insert(table_id).second;
+	vector<pair<vector<ColumnBinding>, LineageTracker::Snapshot>> applied;
+	for (auto &filter : cascade_filters_[table_id]) {
+		if (filter.applied) {
+			continue;
+		}
+		for (auto &binding : filter.bindings) {
+			if (scanner->FindChunkCol(binding) == DConstants::INVALID_INDEX) {
+				throw InternalException("Missing pending-filter key during L/C commit");
+			}
+		}
+		applied.emplace_back(filter.bindings, filter.acceptance);
+		filter.applied = true;
+	}
+	auto before = scanner->Count();
+	auto after = scanner->Compact().row_count;
+	state_.Lineage().ApplyKeyFilters(table_id, applied, after < before, initial);
+	state_.AddTable(table_id, after, after, false);
+	key_pending_.erase(table_id);
+	if (config.log_transfer_steps || ClientConfig::GetConfig(context).enable_profiler) {
+		std::cerr << "  [Bloom-KeyLineage] table=" << table_id << " initial=" << initial << " input=" << before
+		          << " output=" << after << " applied=" << applied.size()
+		          << " broadcast=" << (initial || after < before) << '\n';
+	}
+	return initial || after < before;
+}
+
 vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t source_table_id,
                                                                      const vector<shared_ptr<GraphEdge>> &edges) {
 	struct PreparedActivation {
@@ -334,8 +368,8 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		}
 
 		EqualityDomainTracker::Observation domain_observation;
-		if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV && activation.sorted_src.size() == 1 &&
-		    activation.sorted_dst.size() == 1) {
+		if (!config.key_lineage && config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV &&
+		    activation.sorted_src.size() == 1 && activation.sorted_dst.size() == 1) {
 			auto exact_ndv = activation.filter->ExactDistinctCount();
 			if (exact_ndv.IsValid()) {
 				domain_observation = equality_domains_.Observe(activation.sorted_src.front(), exact_ndv.GetIndex());
@@ -366,7 +400,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 
 		auto &dest_filters = cascade_filters_[activation.edge->destination];
 		bool subsumed = false;
-		for (auto it = dest_filters.begin(); it != dest_filters.end();) {
+		for (auto it = dest_filters.begin(); !config.key_lineage && it != dest_filters.end();) {
 			if (it->bindings != activation.sorted_dst) {
 				++it;
 				continue;
@@ -410,6 +444,19 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		CascadeFilter cf;
 		cf.bindings = activation.sorted_dst;
 		cf.filter = activation.filter;
+		if (config.key_lineage) {
+			if (activation.filter->IsExact()) {
+				cf.acceptance = activation.snapshot;
+			} else {
+				auto found = acceptance_lineage_.find(activation.filter.get());
+				if (found == acceptance_lineage_.end()) {
+					found = acceptance_lineage_
+					            .emplace(activation.filter.get(), state_.Lineage().NewPredicate(activation.sorted_src))
+					            .first;
+				}
+				cf.acceptance = found->second;
+			}
+		}
 		cf.lineage = std::move(activation.snapshot);
 		dest_filters.push_back(std::move(cf));
 		auto *dest_op = table_operator_manager.GetTableOperator(activation.edge->destination);

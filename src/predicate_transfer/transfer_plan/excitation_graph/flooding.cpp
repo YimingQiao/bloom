@@ -356,6 +356,9 @@ idx_t ExcitationGraphManager::ComputeBaseTableRows(const LogicalOperator &op) co
 
 void ExcitationGraphManager::InitializeWorkingSet() {
 	state_.Reset();
+	if (config.key_lineage) {
+		state_.Lineage().EnableKeyLineage();
+	}
 	filter_cache_ = RPTFilterCache {};
 	if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV) {
 		equality_domains_.Reset(table_groups);
@@ -382,6 +385,9 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 		}
 		for (auto &neighbor_entry : nm_it->second) {
 			for (auto &edge : neighbor_entry.second) {
+				if (config.key_lineage) {
+					state_.Lineage().SeedKey(edge.left_bindings);
+				}
 				for (auto &b : edge.left_bindings) {
 					state_.Lineage().SeedColumn(b);
 				}
@@ -425,7 +431,7 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 		double true_card = static_cast<double>(estimator_->Estimate(op));
 		double base_rows = static_cast<double>(ComputeBaseTableRows(op));
 		// Only excite if local filters reduce cardinality enough.
-		bool will_be_active = true_card < base_rows * config.excitation_threshold;
+		bool will_be_active = config.key_lineage || true_card < base_rows * config.excitation_threshold;
 		init_lineage(table_id);
 		state_.AddTable(table_id, true_card, base_rows, will_be_active);
 	}
@@ -462,7 +468,7 @@ shared_ptr<GraphEdge> ExcitationGraphManager::MakeBloomFilterEdge(idx_t source_i
 	return bf_edge;
 }
 
-vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t table_id) const {
+vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t table_id, bool pending) const {
 	vector<shared_ptr<GraphEdge>> result;
 	auto it = neighbor_matrix.find(table_id);
 	if (it == neighbor_matrix.end()) {
@@ -476,12 +482,12 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t
 			continue;
 		}
 		auto neighbor_cardinality = state_.Cardinality(neighbor_id);
-		if (neighbor_cardinality == 0.0) {
+		if (!config.key_lineage && neighbor_cardinality == 0.0) {
 			continue;
 		}
 		// Skip sending filters to tables that are already small enough —
 		// filtering them further has negligible benefit but costs materialization.
-		if (neighbor_cardinality <= static_cast<double>(config.small_table_threshold)) {
+		if (!config.key_lineage && neighbor_cardinality <= static_cast<double>(config.small_table_threshold)) {
 			continue;
 		}
 
@@ -489,7 +495,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t
 			if (edge.protect_right) {
 				continue;
 			}
-			if (!state_.Lineage().EdgeCarriesNewInfo(edge)) {
+			if (!pending && !state_.Lineage().EdgeCarriesNewInfo(edge)) {
 				continue;
 			}
 			result.push_back(MakeBloomFilterEdge(table_id, neighbor_id, edge));
@@ -563,12 +569,23 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		// Update both table-level and per-column lineage (the latter is read
 		// by the next round's CollectOutgoingEdges and ActivateTable for
 		// subsumption, in column-granular mode).
-		state_.Lineage().Propagate(*edge);
+		if (!config.key_lineage) {
+			state_.Lineage().Propagate(*edge);
+		}
 
 		state_.AddDependency(neighbor_id, edge->source);
 
 		auto last_card = state_.Baseline(neighbor_id);
-		bool reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
+		bool reactivated;
+		if (config.key_lineage) {
+			// Queue pending evaluation; broadcasting is permitted only after an
+			// observed shrink (or the table's initial processing).
+			state_.AddTable(neighbor_id, current_card, last_card, true);
+			key_pending_.insert(neighbor_id);
+			reactivated = true;
+		} else {
+			reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
+		}
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
 			auto dest_name = TableOperatorManager::GetTableName(*dest_op);
 			std::cerr << "  [Bloom-Estimate] dest=[" << neighbor_id << "] name=" << dest_name
@@ -623,6 +640,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	cascade_filters_.clear();
 	row_id_filters_.clear();
 	direct_filters_.clear();
+	key_processed_.clear();
+	key_pending_.clear();
+	acceptance_lineage_.clear();
 
 	bool bloom_diagnostic_log = ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps;
 	bool bloom_structured_log = BloomStructuredLoggingEnabled(context);
@@ -724,7 +744,8 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			          << "  remaining_active=" << state_.ActiveTableCount() << '\n';
 		}
 
-		auto informative_candidates = CollectOutgoingEdges(table_id);
+		auto informative_candidates =
+		    CollectOutgoingEdges(table_id, config.key_lineage && key_pending_.count(table_id));
 		if (informative_candidates.empty()) {
 			if (bloom_diagnostic_log) {
 				execution_history << ":no_edges;";
@@ -732,7 +753,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			continue;
 		}
 
-		if (state_.Cardinality(table_id) == 0.0) {
+		if (!config.key_lineage && state_.Cardinality(table_id) == 0.0) {
 			if (bloom_diagnostic_log) {
 				execution_history << ":zero{";
 				for (auto &edge : informative_candidates) {
@@ -832,6 +853,20 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			break;
 		}
 		materialized_source_count_++;
+		if (config.key_lineage) {
+			auto t_commit = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
+			auto broadcast = CommitKeyFilters(table_id);
+			if (bloom_timing) {
+				mat_ms += elapsed_ms(t_commit, SteadyClock::now());
+			}
+			if (!broadcast) {
+				continue;
+			}
+			informative_candidates = CollectOutgoingEdges(table_id);
+			if (informative_candidates.empty()) {
+				continue;
+			}
+		}
 		state_.CommitBaseline(table_id);
 		if (bloom_diagnostic_log && source_op) {
 			std::cerr << "  [Bloom-Materialized] source=[" << table_id

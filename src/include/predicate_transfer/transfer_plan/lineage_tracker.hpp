@@ -29,6 +29,9 @@ namespace duckdb {
 //!   - Table granularity: per-lineage_id only.
 //!
 //! Select via -DBLOOM_LINEAGE_TABLE_GRANULARITY at build time.
+//! Experimental runtime key mode instead records immutable projection/predicate
+//! tokens separately as result L and satisfied C for each complete key. Receipt
+//! alone never changes C; ApplyKeyFilters commits actual filtering feedback.
 class LineageTracker {
 public:
 	using LineageSet = unordered_set<idx_t>;
@@ -45,7 +48,8 @@ public:
 
 	//! Snapshot of lineage at the moment a cascade filter is attached.
 	//! - `columns` is populated only in column mode (used for subsumption).
-	//! - `lineages` is always populated (used as the oracle cache key).
+	//! - `lineages` is always populated (used as the oracle cache key); in
+	//!   runtime key mode it holds immutable predicate tokens instead of table IDs.
 	//! - `key_columns` is the canonicalised source key columns in edge order:
 	//!   it identifies WHICH columns the built BF hashes (and their arity).
 	//!   Cache keys must include it — the per-column lineage sets of different
@@ -55,6 +59,7 @@ public:
 	//!   (observed on TPC-H q09: supplier probed with 1 of 2 key columns →
 	//!   nearly all rows wrongly filtered → empty query result).
 	struct Snapshot {
+		bool key_based = false;
 		ColumnSet columns;
 		LineageSet lineages;
 		vector<ColumnBinding> key_columns;
@@ -65,6 +70,17 @@ public:
 	};
 
 	void Clear();
+	void EnableKeyLineage() {
+		key_based_ = true;
+	}
+	void SeedKey(const vector<ColumnBinding> &key);
+	//! Commit only filters actually evaluated on these rows. A batch containing
+	//! a cross-key predicate conservatively creates a new projection token.
+	void ApplyKeyFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters, bool shrunk,
+	                     bool initial);
+	//! An approximate filter proves its acceptance predicate, not its source's
+	//! exact domain. Give that predicate a separate immutable identity.
+	Snapshot NewPredicate(const vector<ColumnBinding> &key);
 
 	//! Declare a set of table ids as aliases — all members share the same
 	//! underlying data. Internally assigns one canonical lineage_id to the
@@ -102,6 +118,15 @@ public:
 	idx_t LineageOf(idx_t table_id) const;
 
 private:
+	struct KeyState {
+		vector<ColumnBinding> key;
+		LineageSet result;
+		LineageSet constraints;
+	};
+	const KeyState &FindKey(const vector<ColumnBinding> &key) const;
+	unordered_map<idx_t, vector<KeyState>> keys_;
+	idx_t next_token_ = 0;
+	bool key_based_ = false;
 	ColumnBinding Canon(const ColumnBinding &col) const;
 	ColumnSet UnionColumnLineage(const vector<ColumnBinding> &cols) const;
 
