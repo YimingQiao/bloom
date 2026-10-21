@@ -157,7 +157,9 @@ void ExcitationGraphManager::EstimateFilterMemory(idx_t rows, const vector<share
 			sorted_bindings.push_back(edge->source_columns[index]);
 			sorted_types.push_back(edge->return_types[index]);
 		}
-		if (config.enable_filter_cache) {
+		// A pending L/C commit can change the projection token before the
+		// build. A hit on the pre-commit snapshot does not fund that new filter.
+		if (config.enable_filter_cache && !(config.key_lineage && key_pending_.count(edge->source))) {
 			auto source_lineage_id = state_.Lineage().LineageOf(edge->source);
 			auto snapshot = state_.Lineage().MakeSnapshot(edge->source, sorted_bindings);
 			if (filter_cache_.Lookup(source_lineage_id, snapshot)) {

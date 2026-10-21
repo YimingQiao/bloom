@@ -36,6 +36,7 @@ def equivalent(a,b):
         if len(ar)!=len(br): return False
         for x,y in zip(ar,br):
             if x==y: continue
+            if re.fullmatch(r'[+-]?\d+',x) and re.fullmatch(r'[+-]?\d+',y): return False
             try:
                 if math.isclose(float(x),float(y),rel_tol=1e-10,abs_tol=1e-10): continue
             except ValueError: pass

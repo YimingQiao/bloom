@@ -73,8 +73,10 @@ build/key_lineage_test
 The experiment theme (harness, data pointers, raw logs, manifests and reports):
 `/home/yiming/projects/sspt-experiments/key-lineage-bloom/`.
 Databases stay in their existing locations and are opened read-only.
-The harness runs 70 synthetic/random bag-equivalence fixtures and JOB (113),
-STATS-CEB (146), TPC-H SF1 (22). Benchmark queries run unchanged. Diagnostics
+The harness attempts 70 synthetic/random bag-equivalence fixtures and JOB (113),
+STATS-CEB (146), TPC-H SF1 (22). The completed paired comparison covers
+113 / 142 / 22 queries; STATS-CEB 58, 120, 122, 126 hit the 20-second reference
+timeout. See RESULTS.md and the small results/ snapshot. Benchmark queries run unchanged. Diagnostics
 are collected separately from timings. Native runner: one warmup, three timed
 runs, one thread; compare the sum of per-query medians and paired-query ratios.
 
