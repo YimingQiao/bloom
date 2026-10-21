@@ -92,7 +92,7 @@ private:
 
 	// Manager-side helpers coordinating TransferExecutor
 	void PrepareSourceTable(idx_t source_table_id);
-	bool CommitKeyFilters(idx_t table_id);
+	void CommitKeyFilters(idx_t table_id);
 	void GenerateJoinStageExecutionPlan();
 
 	vector<shared_ptr<GraphEdge>> ActivateTables(idx_t source_table_id, const vector<shared_ptr<GraphEdge>> &edges);

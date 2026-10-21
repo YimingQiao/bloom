@@ -433,7 +433,7 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 		double true_card = static_cast<double>(estimator_->Estimate(op));
 		double base_rows = static_cast<double>(ComputeBaseTableRows(op));
 		// Only excite if local filters reduce cardinality enough.
-		bool will_be_active = config.key_lineage || true_card < base_rows * config.excitation_threshold;
+		bool will_be_active = true_card < base_rows * config.excitation_threshold;
 		init_lineage(table_id);
 		state_.AddTable(table_id, true_card, base_rows, will_be_active);
 	}
@@ -484,12 +484,12 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t
 			continue;
 		}
 		auto neighbor_cardinality = state_.Cardinality(neighbor_id);
-		if (!config.key_lineage && neighbor_cardinality == 0.0) {
+		if (neighbor_cardinality == 0.0) {
 			continue;
 		}
 		// Skip sending filters to tables that are already small enough —
 		// filtering them further has negligible benefit but costs materialization.
-		if (!config.key_lineage && neighbor_cardinality <= static_cast<double>(config.small_table_threshold)) {
+		if (neighbor_cardinality <= static_cast<double>(config.small_table_threshold)) {
 			continue;
 		}
 
@@ -578,16 +578,12 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		state_.AddDependency(neighbor_id, edge->source);
 
 		auto last_card = state_.Baseline(neighbor_id);
-		bool reactivated;
 		if (config.key_lineage) {
-			// Queue pending evaluation; broadcasting is permitted only after an
-			// observed shrink (or the table's initial processing).
-			state_.AddTable(neighbor_id, current_card, last_card, true);
+			// Receipt invalidates the source snapshot, but does not change the
+			// existing sampling-based activation policy or satisfy constraints.
 			key_pending_.insert(neighbor_id);
-			reactivated = true;
-		} else {
-			reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
 		}
+		bool reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
 			auto dest_name = TableOperatorManager::GetTableName(*dest_op);
 			std::cerr << "  [Bloom-Estimate] dest=[" << neighbor_id << "] name=" << dest_name
@@ -615,9 +611,12 @@ void ExcitationGraphManager::PropagateZeroCardinality(idx_t table_id, const vect
 
 		state_.MarkZero(neighbor_id);
 
-		// Destination inherits the source lineage even though the filter
-		// itself is just an empty-result marker.
-		state_.Lineage().Propagate(*edge);
+		// Preserve the estimated-zero shortcut, but do not turn an estimate
+		// into a proof that an exact key constraint has been applied.
+		if (!config.key_lineage) {
+			state_.Lineage().Propagate(*edge);
+		}
+		key_pending_.erase(neighbor_id);
 
 		state_.AddDependency(neighbor_id, table_id);
 		cascade_filters_[neighbor_id].clear();
@@ -755,7 +754,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			continue;
 		}
 
-		if (!config.key_lineage && state_.Cardinality(table_id) == 0.0) {
+		if (state_.Cardinality(table_id) == 0.0) {
 			if (bloom_diagnostic_log) {
 				execution_history << ":zero{";
 				for (auto &edge : informative_candidates) {
@@ -857,12 +856,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		materialized_source_count_++;
 		if (config.key_lineage) {
 			auto t_commit = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
-			auto broadcast = CommitKeyFilters(table_id);
+			CommitKeyFilters(table_id);
 			if (bloom_timing) {
 				mat_ms += elapsed_ms(t_commit, SteadyClock::now());
-			}
-			if (!broadcast) {
-				continue;
 			}
 			informative_candidates = CollectOutgoingEdges(table_id);
 			if (informative_candidates.empty()) {

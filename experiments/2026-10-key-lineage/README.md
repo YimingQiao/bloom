@@ -24,10 +24,14 @@ Both variants use the same compiled engine. This is an engine prototype of the
   Approximate filters receive independent predicate tokens; exact bitmap /
   prefix-range filters can carry the source L. This sacrifices pruning rather
   than claiming that false positives satisfy an exact-domain constraint.
-- Every eligible table starts active. Receipt queues pending evaluation;
-  only initial processing or an observed row decrease broadcasts again.
-  An estimated zero does not substitute for filtering real rows. The old
-  small-table and excitation-threshold early stops are not used in this mode.
+- Scheduling remains the legacy policy: the same initial activation,
+  sampling-based reactivation, estimated cardinalities/baselines, small-table
+  skip, estimated-zero shortcut, and optional exact-NDV suppression. Pending
+  receipt only invalidates the source lineage snapshot; it does not activate
+  a table. Actual row decrease updates L/C, not the scheduler.
+- Preserve filter subsumption for exact filters. In key mode, source L cannot
+  prove containment between approximate Bloom acceptance domains, so that
+  lineage-based shortcut is conservatively skipped for approximate filters.
 - CDC aliases retain separate mutable states because their materialized copies
   can be compacted independently.
 
@@ -43,11 +47,16 @@ a batch with any cross-key predicate is conservatively treated as cross-key.
 This can retain more tokens / perform more transfers than the ideal per-filter
 feedback simulator. There is no extra distinct-key computation.
 
-The experiment compares **complete policies**, not lineage pruning alone:
-initial activation and stopping also differ from the legacy mode. It checks
-query-result equivalence; it does not establish exact full reduction for Bloom
+The historical results in RESULTS.md compare **complete policies** (through
+`6a4ef19`), including all-table initial activation. They do not describe the
+current lineage-only revision, which restores the legacy scheduling policy.
+The current implementation checks query-result equivalence; it does not
+establish exact full reduction for Bloom
 filters, nullable keys, cyclic joins, protected optimizer regions, or queries
-where memory admission stops transfer. Materialized tuple counts are observed
+where memory admission stops transfer. Selective initial activation and
+sampling/size-based skipping can also omit necessary transfers even with exact
+filters; safe lineage pruning alone does not guarantee full reduction under
+those scheduling heuristics. Materialized tuple counts are observed
 physical allocations (initial results plus compacted replacements), not the
 paper's abstract optimal `2*O` cost and not byte traffic.
 
@@ -86,3 +95,23 @@ python3 /home/yiming/projects/sspt-experiments/key-lineage-bloom/code/run.py \
   --out /home/yiming/projects/sspt-experiments/key-lineage-bloom/results/NEW-RUN \
   --fixtures --runs 3
 ```
+
+## Lineage-only revision validation (2026-10-21)
+
+Restored the legacy initial activation, reactivation thresholds, estimated
+cardinality/baseline updates, small-table / estimated-zero skips, and exact-NDV
+suppression. L/C commits no longer decide whether a table broadcasts. Estimated
+zero and NDV shortcuts leave C untouched rather than claiming physical filter
+application. Exact-filter subsumption is restored using L/C snapshots.
+
+Both engine modes pass 30 SQL tests (810 assertions each). The C++ lineage
+invariant test passes; 70 fixtures agree across disabled/legacy/L/C modes.
+JOB 07a, STATS-CEB 138 and TPC-H q18 also agree with disabled-Bloom results.
+All 73 paired diagnostic logs have identical initial-state blocks (72 have
+transfer initialization; one has none). This checks policy preservation and
+query correctness, not full-reduction coverage.
+
+Q18 now materializes 149,999 rows and builds one filter in both modes, removing
+the earlier all-table-activation effect. No updated workload-wide performance
+or full-reduction claim is made. Raw validation is in the experiment theme's
+`results/lineage-only-validation/`; historical totals above are unchanged.
