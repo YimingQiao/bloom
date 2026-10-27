@@ -39,6 +39,9 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes ninja-build
 
+      - name: Check compatibility comparison logic
+        run: python3 -m unittest discover --start-directory test/python -p test_compare_compatibility.py
+
       - name: Configure DuckDB full-test runner
         run: |
           cmake \
@@ -75,28 +78,49 @@ jobs:
           test "$status" -eq "$((count % 256))"
 
       - name: Run full suite with Bloom loaded and Bloom disabled
+        id: disabled
+        shell: bash
         if: inputs.mode == 'both' || inputs.mode == 'disabled'
         env:
           BLOOM_ENABLE: "0"
         run: |
+          status=0
           python3 duckdb/scripts/ci/run_tests.py \
             --workers 4 \
+            --max-retries 0 \
             --batch-timeout 600 \
             --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_disabled.json" \
             "$BUILD_DIR/test/unittest" \
-            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-disabled.log"
+            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-disabled.log" || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [ '${{ inputs.mode }}' != 'both' ]; then exit "$status"; fi
 
       - name: Run full suite with Bloom enabled
+        id: enabled
+        shell: bash
         if: ${{ !cancelled() && steps.discovery.outcome == 'success' && (inputs.mode == 'both' || inputs.mode == 'enabled') }}
         env:
           BLOOM_ENABLE: "1"
         run: |
+          status=0
           python3 duckdb/scripts/ci/run_tests.py \
             --workers 4 \
+            --max-retries 0 \
             --batch-timeout 600 \
             --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_enabled.json" \
             "$BUILD_DIR/test/unittest" \
-            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-enabled.log"
+            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-enabled.log" || status=$?
+          echo "exit_code=$status" >> "$GITHUB_OUTPUT"
+          if [ '${{ inputs.mode }}' != 'both' ]; then exit "$status"; fi
+
+      - name: Compare full-suite results
+        if: inputs.mode == 'both'
+        run: |
+          python3 scripts/compare_compatibility.py \
+            --disabled-log "$RUNNER_TEMP/duckdb-disabled.log" \
+            --disabled-exit '${{ steps.disabled.outputs.exit_code }}' \
+            --enabled-log "$RUNNER_TEMP/duckdb-enabled.log" \
+            --enabled-exit '${{ steps.enabled.outputs.exit_code }}'
 
       - name: Upload compatibility logs
         if: always()
