@@ -67,8 +67,12 @@ jobs:
       - name: Verify full test discovery
         id: discovery
         run: |
-          "$BUILD_DIR/test/unittest" --list-tests '*' > "$RUNNER_TEMP/duckdb-tests.tsv"
-          test "$(wc -l < "$RUNNER_TEMP/duckdb-tests.tsv")" -gt 1000
+          status=0
+          "$BUILD_DIR/test/unittest" --list-tests '*' > "$RUNNER_TEMP/duckdb-tests.tsv" || status=$?
+          # Catch returns the number of listed tests; the TSV has one header row.
+          count=$(( $(wc -l < "$RUNNER_TEMP/duckdb-tests.tsv") - 1 ))
+          test "$count" -gt 1000
+          test "$status" -eq "$((count % 256))"
 
       - name: Run full suite with Bloom loaded and Bloom disabled
         if: inputs.mode == 'both' || inputs.mode == 'disabled'
@@ -80,7 +84,7 @@ jobs:
             --batch-timeout 600 \
             --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_disabled.json" \
             "$BUILD_DIR/test/unittest" \
-            '*'
+            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-disabled.log"
 
       - name: Run full suite with Bloom enabled
         if: ${{ !cancelled() && steps.discovery.outcome == 'success' && (inputs.mode == 'both' || inputs.mode == 'enabled') }}
@@ -92,4 +96,16 @@ jobs:
             --batch-timeout 600 \
             --test-config "$GITHUB_WORKSPACE/test/configs/duckdb_full_bloom_enabled.json" \
             "$BUILD_DIR/test/unittest" \
-            '*'
+            '*' 2>&1 | tee "$RUNNER_TEMP/duckdb-enabled.log"
+
+      - name: Upload compatibility logs
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: duckdb-full-compatibility-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/duckdb-tests.tsv
+            ${{ runner.temp }}/duckdb-disabled.log
+            ${{ runner.temp }}/duckdb-enabled.log
+          retention-days: 7
