@@ -15,7 +15,7 @@ DUCKDB = Path(os.environ.get("BLOOM_TEST_DUCKDB", ROOT / "build/release/duckdb")
 
 @unittest.skipUnless(DUCKDB.is_file(), "Build the Bloom DuckDB CLI first")
 class SampleFilterTest(unittest.TestCase):
-    def check_filter(self, predicate, mode, *, columns=0, skipped=False, reverse=False):
+    def check_filter(self, predicate, mode, *, columns=0, skipped=False, reverse=False, generated=False):
         with TemporaryDirectory(prefix="bloom-sample-filter-") as directory:
             # Storage order, scan projection order and filter input order differ.
             # An unused column also makes storage indexes non-contiguous.
@@ -28,6 +28,16 @@ class SampleFilterTest(unittest.TestCase):
             ]
             if reverse:
                 fields.reverse()
+            generated_setup = ""
+            if generated:
+                generated_setup = """
+                CREATE TABLE generated_subject (
+                    g AS (id * 5), id INTEGER, y INTEGER, h AS (y + 1), x INTEGER, s VARCHAR
+                );
+                INSERT INTO generated_subject SELECT id, y, x, s FROM subject;
+                DROP TABLE subject;
+                ALTER TABLE generated_subject RENAME TO subject;
+                """
             sample_mode = "prepared" if mode == "prepared" else "instant"
             access = "block" if mode == "block" else "scattered"
             directory = directory.replace("'", "''")
@@ -51,6 +61,7 @@ class SampleFilterTest(unittest.TestCase):
                 SET bloom_instant_rows_per_access = 1000;
                 CREATE TABLE probe AS SELECT i::INTEGER id FROM range(100) r(i);
                 CREATE TABLE subject AS SELECT {', '.join(fields)} FROM range(100) r(i);
+                {generated_setup}
                 CHECKPOINT;
                 {export}
                 {query}
@@ -117,6 +128,12 @@ class SampleFilterTest(unittest.TestCase):
         for reverse in (False, True):
             with self.subTest(reverse=reverse):
                 self.check_filter("a.x = 1 OR a.s = 'yes'", "parquet", reverse=reverse)
+
+    def test_generated_columns_preserve_sample_layout(self):
+        for mode in ("prepared", "scattered", "block"):
+            for predicate in ("a.x < a.y", "a.x = 1 OR a.y = 2"):
+                with self.subTest(mode=mode, predicate=predicate):
+                    self.check_filter(predicate, mode, columns=2, generated=True)
 
     def test_single_column_and_null_predicates(self):
         for mode in ("prepared", "scattered", "block"):

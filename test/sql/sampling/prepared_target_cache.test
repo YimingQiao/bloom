@@ -1,5 +1,5 @@
 # name: test/sql/sampling/prepared_target_cache.test
-# description: isolate persistent prepared samples by target size
+# description: isolate persistent prepared samples by target size and column layout
 # group: [sampling]
 
 require bloom
@@ -79,3 +79,71 @@ query I
 SELECT loaded_samples FROM bloom_preload_samples();
 ----
 3
+
+# A generated column adds a LogicalGet slot without adding a physical type.
+# Recreating the same table must not reuse a narrower sample with the same
+# physical types, row count, target size and seed.
+statement ok
+SET bloom_sample_cache_dir = '{TEST_DIR}/prepared_layout_samples';
+
+statement ok
+CREATE TABLE rpt_target_db.rpt_layout(j INTEGER);
+
+statement ok
+INSERT INTO rpt_target_db.rpt_layout VALUES (4);
+
+query I
+SELECT count(*) FROM rpt_target_db.rpt_layout a NATURAL JOIN rpt_target_db.rpt_layout b;
+----
+1
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_layout_samples/*.sample');
+----
+1
+
+statement ok
+DROP TABLE rpt_target_db.rpt_layout;
+
+statement ok
+CREATE TABLE rpt_target_db.rpt_layout(c1 AS (j * 5), j INTEGER);
+
+statement ok
+INSERT INTO rpt_target_db.rpt_layout VALUES (4);
+
+query I
+SELECT 1 FROM rpt_target_db.rpt_layout a NATURAL JOIN rpt_target_db.rpt_layout b GROUP BY c1;
+----
+1
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_layout_samples/*.sample');
+----
+2
+
+# Moving the generated slot also changes the layout even if all logical and
+# physical column types remain identical.
+statement ok
+DROP TABLE rpt_target_db.rpt_layout;
+
+statement ok
+CREATE TABLE rpt_target_db.rpt_layout(j INTEGER, c1 AS (j * 5));
+
+statement ok
+INSERT INTO rpt_target_db.rpt_layout VALUES (4);
+
+query I
+SELECT 1 FROM rpt_target_db.rpt_layout a NATURAL JOIN rpt_target_db.rpt_layout b GROUP BY c1;
+----
+1
+
+query I
+SELECT count(*) FROM glob('{TEST_DIR}/prepared_layout_samples/*.sample');
+----
+3
+
+# The three earlier tables remain in the process cache; add the current layout.
+query I
+SELECT loaded_samples FROM bloom_preload_samples();
+----
+4

@@ -56,6 +56,9 @@ cache entry and never reuses the previous sample. The optional
 `ObjectCache` eviction reservation in addition to the sample's allocator charge;
 set it to `false` on especially tight memory limits while retaining disk caching.
 
+This build uses sample cache format v6, which distinguishes generated-column
+layouts. Samples from earlier formats are rebuilt on first use.
+
 `bloom_sample_mode` accepts `prepared` (the default) and `instant`.
 
 Prepared sampling reads table data to build its reservoirs on first use. That

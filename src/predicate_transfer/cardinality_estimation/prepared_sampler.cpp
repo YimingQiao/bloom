@@ -57,20 +57,17 @@ static bool SamplingLogEnabled(ClientContext &context) {
 }
 
 static string SampleCacheKey(TableCatalogEntry &table, const RPTSamplingConfig &config) {
-	// Prepared samples contain every physical column in storage order, so the
-	// identity is independent of any one query's projected column set.
+	// Prepared samples use the full LogicalGet layout, including generated-column
+	// slots. Physical types alone cannot distinguish those slots from stored data.
 	auto &catalog = table.ParentCatalog();
-	string key = "bloom_sample_v5|" + catalog.GetName();
+	string key = "bloom_sample_v6|" + catalog.GetName();
 	key += "|path=" + catalog.GetDBPath();
 	key += "|" + table.schema.name + "|" + table.name;
 	key += "|rows=" + std::to_string(table.GetStorage().GetTotalRows());
-	key += "|types=";
-	auto types = table.GetTypes();
-	for (idx_t i = 0; i < types.size(); i++) {
-		if (i > 0) {
-			key += ',';
-		}
-		key += types[i].ToString();
+	key += "|layout=";
+	for (auto &column : table.GetColumns().Logical()) {
+		key += column.Type().ToString();
+		key += column.Generated() ? ":generated;" : ":stored;";
 	}
 	key += "|n=" + std::to_string(config.target_rows);
 	key += "|seed=" + std::to_string(config.seed);

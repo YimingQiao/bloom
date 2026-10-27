@@ -480,7 +480,7 @@ void TableSampleManager::BuildInstantSample(Entry &sample, const LogicalOperator
 			if (column_id.IsVirtualColumn() || column_id.GetPrimaryIndex() >= get.returned_types.size()) {
 				throw InternalException("Unsupported column in native instant sample");
 			}
-			column_ids.emplace_back(column_id.GetPrimaryIndex());
+			column_ids.push_back(table->GetStorageIndex(column_id));
 			column_types.push_back(get.returned_types[column_id.GetPrimaryIndex()]);
 		}
 		idx_t predicate_count = 0;
