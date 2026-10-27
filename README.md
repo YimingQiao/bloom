@@ -12,6 +12,7 @@ Adaptive predicate transfer, built into your query plan.</p>
 
 <p align="center">
   <a href="#build-and-load">Get started</a> ·
+  <a href="#try-it-in-duckdb">SQL demo</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="#configuration">Configuration</a>
@@ -21,14 +22,10 @@ Bloom speeds up complex join queries in DuckDB by moving selective filters
 across the join graph. Built on **robust predicate transfer (RPT)**, it uses
 Bloom and bitmap filters to prune rows before they reach the joins.
 
-| Up to **8.69×** faster | **22 / 113** queries | **1.41×** overall |
-|:---:|:---:|:---:|
-| Best individual JOB query | JOB queries with **2–8.69×** speedups | Complete JOB workload |
-
-Measured with Bloom v0.0.3 and DuckDB v2.0.0, one thread, on compressed IMDB.
-Speedups compare per-query median runtimes; the overall figure compares their
-sums. Results vary by query, including slowdowns.
-[See the measurements and methodology →](#benchmarks)
+**Up to 8.69× faster on an individual JOB query.** Measured with Bloom v0.0.3
+and DuckDB v2.0.0, one thread, on compressed IMDB.
+[Try the SQL demo ↓](#try-it-in-duckdb) ·
+[Full benchmark results and methodology →](#benchmarks)
 
 Bloom combines lightweight sampling with execution feedback. Sampling suggests
 which transfer to try next; after each step, Bloom observes the new cardinalities
@@ -73,6 +70,82 @@ LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
 SELECT current_setting('enable_bloom');
 ```
 
+## Try it in DuckDB
+
+Run the same JOB query before and after loading Bloom. Start a fresh session
+with a standard DuckDB **v2.0.0** binary and your compressed IMDB database;
+run from this repository's root so the extension path below resolves:
+
+```bash
+duckdb -unsigned /path/to/imdb.duckdb
+```
+
+In the CLI, use `.timer on` to display query times. In a UI backed by native
+DuckDB, use its execution-time display. First define JOB query **12b** as a
+temporary view:
+
+<details>
+<summary><strong>SQL setup · JOB query 12b</strong></summary>
+
+```sql
+SET threads = 1;
+
+CREATE TEMP VIEW job_12b AS
+SELECT MIN(mi.info) AS budget,
+       MIN(t.title) AS unsuccsessful_movie
+FROM company_name AS cn,
+     company_type AS ct,
+     info_type AS it1,
+     info_type AS it2,
+     movie_companies AS mc,
+     movie_info AS mi,
+     movie_info_idx AS mi_idx,
+     title AS t
+WHERE cn.country_code = '[us]'
+  AND ct.kind IS NOT NULL
+  AND (ct.kind = 'production companies' OR ct.kind = 'distributors')
+  AND it1.info = 'budget'
+  AND it2.info = 'bottom 10 rank'
+  AND t.production_year > 2000
+  AND (t.title LIKE 'Birdemic%' OR t.title LIKE '%Movie%')
+  AND t.id = mi.movie_id
+  AND t.id = mi_idx.movie_id
+  AND mi.info_type_id = it1.id
+  AND mi_idx.info_type_id = it2.id
+  AND t.id = mc.movie_id
+  AND ct.id = mc.company_type_id
+  AND cn.id = mc.company_id
+  AND mc.movie_id = mi.movie_id
+  AND mc.movie_id = mi_idx.movie_id
+  AND mi.movie_id = mi_idx.movie_id;
+```
+
+The view names the [original JOB query](https://github.com/duckdb/duckdb/blob/d54cbbe3df17e8e5ce68312f483b4155836112aa/benchmark/imdb_plan_cost/queries/12b.sql);
+it does not cache its result.
+
+</details>
+
+Run each statement separately. Warm up each configuration once, then compare
+the time of the following `SELECT`:
+
+```sql
+-- DuckDB
+SELECT * FROM job_12b; -- warmup
+SELECT * FROM job_12b; -- timed
+
+LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
+
+-- DuckDB + Bloom
+SELECT * FROM job_12b; -- warmup, including sample preparation
+SELECT * FROM job_12b; -- timed
+```
+
+A local CLI run returned the same result with median times of **171 ms → 36 ms
+(4.75×)** over five timed executions per configuration. Repeat each timed
+`SELECT` five times to make the same comparison. Your timings will vary;
+this demo shows one selected query. See the [benchmarks](#benchmarks) for
+results across the complete workload.
+
 ## Benchmarks
 
 ### DuckDB 2.0
@@ -82,9 +155,9 @@ SELECT current_setting('enable_bloom');
 | [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | compressed IMDB, 2.05 GB | 113 | 28.427 s | 20.114 s | **1.413×** |
 | TPC-H SF10 | 2.68 GB | 22 | 17.180 s | 15.336 s | **1.120×** |
 
-On JOB, **22 of 113 queries achieve 2–8.69× speedups**. The largest gain is
-query **12b**, from 188.038 ms to 21.643 ms. Across the complete workload,
-77 queries are faster and 36 are slower; per-query speedups range from
+The largest JOB gain is query **12b**, from 188.038 ms to 21.643 ms.
+Across the complete workload, 77 queries are faster and 36 are slower;
+per-query speedups range from
 0.132× to 8.688×. The largest slowdown is query 11b, from 13.945 ms to
 105.267 ms. The headline maximum describes an individual query, while the
 total speedup above includes all 113 queries.
