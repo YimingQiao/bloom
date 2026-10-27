@@ -1,7 +1,9 @@
 #include "predicate_transfer/filter/table_filter.hpp"
 #include "predicate_transfer/filter/bloom_filter.hpp"
 
+#include "duckdb/common/exception/binder_exception.hpp"
 #include "duckdb/function/scalar_function.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 #include "duckdb/planner/expression/bound_function_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
@@ -69,6 +71,35 @@ static FilterPropagateResult RPTFilterPrune(const FunctionStatisticsPruneInput &
 	return stats ? data.filter->CheckStatistics(*stats) : FilterPropagateResult::NO_PRUNING_POSSIBLE;
 }
 
+static unique_ptr<FunctionData> RPTFilterBind(BindScalarFunctionInput &) {
+	throw BinderException("Bloom transfer filters are for internal use only");
+}
+
+static void RPTFilterSerialize(Serializer &, const optional_ptr<FunctionData>, const BoundScalarFunction &) {
+	// Runtime filter state belongs to this process and is not serialized.
+}
+
+static unique_ptr<FunctionData> RPTFilterDeserialize(Deserializer &, BoundScalarFunction &function) {
+	// Match DuckDB's runtime table filters: a deserialized plan does not retain
+	// process-local filter state. The original joins still enforce membership.
+	D_ASSERT(function.GetArguments().size() == 1);
+	return make_uniq<RPTFilterFunctionData>(nullptr, function.GetArguments()[0]);
+}
+
+static ScalarFunction RPTFilterScalarFunction(const LogicalType &input_type) {
+	ScalarFunction function("__internal_bloom_rpt_filter", {input_type}, LogicalType::BOOLEAN, RPTFilterExecute,
+	                        RPTFilterBind);
+	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
+	function.SetFilterPruneCallback(RPTFilterPrune);
+	function.SetSerializeCallback(RPTFilterSerialize);
+	function.SetDeserializeCallback(RPTFilterDeserialize);
+	return function;
+}
+
+void RPTTableFilter::RegisterFunction(ExtensionLoader &loader) {
+	loader.RegisterFunction(RPTFilterScalarFunction(LogicalType::ANY));
+}
+
 unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_threshold, idx_t n_vectors_to_check) const {
 	if (auto prefix_filter = dynamic_cast<DuckDBPrefixRangeFilterAdapter *>(filter_.get())) {
 		auto function = PrefixRangeScalarFun::GetFunction(input_type_);
@@ -102,9 +133,7 @@ unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_thresho
 		return make_uniq<ExpressionFilter>(std::move(expression));
 	}
 
-	ScalarFunction function("__internal_bloom_rpt_filter", {input_type_}, LogicalType::BOOLEAN, RPTFilterExecute);
-	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
-	function.SetFilterPruneCallback(RPTFilterPrune);
+	auto function = RPTFilterScalarFunction(input_type_);
 
 	vector<unique_ptr<Expression>> arguments;
 	arguments.push_back(make_uniq<BoundReferenceExpression>(input_type_, storage_t(0)));

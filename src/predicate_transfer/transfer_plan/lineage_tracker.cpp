@@ -1,7 +1,8 @@
 #include "predicate_transfer/transfer_plan/lineage_tracker.hpp"
 
-#include "predicate_transfer/transfer_plan/dag.hpp"
+#include "predicate_transfer/transfer_plan/transfer_types.hpp"
 #include "duckdb/common/assert.hpp"
+#include "duckdb/common/exception.hpp"
 
 #include <algorithm>
 
@@ -10,141 +11,12 @@ namespace duckdb {
 void LineageTracker::Clear() {
 	keys_.clear();
 	next_token_ = 0;
-	key_based_ = false;
-	table_to_lineage_.clear();
-	per_lineage_.clear();
-	join_columns_.clear();
-	per_column_.clear();
-}
-
-void LineageTracker::RegisterAliasGroup(const LineageSet &group) {
-	if (key_based_ || group.size() < 2) {
-		return;
-	}
-	// Pick the smallest table_id as the canonical lineage_id for this group.
-	idx_t canonical = *std::min_element(group.begin(), group.end());
-	// Ordering contract: must run before InitTable/SeedColumn for these tables;
-	// otherwise those seedings already landed in per_lineage_ / per_column_
-	// under the wrong (non-canonical) keys and this registration can't fix it.
-	for (auto id : group) {
-		D_ASSERT(per_lineage_.find(id) == per_lineage_.end());
-		if (id != canonical) {
-			table_to_lineage_[id] = canonical;
-		}
-	}
-}
-
-idx_t LineageTracker::LineageOf(idx_t table_id) const {
-	auto it = table_to_lineage_.find(table_id);
-	return it == table_to_lineage_.end() ? table_id : it->second;
-}
-
-ColumnBinding LineageTracker::Canon(const ColumnBinding &col) const {
-	return ColumnBinding(TableIndex(LineageOf(col.table_index.index)), col.column_index);
-}
-
-void LineageTracker::InitTable(idx_t table_id) {
-	idx_t L = LineageOf(table_id);
-	per_lineage_[L] = LineageSet {L};
-}
-
-void LineageTracker::SeedColumn(ColumnBinding col) {
-	if (!kColumnGranular) {
-		return;
-	}
-	auto canon = Canon(col);
-	join_columns_[canon.table_index.index].insert(canon);
-	per_column_[canon].insert(canon);
-}
-
-LineageTracker::ColumnSet LineageTracker::UnionColumnLineage(const vector<ColumnBinding> &cols) const {
-	ColumnSet out;
-	if (!kColumnGranular) {
-		return out;
-	}
-	for (auto &b : cols) {
-		auto it = per_column_.find(Canon(b));
-		D_ASSERT(it != per_column_.end());
-		out.insert(it->second.begin(), it->second.end());
-	}
-	return out;
 }
 
 bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
-	if (key_based_) {
-		auto &source = FindKey(edge.left_bindings).result;
-		auto &dest = FindKey(edge.right_bindings).constraints;
-		return std::any_of(source.begin(), source.end(), [&](idx_t token) { return !dest.count(token); });
-	}
-	if (kColumnGranular) {
-		// BF is transmitted pairwise src_i → dst_i — check each pair.
-		D_ASSERT(edge.left_bindings.size() == edge.right_bindings.size());
-		for (idx_t i = 0; i < edge.left_bindings.size(); ++i) {
-			auto src_it = per_column_.find(Canon(edge.left_bindings[i]));
-			if (src_it == per_column_.end()) {
-				continue;
-			}
-			auto dst_it = per_column_.find(Canon(edge.right_bindings[i]));
-			if (dst_it == per_column_.end()) {
-				return true;
-			}
-			for (auto &elem : src_it->second) {
-				if (!dst_it->second.count(elem)) {
-					return true;
-				}
-			}
-		}
-		return false;
-	}
-	// Lineage-level: any contributing lineage on the source missing from dst?
-	D_ASSERT(!edge.left_bindings.empty());
-	D_ASSERT(!edge.right_bindings.empty());
-	idx_t src_L = LineageOf(edge.left_bindings.front().table_index.index);
-	idx_t dst_L = LineageOf(edge.right_bindings.front().table_index.index);
-	if (src_L == dst_L) {
-		return false;
-	}
-	auto src_it = per_lineage_.find(src_L);
-	if (src_it == per_lineage_.end()) {
-		return false;
-	}
-	auto dst_it = per_lineage_.find(dst_L);
-	if (dst_it == per_lineage_.end()) {
-		return true;
-	}
-	for (auto id : src_it->second) {
-		if (!dst_it->second.count(id)) {
-			return true;
-		}
-	}
-	return false;
-}
-
-void LineageTracker::Propagate(const GraphEdge &edge) {
-	D_ASSERT(!key_based_);
-	idx_t src_L = LineageOf(edge.source);
-	idx_t dst_L = LineageOf(edge.destination);
-	auto &dst_lineage = per_lineage_[dst_L];
-	dst_lineage.insert(src_L);
-	auto src_it = per_lineage_.find(src_L);
-	if (src_it != per_lineage_.end()) {
-		dst_lineage.insert(src_it->second.begin(), src_it->second.end());
-	}
-
-	if (kColumnGranular) {
-		ColumnSet src_union = UnionColumnLineage(edge.source_columns);
-		// A transfer filters rows, not just the destination key vector. Every
-		// join key projected from the surviving destination rows therefore
-		// depends on the source keys. Without this rowset-level propagation, a
-		// previously used B.y -> C.y edge is incorrectly considered redundant
-		// after a later A.x -> B.x transfer shrinks B.
-		auto columns_it = join_columns_.find(dst_L);
-		D_ASSERT(columns_it != join_columns_.end());
-		for (auto &dst_col : columns_it->second) {
-			auto &dst_set = per_column_[dst_col];
-			dst_set.insert(src_union.begin(), src_union.end());
-		}
-	}
+	auto &source = FindKey(edge.left_bindings).result;
+	auto &dest = FindKey(edge.right_bindings).constraints;
+	return std::any_of(source.begin(), source.end(), [&](idx_t token) { return !dest.count(token); });
 }
 
 size_t LineageTracker::Snapshot::StableHash() const {
@@ -160,54 +32,12 @@ size_t LineageTracker::Snapshot::StableHash() const {
 	return h;
 }
 
-LineageTracker::Snapshot LineageTracker::MakeSnapshot(idx_t source_table_id,
-                                                      const vector<ColumnBinding> &source_cols) const {
-	Snapshot s;
-	if (key_based_) {
-		s.key_based = true;
-		s.lineages = FindKey(source_cols).result;
-		s.key_columns = source_cols;
-		return s;
-	}
-	idx_t L = LineageOf(source_table_id);
-	auto it = per_lineage_.find(L);
-	if (it != per_lineage_.end()) {
-		s.lineages = it->second;
-	} else {
-		s.lineages.insert(L);
-	}
-	if (kColumnGranular) {
-		s.columns = UnionColumnLineage(source_cols);
-	}
-	s.key_columns.reserve(source_cols.size());
-	for (auto &col : source_cols) {
-		s.key_columns.push_back(Canon(col));
-	}
-	return s;
-}
-
-const LineageTracker::LineageSet &LineageTracker::Lineage(idx_t table_id) const {
-	static const LineageSet empty;
-	auto it = per_lineage_.find(LineageOf(table_id));
-	return it == per_lineage_.end() ? empty : it->second;
+LineageTracker::Snapshot LineageTracker::MakeSnapshot(const vector<ColumnBinding> &key) const {
+	return {FindKey(key).result, key};
 }
 
 bool LineageTracker::IsSubset(const Snapshot &a, const Snapshot &b) {
-	D_ASSERT(a.key_based == b.key_based);
-	if (!a.key_based && kColumnGranular) {
-		for (auto &e : a.columns) {
-			if (!b.columns.count(e)) {
-				return false;
-			}
-		}
-		return true;
-	}
-	for (auto &id : a.lineages) {
-		if (!b.lineages.count(id)) {
-			return false;
-		}
-	}
-	return true;
+	return std::all_of(a.lineages.begin(), a.lineages.end(), [&](idx_t token) { return b.lineages.count(token); });
 }
 
 static vector<ColumnBinding> SortedKey(vector<ColumnBinding> key) {
@@ -243,14 +73,13 @@ const LineageTracker::KeyState &LineageTracker::FindKey(const vector<ColumnBindi
 
 LineageTracker::Snapshot LineageTracker::NewPredicate(const vector<ColumnBinding> &key) {
 	Snapshot snapshot;
-	snapshot.key_based = true;
 	snapshot.key_columns = key;
 	snapshot.lineages.insert(++next_token_);
 	return snapshot;
 }
 
-void LineageTracker::ApplyKeyFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters,
-                                     bool shrunk, bool initial) {
+void LineageTracker::ReceiveFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters,
+                                    bool estimated_shrink) {
 	for (auto &state : keys_[table_id]) {
 		bool cross_key = false;
 		LineageSet incoming;
@@ -264,15 +93,16 @@ void LineageTracker::ApplyKeyFilters(idx_t table_id, const vector<pair<vector<Co
 				cross_key = true;
 			}
 		}
-		if (initial || shrunk) {
-			if (cross_key) {
-				state.result = {++next_token_};
-			} else {
-				state.result.insert(incoming.begin(), incoming.end());
-			}
-		}
 		state.constraints.insert(incoming.begin(), incoming.end());
-		state.constraints.insert(state.result.begin(), state.result.end());
+		if (!estimated_shrink) {
+			continue;
+		}
+		state.result.insert(incoming.begin(), incoming.end());
+		if (cross_key) {
+			auto token = ++next_token_;
+			state.result.insert(token);
+			state.constraints.insert(token);
+		}
 	}
 }
 

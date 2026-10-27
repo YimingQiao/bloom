@@ -1,0 +1,25 @@
+# name: test/sql/transfer/filter_serialization.test
+# description: bitmap transfer filters support DuckDB's plan serialization verification
+# group: [transfer]
+
+require bloom
+
+require tpcds
+
+# Registration supports plan deserialization, not direct SQL calls.
+statement error
+SELECT __internal_bloom_rpt_filter(1);
+----
+Bloom transfer filters are for internal use only
+
+statement ok
+SET debug_verify_serializer = true;
+
+statement ok
+CALL dsdgen(sf=0.01);
+
+# This transfer path leaves a bitmap filter on a scan that DuckDB serializes.
+# The reference result at this scale is empty.
+query TTTT
+PRAGMA tpcds(85);
+----

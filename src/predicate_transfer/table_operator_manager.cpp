@@ -3,7 +3,6 @@
 #include "duckdb/parallel/task_scheduler.hpp"
 
 #include "duckdb/planner/operator/logical_aggregate.hpp"
-#include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/expression/bound_case_expression.hpp"
@@ -108,69 +107,6 @@ void TableOperatorManager::Build(LogicalOperator &plan) {
 	contains_join_set_.clear();
 	CollectJoins(plan);
 	CollectTableOperators(plan);
-	ComputeCDCAliasGroups();
-}
-
-void TableOperatorManager::ComputeCDCAliasGroups() {
-	// Group tables by the pointer to their underlying ColumnDataCollection.
-	// Two LogicalColumnDataGet ops that share a CDC (common_subplan fan-out)
-	// end up with different table_indexes but the same data, and Bloom must
-	// not propagate filters between them: the "filtered cardinality" of one
-	// through the other is trivially the unfiltered cardinality.
-	// Walk down through FILTER wrappers to find an underlying CHUNK_GET.
-	// FILTER+CHUNK_GET refs to the same CDC are grouped with their bare peers
-	// — the FILTER stays in the plan but lineage is shared, so CDC-internal
-	// BF transfer between aliases is short-circuited as same-lineage.
-	auto find_chunk_get = [](const LogicalOperator &op) -> const LogicalColumnDataGet * {
-		const LogicalOperator *cur = &op;
-		while (cur && cur->type != LogicalOperatorType::LOGICAL_CHUNK_GET) {
-			if (cur->type == LogicalOperatorType::LOGICAL_FILTER && !cur->children.empty()) {
-				cur = cur->children[0].get();
-			} else {
-				return nullptr;
-			}
-		}
-		return cur ? &cur->Cast<LogicalColumnDataGet>() : nullptr;
-	};
-	vector<pair<const ColumnDataCollection *, vector<idx_t>>> by_cdc;
-	for (auto &operator_ref : table_dfs_order) {
-		auto &op = operator_ref.get();
-		auto table_id = GetScalarTableIndex(op);
-		auto canonical = table_operators.find(table_id);
-		if (canonical == table_operators.end() || &canonical->second.get() != &op) {
-			continue;
-		}
-		auto *cdg = find_chunk_get(op);
-		if (!cdg || !cdg->collection) {
-			continue;
-		}
-		idx_t group_index = by_cdc.size();
-		for (idx_t i = 0; i < by_cdc.size(); i++) {
-			if (by_cdc[i].first == cdg->collection.get()) {
-				group_index = i;
-				break;
-			}
-		}
-		if (group_index == by_cdc.size()) {
-			by_cdc.emplace_back(cdg->collection.get(), vector<idx_t> {});
-		}
-		by_cdc[group_index].second.push_back(table_id);
-	}
-	for (auto &grp : by_cdc) {
-		if (grp.second.size() < 2) {
-			continue;
-		}
-		unordered_set<idx_t> alias_set(grp.second.begin(), grp.second.end());
-		for (auto id : grp.second) {
-			cdc_alias_groups_[id] = alias_set;
-		}
-	}
-}
-
-const unordered_set<idx_t> &TableOperatorManager::GetCDCAliases(idx_t table_id) const {
-	static const unordered_set<idx_t> empty;
-	auto it = cdc_alias_groups_.find(table_id);
-	return it == cdc_alias_groups_.end() ? empty : it->second;
 }
 
 LogicalOperator *TableOperatorManager::GetTableOperator(idx_t table_idx) {

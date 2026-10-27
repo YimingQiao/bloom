@@ -145,20 +145,6 @@ string ExcitationGraphManager::TablesToString() {
 		if (state_.HasCardinality(id)) {
 			ss << ", cardinality=" << static_cast<idx_t>(state_.Cardinality(id));
 		}
-		// Show table-level lineage set
-		const auto &tl = state_.Lineage().Lineage(id);
-		if (!tl.empty()) {
-			ss << ", lineage={";
-			bool first = true;
-			for (auto ancestor_id : tl) {
-				if (!first) {
-					ss << ",";
-				}
-				ss << ancestor_id;
-				first = false;
-			}
-			ss << "}";
-		}
 		ss << "), ";
 	}
 	ss << ")\n";

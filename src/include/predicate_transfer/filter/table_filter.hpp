@@ -5,9 +5,13 @@
 
 namespace duckdb {
 
+class ExtensionLoader;
+
 //! Adapts a Bloom-owned bloom or bitmap filter to DuckDB's expression table-filter API.
 class RPTTableFilter {
 public:
+	static void RegisterFunction(ExtensionLoader &loader);
+
 	RPTTableFilter(shared_ptr<RPTFilter> filter, LogicalType input_type)
 	    : filter_(std::move(filter)), input_type_(std::move(input_type)) {
 	}

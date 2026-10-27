@@ -1,11 +1,8 @@
 # name: test/sql/key_lineage.test
-# description: complete composite keys, pending feedback and independent queries under L/C
+# description: complete composite keys, receipt updates and independent queries under L/C
 # group: [sql]
 
 require bloom
-
-statement ok
-SET bloom_seperate_lineage=true;
 
 statement ok
 CREATE TABLE lc_a(x INTEGER,y INTEGER);
@@ -95,6 +92,3 @@ true	true
 
 statement ok
 CALL disable_logging();
-
-statement ok
-RESET bloom_seperate_lineage;

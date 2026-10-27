@@ -1,0 +1,163 @@
+{
+  "date": "2026-10-27",
+  "duckdb": "d54cbbe3df17e8e5ce68312f483b4155836112aa",
+  "baseline_commit": "c42f605aa1e10a62e368140fadbe4fc4fdfe31df",
+  "baseline_setting": "bloom_seperate_lineage=false",
+  "candidate": "sampling-driven receipt updates; legacy lineage removed",
+  "threads": 1,
+  "prepared_protocol": "2 alternating rounds; 1 warmup and 3 timed runs per query in each round; medians of 6 samples",
+  "instant_protocol": "randomized per-query variant order; 1 warmup and 3 timed runs; reference result comparison outside timings",
+  "prepared": [
+    {
+      "workload": "imdb",
+      "totals": {
+        "base": 20.4156055,
+        "candidate": 20.447402499999992,
+        "duckdb": 28.824318499999997
+      },
+      "geomean_ratio": 1.001155531336461,
+      "query_regressions": [
+        {
+          "query": "benchmark/imdb/23a.benchmark",
+          "base": 0.16656700000000002,
+          "candidate": 0.22155350000000001,
+          "ratio": 1.3301164096129485
+        }
+      ]
+    },
+    {
+      "workload": "tpch_sf1",
+      "totals": {
+        "base": 1.4544405,
+        "candidate": 1.4582875,
+        "duckdb": 1.4988679999999999
+      },
+      "geomean_ratio": 1.0005002371516287,
+      "query_regressions": []
+    }
+  ],
+  "prepared_23a_recheck": {
+    "samples_per_variant": 18,
+    "legacy_median_s": 0.180193,
+    "candidate_median_s": 0.178061
+  },
+  "instant": [
+    {
+      "benchmark": "JOB",
+      "variant": "legacy",
+      "queries": 113,
+      "sum_median_s": 22.478021000000002,
+      "builds": 2074,
+      "materialized_rows": 24497941,
+      "build_input_rows": 21921892,
+      "compact_input_rows": 15401628,
+      "transfers": 3583,
+      "memory_stops": 0
+    },
+    {
+      "benchmark": "JOB",
+      "variant": "bloom",
+      "queries": 113,
+      "sum_median_s": 22.627556000000002,
+      "builds": 2066,
+      "materialized_rows": 24502778,
+      "build_input_rows": 21922158,
+      "compact_input_rows": 15402591,
+      "transfers": 3564,
+      "memory_stops": 0
+    },
+    {
+      "benchmark": "STATS-CEB",
+      "variant": "legacy",
+      "queries": 142,
+      "sum_median_s": 64.361178,
+      "builds": 751,
+      "materialized_rows": 26025781,
+      "build_input_rows": 19397816,
+      "compact_input_rows": 11446999,
+      "transfers": 1973,
+      "memory_stops": 0
+    },
+    {
+      "benchmark": "STATS-CEB",
+      "variant": "bloom",
+      "queries": 142,
+      "sum_median_s": 64.954479,
+      "builds": 745,
+      "materialized_rows": 26046783,
+      "build_input_rows": 19406048,
+      "compact_input_rows": 11458248,
+      "transfers": 1954,
+      "memory_stops": 0
+    },
+    {
+      "benchmark": "TPC-H-SF1",
+      "variant": "legacy",
+      "queries": 22,
+      "sum_median_s": 1.53511,
+      "builds": 87,
+      "materialized_rows": 3996632,
+      "build_input_rows": 3222489,
+      "compact_input_rows": 1907970,
+      "transfers": 97,
+      "memory_stops": 0
+    },
+    {
+      "benchmark": "TPC-H-SF1",
+      "variant": "bloom",
+      "queries": 22,
+      "sum_median_s": 1.5361420000000001,
+      "builds": 86,
+      "materialized_rows": 3881927,
+      "build_input_rows": 3222489,
+      "compact_input_rows": 1793265,
+      "transfers": 96,
+      "memory_stops": 0
+    }
+  ],
+  "reference_timeouts": [
+    {
+      "benchmark": "STATS-CEB",
+      "query": "58",
+      "variant": "duckdb",
+      "phase": "reference",
+      "message": "timeout 20s"
+    },
+    {
+      "benchmark": "STATS-CEB",
+      "query": "107",
+      "variant": "duckdb",
+      "phase": "reference",
+      "message": "timeout 20s"
+    },
+    {
+      "benchmark": "STATS-CEB",
+      "query": "122",
+      "variant": "duckdb",
+      "phase": "reference",
+      "message": "timeout 20s"
+    },
+    {
+      "benchmark": "STATS-CEB",
+      "query": "120",
+      "variant": "duckdb",
+      "phase": "reference",
+      "message": "timeout 20s"
+    }
+  ],
+  "checks": {
+    "extension_sql_cases": 35,
+    "extension_sql_assertions": 1091,
+    "synthetic_fixtures": 70,
+    "completed_workload_pairs": 277,
+    "python_tests_including_official_cli": 22,
+    "lineage_invariants": "passed",
+    "format": "passed",
+    "clang_tidy": "passed",
+    "bitmap_plan_serialization": "regression reproduced before fix and passed after registering native-style runtime filter callbacks"
+  },
+  "raw_reports": [
+    "build/lineage-sampling-performance",
+    "build/lineage-sampling-instant"
+  ]
+}

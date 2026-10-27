@@ -62,7 +62,7 @@ jobs:
       - name: Build DuckDB and Bloom
         run: cmake --build "$BUILD_DIR" --target all --parallel 2
 
-      - name: Check lineage invariants and both implementations
+      - name: Check lineage invariants and extension tests
         run: |
           c++ -std=c++17 -O0 \
             -I src/include -I duckdb/src/include -I duckdb/third_party/fmt/include \
@@ -71,10 +71,7 @@ jobs:
             -L "$BUILD_DIR/src" -Wl,-rpath,"$GITHUB_WORKSPACE/$BUILD_DIR/src" -lduckdb \
             -o "$BUILD_DIR/key_lineage_test"
           "$BUILD_DIR/key_lineage_test"
-          for lineage in 0 1; do
-            BLOOM_SEPERATE_LINEAGE="$lineage" "$BUILD_DIR/test/unittest" \
-              --test-dir "$GITHUB_WORKSPACE" 'test/sql/*'
-          done
+          "$BUILD_DIR/test/unittest" --test-dir "$GITHUB_WORKSPACE" 'test/sql/*'
 
       - name: Check sample filter estimates
         env:

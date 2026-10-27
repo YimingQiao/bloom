@@ -157,12 +157,9 @@ void ExcitationGraphManager::EstimateFilterMemory(idx_t rows, const vector<share
 			sorted_bindings.push_back(edge->source_columns[index]);
 			sorted_types.push_back(edge->return_types[index]);
 		}
-		// A pending L/C commit can change the projection token before the
-		// build. A hit on the pre-commit snapshot does not fund that new filter.
-		if (config.enable_filter_cache && !(config.seperate_lineage && key_pending_.count(edge->source))) {
-			auto source_lineage_id = state_.Lineage().LineageOf(edge->source);
-			auto snapshot = state_.Lineage().MakeSnapshot(edge->source, sorted_bindings);
-			if (filter_cache_.Lookup(source_lineage_id, snapshot)) {
+		if (config.enable_filter_cache) {
+			auto snapshot = state_.Lineage().MakeSnapshot(sorted_bindings);
+			if (filter_cache_.Lookup(snapshot)) {
 				continue;
 			}
 		}
@@ -358,9 +355,6 @@ idx_t ExcitationGraphManager::ComputeBaseTableRows(const LogicalOperator &op) co
 
 void ExcitationGraphManager::InitializeWorkingSet() {
 	state_.Reset();
-	if (config.seperate_lineage) {
-		state_.Lineage().EnableKeyLineage();
-	}
 	filter_cache_ = RPTFilterCache {};
 	if (config.excitation_mode == RPTExcitationMode::JOIN_KEY_NDV) {
 		equality_domains_.Reset(table_groups);
@@ -370,35 +364,15 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 
 	const auto &all_tables = table_operator_manager.GetAllTableOperators();
 
-	// Legacy lineage shares state across CDC aliases. Separate lineage keeps
-	// independent constraints because aliases can be filtered independently.
-	if (!config.seperate_lineage) {
-		for (auto &entry : all_tables) {
-			auto &aliases = table_operator_manager.GetCDCAliases(entry.first);
-			if (aliases.size() >= 2) {
-				state_.Lineage().RegisterAliasGroup(aliases);
-			}
-		}
-	}
-
-	// Initialize only the selected lineage representation, on join keys only.
+	// Each complete key owns independent result lineage and received constraints.
 	auto init_lineage = [this](idx_t table_id) {
-		if (!config.seperate_lineage) {
-			state_.Lineage().InitTable(table_id);
-		}
 		auto nm_it = neighbor_matrix.find(table_id);
 		if (nm_it == neighbor_matrix.end()) {
 			return;
 		}
 		for (auto &neighbor_entry : nm_it->second) {
 			for (auto &edge : neighbor_entry.second) {
-				if (config.seperate_lineage) {
-					state_.Lineage().SeedKey(edge.left_bindings);
-				} else {
-					for (auto &binding : edge.left_bindings) {
-						state_.Lineage().SeedColumn(binding);
-					}
-				}
+				state_.Lineage().SeedKey(edge.left_bindings);
 			}
 		}
 	};
@@ -471,7 +445,7 @@ shared_ptr<GraphEdge> ExcitationGraphManager::MakeBloomFilterEdge(idx_t source_i
 	return bf_edge;
 }
 
-vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t table_id, bool pending) const {
+vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t table_id) const {
 	vector<shared_ptr<GraphEdge>> result;
 	auto it = neighbor_matrix.find(table_id);
 	if (it == neighbor_matrix.end()) {
@@ -498,7 +472,7 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::CollectOutgoingEdges(idx_t
 			if (edge.protect_right) {
 				continue;
 			}
-			if (!pending && !state_.Lineage().EdgeCarriesNewInfo(edge)) {
+			if (!state_.Lineage().EdgeCarriesNewInfo(edge)) {
 				continue;
 			}
 			result.push_back(MakeBloomFilterEdge(table_id, neighbor_id, edge));
@@ -569,21 +543,19 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		double current_card = dest_scanner ? static_cast<double>(estimator_->Estimate(*dest_scanner, direct_filters))
 		                                   : static_cast<double>(estimator_->Estimate(*dest_op, direct_filters));
 
-		// Update both table-level and per-column lineage (the latter is read
-		// by the next round's CollectOutgoingEdges and ActivateTable for
-		// subsumption, in column-granular mode).
-		if (!config.seperate_lineage) {
-			state_.Lineage().Propagate(*edge);
-		}
-
 		state_.AddDependency(neighbor_id, edge->source);
 
 		auto last_card = state_.Baseline(neighbor_id);
-		if (config.seperate_lineage) {
-			// Receipt invalidates the source snapshot, but does not change the
-			// existing sampling-based activation policy or satisfy constraints.
-			key_pending_.insert(neighbor_id);
+		// Reuse the estimate already needed by the scheduler. Record each new
+		// constraint once, even when the estimated rowset does not shrink.
+		vector<pair<vector<ColumnBinding>, LineageTracker::Snapshot>> received;
+		for (auto &filter : dest_filters) {
+			if (!filter.lineage_recorded) {
+				received.emplace_back(filter.bindings, filter.acceptance);
+				filter.lineage_recorded = true;
+			}
 		}
+		state_.Lineage().ReceiveFilters(neighbor_id, received, current_card < prior_card);
 		bool reactivated = state_.UpdateCardinality(neighbor_id, current_card, config.excitation_threshold);
 		if (ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps) {
 			auto dest_name = TableOperatorManager::GetTableName(*dest_op);
@@ -612,13 +584,6 @@ void ExcitationGraphManager::PropagateZeroCardinality(idx_t table_id, const vect
 
 		state_.MarkZero(neighbor_id);
 
-		// Preserve the estimated-zero shortcut, but do not turn an estimate
-		// into a proof that an exact key constraint has been applied.
-		if (!config.seperate_lineage) {
-			state_.Lineage().Propagate(*edge);
-		}
-		key_pending_.erase(neighbor_id);
-
 		state_.AddDependency(neighbor_id, table_id);
 		cascade_filters_[neighbor_id].clear();
 		direct_filters_[neighbor_id].clear();
@@ -642,8 +607,6 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	cascade_filters_.clear();
 	row_id_filters_.clear();
 	direct_filters_.clear();
-	key_processed_.clear();
-	key_pending_.clear();
 	acceptance_lineage_.clear();
 
 	bool bloom_diagnostic_log = ClientConfig::GetConfig(context).enable_profiler || config.log_transfer_steps;
@@ -727,8 +690,8 @@ void ExcitationGraphManager::ExecuteTransfer() {
 
 	// Main adaptive-excitation loop:
 	// 1. pick the smallest active source table A
-	// 2. materialize A once (with any filters it has already received)
-	// 3. determine which outgoing edges from A still carry new information
+	// 2. determine which outgoing edges from A still carry new information
+	// 3. materialize A with its received filters
 	// 4. build/apply A's outgoing filters to the destination tables B
 	// 5. re-estimate each affected B after those filters are attached
 	while (state_.HasActiveTables()) {
@@ -746,8 +709,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			          << "  remaining_active=" << state_.ActiveTableCount() << '\n';
 		}
 
-		auto informative_candidates =
-		    CollectOutgoingEdges(table_id, config.seperate_lineage && key_pending_.count(table_id));
+		auto informative_candidates = CollectOutgoingEdges(table_id);
 		if (informative_candidates.empty()) {
 			if (bloom_diagnostic_log) {
 				execution_history << ":no_edges;";
@@ -855,17 +817,6 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			break;
 		}
 		materialized_source_count_++;
-		if (config.seperate_lineage) {
-			auto t_commit = bloom_timing ? SteadyClock::now() : SteadyClock::time_point {};
-			CommitKeyFilters(table_id);
-			if (bloom_timing) {
-				mat_ms += elapsed_ms(t_commit, SteadyClock::now());
-			}
-			informative_candidates = CollectOutgoingEdges(table_id);
-			if (informative_candidates.empty()) {
-				continue;
-			}
-		}
 		state_.CommitBaseline(table_id);
 		if (bloom_diagnostic_log && source_op) {
 			std::cerr << "  [Bloom-Materialized] source=[" << table_id

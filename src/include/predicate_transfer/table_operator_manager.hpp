@@ -33,19 +33,12 @@ public:
 	const LogicalOperator *GetTableOperator(idx_t table_idx) const;
 	ColumnBinding GetRenaming(ColumnBinding col_binding);
 
-	//! Tables sharing the same underlying ColumnDataCollection (CTE fan-out).
-	//! Returns the alias equivalence class containing `table_id` (including
-	//! itself), or an empty set if the table has no aliases. Empty-set return
-	//! means the caller should fall back to singleton {table_id} behavior.
-	const unordered_set<idx_t> &GetCDCAliases(idx_t table_id) const;
-
 	//! Clear stored operator references (call after plan modification to prevent dangling refs).
 	void ClearTableOperators() {
 		table_operators.clear();
 		join_operators.clear();
 		table_dfs_order.clear();
 		contains_join_set_.clear();
-		cdc_alias_groups_.clear();
 	}
 
 	static idx_t GetScalarTableIndex(const LogicalOperator &op);
@@ -90,14 +83,5 @@ private:
 	//! Populated by CollectJoins (pass 1), consumed by CollectTableOperators
 	//! (pass 2). Cleared on ClearTableOperators.
 	unordered_set<const LogicalOperator *> contains_join_set_;
-
-	//! Equivalence classes of tables whose LogicalColumnDataGet operators
-	//! point at the same underlying ColumnDataCollection (common_subplan
-	//! folds repeated subqueries into a single CTE; the lifter shares the
-	//! CDC via shared_ptr). Every member of a class maps to the same set.
-	//! Singleton classes are NOT stored — absence means "no aliases".
-	unordered_map<idx_t, unordered_set<idx_t>> cdc_alias_groups_;
-
-	void ComputeCDCAliasGroups();
 };
 } // namespace duckdb

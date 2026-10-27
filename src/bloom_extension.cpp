@@ -5,6 +5,7 @@
 #include "predicate_transfer/config.hpp"
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
 #include "predicate_transfer/bloom_log.hpp"
+#include "predicate_transfer/filter/table_filter.hpp"
 
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
@@ -277,9 +278,6 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	if (input.context.TryGetCurrentSetting("bloom_sample_memory_cache", setting)) {
 		config.sampling.prepared_memory_cache = setting.GetValue<bool>();
 	}
-	if (input.context.TryGetCurrentSetting("bloom_seperate_lineage", setting)) {
-		config.seperate_lineage = setting.GetValue<bool>();
-	}
 	if (input.context.TryGetCurrentSetting("bloom_log_transfer_steps", setting)) {
 		config.log_transfer_steps = setting.GetValue<bool>();
 	}
@@ -308,6 +306,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	auto &db = loader.GetDatabaseInstance();
 	auto &config = DBConfig::GetConfig(db);
 	RegisterBloomLogType(db);
+	RPTTableFilter::RegisterFunction(loader);
 
 	config.AddExtensionOption("enable_bloom", "Enable the Bloom optimizer", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(EnvFlagDefault("BLOOM_ENABLE", true)));
@@ -356,8 +355,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Cache prepared samples in the process object cache to skip disk reloads across queries "
 	                          "(advanced)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SAMPLE_MEMORY_CACHE", true)));
-	config.AddExtensionOption("bloom_seperate_lineage", "Complete-key L/C lineage with applied-filter feedback",
-	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SEPERATE_LINEAGE", true)));
 	config.AddExtensionOption("bloom_log_transfer_steps", "Log the transfer plan to stderr for debugging",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LOG_TRANSFER_STEPS", false)));
 	config.AddExtensionOption(
