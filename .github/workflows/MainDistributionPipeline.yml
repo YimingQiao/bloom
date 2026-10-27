@@ -23,6 +23,7 @@ jobs:
       duckdb_commit: d54cbbe3df17e8e5ce68312f483b4155836112aa
       ci_tools_version: 2de802913caf5c9bba0ef267658b20f3cc0486c3
       extension_name: bloom
+      exclude_archs: linux_amd64_musl;linux_arm64_musl;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
 
   code-quality-check:
     name: Code Quality Check
