@@ -17,7 +17,15 @@ Adaptive predicate transfer, built into your query plan.</p>
   <a href="docs/USAGE.md">Documentation</a>
 </p>
 
-Bloom is a DuckDB extension that speeds up queries across multiple tables.
+Bloom is a DuckDB extension for accelerating analytical queries that join many
+tables. It is designed for queries where filtering one table can eliminate
+substantial work in the others, including workloads such as the Join Order
+Benchmark (JOB).
+
+Built on **robust predicate transfer (RPT)**, Bloom filters data early and adapts
+its decisions as it learns more about the query. Load the extension and keep
+using your existing SQL: Bloom applies these optimizations automatically within
+DuckDB's query planner.
 
 **Up to 8.69× faster on an individual JOB query.**
 [See the measurements →](#benchmarks)
