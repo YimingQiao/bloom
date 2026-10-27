@@ -643,16 +643,12 @@ static void InjectDefaultScanFilters(ExcitationGraphManager &manager, unique_ptr
 	auto output_bindings = op->GetColumnBindings();
 	vector<unique_ptr<Expression>> expressions;
 	for (auto &df : *direct_filters) {
-		if (get && df.binding.table_index == get->table_index) {
-			auto &column_ids = get->GetColumnIds();
-			idx_t pos = df.binding.column_index;
-			if (pos < column_ids.size() && !column_ids[pos].IsVirtualColumn()) {
-				auto retained_filter = manager.RetainFilterForExecution(df.filter);
-				get->table_filters.PushFilter(
-				    ProjectionIndex(pos),
-				    RPTTableFilter::MakeOptional(std::move(retained_filter), get->GetColumnType(column_ids[pos])));
-				continue;
-			}
+		auto key_type = get ? ScannerFilterSet::GetPushdownType(*get, df.binding) : nullptr;
+		if (key_type) {
+			auto retained_filter = manager.RetainFilterForExecution(df.filter);
+			get->table_filters.PushFilter(df.binding.column_index,
+			                              RPTTableFilter::MakeOptional(std::move(retained_filter), *key_type));
+			continue;
 		}
 		// The binding belongs to the subtree's output. Evaluate there instead
 		// of treating its column number as a position in an unrelated scan.

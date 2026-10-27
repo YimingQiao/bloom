@@ -52,6 +52,18 @@ LogicalGet *ScannerFilterSet::GetPushdownScan(LogicalOperator &plan) {
 	return leaf->type == LogicalOperatorType::LOGICAL_GET ? &leaf->Cast<LogicalGet>() : nullptr;
 }
 
+const LogicalType *ScannerFilterSet::GetPushdownType(const LogicalGet &get, ColumnBinding binding) {
+	if (binding.table_index != get.table_index) {
+		return nullptr;
+	}
+	auto &column_ids = get.GetColumnIds();
+	idx_t pos = binding.column_index;
+	if (pos >= column_ids.size() || column_ids[pos].IsVirtualColumn()) {
+		return nullptr;
+	}
+	return &get.GetColumnType(column_ids[pos]);
+}
+
 void ScannerFilterSet::Pushdown(LogicalOperator &plan) {
 	if (entries_.empty()) {
 		return;
@@ -67,18 +79,11 @@ void ScannerFilterSet::Pushdown(LogicalOperator &plan) {
 			return false;
 		}
 		auto &binding = entry.bindings.front();
-		if (binding.table_index != scan->table_index) {
+		auto key_type = GetPushdownType(*scan, binding);
+		if (!key_type) {
 			return false;
 		}
-		auto &get = *scan;
-		auto &column_ids = get.GetMutableColumnIds();
-		idx_t projection_position = binding.column_index;
-		if (projection_position >= column_ids.size() || column_ids[projection_position].IsVirtualColumn()) {
-			return false;
-		}
-		auto &key_type = get.GetColumnType(column_ids[projection_position]);
-		get.table_filters.PushFilter(ProjectionIndex(projection_position),
-		                             RPTTableFilter::MakeOptional(entry.filter, key_type));
+		scan->table_filters.PushFilter(binding.column_index, RPTTableFilter::MakeOptional(entry.filter, *key_type));
 		return true;
 	});
 	entries_.erase(pushed_end, entries_.end());

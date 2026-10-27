@@ -28,6 +28,8 @@ public:
 	size_t Fingerprint() const;
 	//! Scan reachable without moving a filter across a value/layout boundary.
 	static LogicalGet *GetPushdownScan(LogicalOperator &plan);
+	//! Type of a matching non-virtual scan column, or nullptr if it cannot receive the filter.
+	static const LogicalType *GetPushdownType(const LogicalGet &get, ColumnBinding binding);
 	void Pushdown(LogicalOperator &plan);
 	void Resolve(const vector<ColumnBinding> &output_bindings);
 	void Apply(DataChunk &chunk) const;
