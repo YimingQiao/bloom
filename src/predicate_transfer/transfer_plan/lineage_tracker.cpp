@@ -8,6 +8,9 @@
 namespace duckdb {
 
 void LineageTracker::Clear() {
+	keys_.clear();
+	next_token_ = 0;
+	key_based_ = false;
 	table_to_lineage_.clear();
 	per_lineage_.clear();
 	join_columns_.clear();
@@ -15,7 +18,7 @@ void LineageTracker::Clear() {
 }
 
 void LineageTracker::RegisterAliasGroup(const LineageSet &group) {
-	if (group.size() < 2) {
+	if (key_based_ || group.size() < 2) {
 		return;
 	}
 	// Pick the smallest table_id as the canonical lineage_id for this group.
@@ -68,6 +71,11 @@ LineageTracker::ColumnSet LineageTracker::UnionColumnLineage(const vector<Column
 }
 
 bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
+	if (key_based_) {
+		auto &source = FindKey(edge.left_bindings).result;
+		auto &dest = FindKey(edge.right_bindings).constraints;
+		return std::any_of(source.begin(), source.end(), [&](idx_t token) { return !dest.count(token); });
+	}
 	if (kColumnGranular) {
 		// BF is transmitted pairwise src_i → dst_i — check each pair.
 		D_ASSERT(edge.left_bindings.size() == edge.right_bindings.size());
@@ -113,6 +121,7 @@ bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
 }
 
 void LineageTracker::Propagate(const GraphEdge &edge) {
+	D_ASSERT(!key_based_);
 	idx_t src_L = LineageOf(edge.source);
 	idx_t dst_L = LineageOf(edge.destination);
 	auto &dst_lineage = per_lineage_[dst_L];
@@ -154,6 +163,12 @@ size_t LineageTracker::Snapshot::StableHash() const {
 LineageTracker::Snapshot LineageTracker::MakeSnapshot(idx_t source_table_id,
                                                       const vector<ColumnBinding> &source_cols) const {
 	Snapshot s;
+	if (key_based_) {
+		s.key_based = true;
+		s.lineages = FindKey(source_cols).result;
+		s.key_columns = source_cols;
+		return s;
+	}
 	idx_t L = LineageOf(source_table_id);
 	auto it = per_lineage_.find(L);
 	if (it != per_lineage_.end()) {
@@ -178,7 +193,8 @@ const LineageTracker::LineageSet &LineageTracker::Lineage(idx_t table_id) const 
 }
 
 bool LineageTracker::IsSubset(const Snapshot &a, const Snapshot &b) {
-	if (kColumnGranular) {
+	D_ASSERT(a.key_based == b.key_based);
+	if (!a.key_based && kColumnGranular) {
 		for (auto &e : a.columns) {
 			if (!b.columns.count(e)) {
 				return false;
@@ -192,6 +208,72 @@ bool LineageTracker::IsSubset(const Snapshot &a, const Snapshot &b) {
 		}
 	}
 	return true;
+}
+
+static vector<ColumnBinding> SortedKey(vector<ColumnBinding> key) {
+	std::sort(key.begin(), key.end(), [](const ColumnBinding &a, const ColumnBinding &b) {
+		return a.table_index.index < b.table_index.index ||
+		       (a.table_index == b.table_index && a.column_index < b.column_index);
+	});
+	return key;
+}
+
+void LineageTracker::SeedKey(const vector<ColumnBinding> &key) {
+	D_ASSERT(!key.empty());
+	auto sorted = SortedKey(key);
+	auto &keys = keys_[key.front().table_index.index];
+	for (auto &state : keys) {
+		if (state.key == sorted) {
+			return;
+		}
+	}
+	auto token = ++next_token_;
+	keys.push_back({std::move(sorted), {token}, {token}});
+}
+
+const LineageTracker::KeyState &LineageTracker::FindKey(const vector<ColumnBinding> &key) const {
+	auto sorted = SortedKey(key);
+	for (auto &state : keys_.at(key.front().table_index.index)) {
+		if (state.key == sorted) {
+			return state;
+		}
+	}
+	throw InternalException("Unregistered complete key in L/C lineage");
+}
+
+LineageTracker::Snapshot LineageTracker::NewPredicate(const vector<ColumnBinding> &key) {
+	Snapshot snapshot;
+	snapshot.key_based = true;
+	snapshot.key_columns = key;
+	snapshot.lineages.insert(++next_token_);
+	return snapshot;
+}
+
+void LineageTracker::ApplyKeyFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters,
+                                     bool shrunk, bool initial) {
+	for (auto &state : keys_[table_id]) {
+		bool cross_key = false;
+		LineageSet incoming;
+		for (auto &filter : filters) {
+			bool contained = std::all_of(filter.first.begin(), filter.first.end(), [&](const ColumnBinding &col) {
+				return std::find(state.key.begin(), state.key.end(), col) != state.key.end();
+			});
+			if (contained) {
+				incoming.insert(filter.second.lineages.begin(), filter.second.lineages.end());
+			} else {
+				cross_key = true;
+			}
+		}
+		if (initial || shrunk) {
+			if (cross_key) {
+				state.result = {++next_token_};
+			} else {
+				state.result.insert(incoming.begin(), incoming.end());
+			}
+		}
+		state.constraints.insert(incoming.begin(), incoming.end());
+		state.constraints.insert(state.result.begin(), state.result.end());
+	}
 }
 
 } // namespace duckdb

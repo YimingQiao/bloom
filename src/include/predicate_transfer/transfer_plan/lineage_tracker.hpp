@@ -8,34 +8,17 @@ namespace duckdb {
 //===--------------------------------------------------------------------===//
 // LineageTracker
 //===--------------------------------------------------------------------===//
-//! Tracks which lineages have contributed information to which destinations
-//! during predicate-transfer flooding.
+//! Tracks result lineage (L) and satisfied constraints (C) for each complete
+//! join key. Immutable tokens identify exact projections or Bloom acceptance
+//! predicates. Receiving a filter does not change C; ApplyKeyFilters commits
+//! feedback after the filter has actually run.
 //!
-//! Identity model:
-//!   - Each logical table_id is mapped to a "lineage_id". Tables that share
-//!     the same underlying data (CDC aliases — bare CHUNK_GETs pointing at
-//!     one ColumnDataCollection) map to one canonical lineage_id, so their
-//!     lineage state is literally the same slot. Edges inside the alias
-//!     group become same-lineage and get pruned at EdgeCarriesNewInfo
-//!     without any special casing.
-//!   - Non-alias tables trivially map to their own table_id as lineage_id.
-//!
-//! Two compile-time modes:
-//!   - Column granularity (default): per-(lineage_id, column) lineage. A
-//!     transfer changes the destination rowset, so every join-key column of
-//!     that destination inherits the source-key lineage. This lets a filter
-//!     arriving on one key make a subsequently stronger filter leave through
-//!     another key (for example A.x -> B.x, then B.y -> C.y).
-//!   - Table granularity: per-lineage_id only.
-//!
-//! Select via -DBLOOM_LINEAGE_TABLE_GRANULARITY at build time.
+//! The optional legacy mode tracks contributing columns (or tables with
+//! BLOOM_LINEAGE_TABLE_GRANULARITY) and shares state across CDC aliases.
 class LineageTracker {
 public:
 	using LineageSet = unordered_set<idx_t>;
 	using ColumnSet = unordered_set<ColumnBinding, ColumnBindingHashFunc>;
-	// Kept for callers that still spell `TableSet`. Semantically a set of
-	// lineage_ids (which for non-aliases equals table_ids).
-	using TableSet = LineageSet;
 
 #ifdef BLOOM_LINEAGE_TABLE_GRANULARITY
 	static constexpr bool kColumnGranular = false;
@@ -45,7 +28,8 @@ public:
 
 	//! Snapshot of lineage at the moment a cascade filter is attached.
 	//! - `columns` is populated only in column mode (used for subsumption).
-	//! - `lineages` is always populated (used as the oracle cache key).
+	//! - `lineages` is always populated (used as the oracle cache key); in
+	//!   runtime key mode it holds immutable predicate tokens instead of table IDs.
 	//! - `key_columns` is the canonicalised source key columns in edge order:
 	//!   it identifies WHICH columns the built BF hashes (and their arity).
 	//!   Cache keys must include it — the per-column lineage sets of different
@@ -55,16 +39,28 @@ public:
 	//!   (observed on TPC-H q09: supplier probed with 1 of 2 key columns →
 	//!   nearly all rows wrongly filtered → empty query result).
 	struct Snapshot {
+		bool key_based = false;
 		ColumnSet columns;
 		LineageSet lineages;
 		vector<ColumnBinding> key_columns;
 
-		//! Content-stable hash (order-insensitive lineages + key columns in
-		//! order). Safe as a cross-run cache identity, unlike filter pointers.
+		//! Content-stable hash: order-insensitive tokens and ordered key columns.
+		//! Tokens belong to one tracker lifetime; this is not a persistent cache key.
 		size_t StableHash() const;
 	};
 
 	void Clear();
+	void EnableKeyLineage() {
+		key_based_ = true;
+	}
+	void SeedKey(const vector<ColumnBinding> &key);
+	//! Commit only filters actually evaluated on these rows. A batch containing
+	//! a cross-key predicate conservatively creates a new projection token.
+	void ApplyKeyFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters, bool shrunk,
+	                     bool initial);
+	//! An approximate filter proves its acceptance predicate, not its source's
+	//! exact domain. Give that predicate a separate immutable identity.
+	Snapshot NewPredicate(const vector<ColumnBinding> &key);
 
 	//! Declare a set of table ids as aliases — all members share the same
 	//! underlying data. Internally assigns one canonical lineage_id to the
@@ -95,13 +91,22 @@ public:
 	//! Return the lineage set for `table_id`, or an empty set if none.
 	const LineageSet &Lineage(idx_t table_id) const;
 
-	//! Subset check between two snapshots. Picks the column- or lineage-level
-	//! representation depending on the compile-time mode.
+	//! Compare immutable tokens in separate mode, or contributing columns/tables
+	//! in legacy mode. Callers must check key compatibility separately.
 	static bool IsSubset(const Snapshot &a, const Snapshot &b);
 
 	idx_t LineageOf(idx_t table_id) const;
 
 private:
+	struct KeyState {
+		vector<ColumnBinding> key;
+		LineageSet result;
+		LineageSet constraints;
+	};
+	const KeyState &FindKey(const vector<ColumnBinding> &key) const;
+	unordered_map<idx_t, vector<KeyState>> keys_;
+	idx_t next_token_ = 0;
+	bool key_based_ = false;
 	ColumnBinding Canon(const ColumnBinding &col) const;
 	ColumnSet UnionColumnLineage(const vector<ColumnBinding> &cols) const;
 

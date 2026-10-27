@@ -6,8 +6,8 @@ the full workload with the base Bloom runner, candidate Bloom runner, and the
 candidate runner with Bloom disabled. The first round starts with that native
 runner so newly generated data matches the candidate's queries and answers.
 All three configurations then reuse the same database. The order reverses
-between rounds for both comparisons. Generated TPC-H data uses the v1.5 storage
-format so pre-2.0 runners can read the candidate-generated rows too.
+between rounds for both comparisons. Generated TPC-H data uses DuckDB's default
+storage format; historical comparisons can explicitly request an older format.
 A commit-to-commit query slowdown of at least 10% is reported, while the CI
 gate follows DuckDB's aggregate policy: fail when the workload geomean grows
 by at least 10% or 50ms. The DuckDB comparison reports Bloom's absolute
@@ -54,6 +54,10 @@ def parse_args():
     )
     parser.add_argument("--threads", type=positive_integer, default=1)
     parser.add_argument("--timed-runs", type=positive_integer, default=5)
+    parser.add_argument(
+        "--storage-version",
+        help="Optional TPC-H storage format for historical comparisons (e.g. v1.5.0)",
+    )
     parser.add_argument(
         "--rounds",
         type=positive_integer,
@@ -105,8 +109,8 @@ def run_once(args, workload, side, runner, round_index):
         "--out",
         str(result_path),
     ]
-    if workload == "tpch_sf1":
-        command += ["--storage-version", "v1.5.0"]
+    if workload == "tpch_sf1" and args.storage_version:
+        command += ["--storage-version", args.storage_version]
     if side == "duckdb":
         command.append("--baseline")
     print(f">>> {workload} {side} round {round_index + 1}: {shlex.join(command)}", flush=True)

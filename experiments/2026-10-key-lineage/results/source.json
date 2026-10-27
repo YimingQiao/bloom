@@ -1,0 +1,7 @@
+{
+  "branch": "experiment/key-lineage-lc-20261021",
+  "commit": "7e87b12854e4ae643b32a33e66a27fa238382b2e",
+  "harness_sha256": "81de00a05a8cff49d94f46208d6c96fd57865085839a6457f96840216f18b06d",
+  "analysis_sha256": "7eed6e6cc1bb0f6f055a56258941e307d0ecb255ee3dbdef05461752415f0da5",
+  "harness_matches_branch": true
+}

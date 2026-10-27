@@ -69,6 +69,12 @@ reservoirs, but uses a different sampling method and may choose a different
 transfer plan. Measure end-to-end latency for the workload before choosing a
 mode. `SET enable_bloom = false` provides the native comparison.
 
+`bloom_seperate_lineage` defaults to `true`. Bloom tracks each complete join key's
+result lineage separately from the constraints already applied to its rows.
+Receiving a filter does not mark it as applied. Set `bloom_seperate_lineage = false`
+to compare with the legacy lineage implementation; scheduling and sampling
+settings remain the same.
+
 `bloom_excitation_mode` selects how repeated transfers decide whether a join-key
 domain contains new information. It accepts `table_size` (the default) and
 `join_key_ndv`; the latter uses exact NDV changes for supported single-column

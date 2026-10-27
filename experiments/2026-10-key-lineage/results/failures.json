@@ -1,0 +1,30 @@
+[
+  {
+    "benchmark": "STATS-CEB",
+    "query": "120",
+    "variant": "duckdb",
+    "phase": "reference",
+    "message": "timeout 20s"
+  },
+  {
+    "benchmark": "STATS-CEB",
+    "query": "58",
+    "variant": "duckdb",
+    "phase": "reference",
+    "message": "timeout 20s"
+  },
+  {
+    "benchmark": "STATS-CEB",
+    "query": "122",
+    "variant": "duckdb",
+    "phase": "reference",
+    "message": "timeout 20s"
+  },
+  {
+    "benchmark": "STATS-CEB",
+    "query": "126",
+    "variant": "duckdb",
+    "phase": "reference",
+    "message": "timeout 20s"
+  }
+]

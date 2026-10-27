@@ -31,6 +31,10 @@ on:
         description: Optional base commit or ref (defaults to HEAD^)
         required: false
         type: string
+      storage_version:
+        description: Optional TPC-H storage format for historical comparisons (e.g. v1.5.0)
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -141,14 +145,22 @@ jobs:
         run: ccache --show-stats
 
       - name: Compare commits and DuckDB baseline
+        shell: bash
+        env:
+          BENCHMARK_STORAGE_VERSION: ${{ inputs.storage_version }}
         run: |
           mkdir -p "${BLOOM_SAMPLE_CACHE_DIR}"
+          storage_args=()
+          if [[ -n "${BENCHMARK_STORAGE_VERSION}" ]]; then
+            storage_args+=(--storage-version "${BENCHMARK_STORAGE_VERSION}")
+          fi
           python3 scripts/compare_performance.py \
             --base-runner "${BASE_DIR}/build/performance/benchmark/benchmark_runner" \
             --candidate-runner build/performance/benchmark/benchmark_runner \
             --workload imdb \
             --workload tpch_sf1 \
-            --out-dir "${RUNNER_TEMP}/performance-results"
+            --out-dir "${RUNNER_TEMP}/performance-results" \
+            "${storage_args[@]}"
 
       - name: Upload benchmark logs
         if: always()

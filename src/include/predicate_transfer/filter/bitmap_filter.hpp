@@ -57,6 +57,9 @@ public:
 	idx_t MemoryUsage() const override {
 		return 64 + BlockCount() * sizeof(uint64_t);
 	}
+	bool IsExact() const override {
+		return true;
+	}
 	optional_idx ExactDistinctCount() const override;
 	string ToString() const override;
 

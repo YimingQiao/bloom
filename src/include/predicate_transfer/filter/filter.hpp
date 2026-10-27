@@ -27,6 +27,10 @@ public:
 	//! Bytes retained by the finalized filter itself. Task-local build state is
 	//! temporary and is accounted separately by transfer admission.
 	virtual idx_t MemoryUsage() const = 0;
+	//! Whether membership has no false positives.
+	virtual bool IsExact() const {
+		return false;
+	}
 	//! Exact number of non-NULL keys represented by this filter when its
 	//! physical representation can prove it. Approximate filters return invalid.
 	virtual optional_idx ExactDistinctCount() const {

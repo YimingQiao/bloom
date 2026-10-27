@@ -236,6 +236,37 @@ void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 	executor_.EnsureMaterialized(*op, required);
 }
 
+// Pending receipt is deliberately separate from satisfied constraints. GET
+// pushdown uses threshold 1.0 (mandatory evaluation); residual/composite
+// predicates remain on the scanner and are evaluated by Compact().
+void ExcitationGraphManager::CommitKeyFilters(idx_t table_id) {
+	auto *op = table_operator_manager.GetTableOperator(table_id);
+	auto *scanner = executor_.Find(*op);
+	D_ASSERT(scanner && scanner->IsMaterialized());
+	bool initial = key_processed_.insert(table_id).second;
+	vector<pair<vector<ColumnBinding>, LineageTracker::Snapshot>> applied;
+	for (auto &filter : cascade_filters_[table_id]) {
+		if (filter.applied) {
+			continue;
+		}
+		for (auto &binding : filter.bindings) {
+			if (scanner->FindChunkCol(binding) == DConstants::INVALID_INDEX) {
+				throw InternalException("Missing pending-filter key during L/C commit");
+			}
+		}
+		applied.emplace_back(filter.bindings, filter.acceptance);
+		filter.applied = true;
+	}
+	auto before = scanner->Count();
+	auto after = scanner->Compact().row_count;
+	state_.Lineage().ApplyKeyFilters(table_id, applied, after < before, initial);
+	key_pending_.erase(table_id);
+	if (config.log_transfer_steps || ClientConfig::GetConfig(context).enable_profiler) {
+		std::cerr << "  [Bloom-KeyLineage] table=" << table_id << " initial=" << initial << " input=" << before
+		          << " output=" << after << " applied=" << applied.size() << " shrunk=" << (after < before) << '\n';
+	}
+}
+
 vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t source_table_id,
                                                                      const vector<shared_ptr<GraphEdge>> &edges) {
 	struct PreparedActivation {
@@ -359,7 +390,9 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 			// The destination already consumed this exact equality-domain version.
 			// Preserve the logical lineage progress without rebuilding or probing an
 			// identical physical filter.
-			state_.Lineage().Propagate(*activation.edge);
+			if (!config.seperate_lineage) {
+				state_.Lineage().Propagate(*activation.edge);
+			}
 			continue;
 		}
 		activation.edge->filter_type = activation.filter->ToString();
@@ -367,7 +400,10 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		auto &dest_filters = cascade_filters_[activation.edge->destination];
 		bool subsumed = false;
 		for (auto it = dest_filters.begin(); it != dest_filters.end();) {
-			if (it->bindings != activation.sorted_dst) {
+			// In L/C mode source-expression containment proves filter
+			// containment only for exact filters, not Bloom acceptance domains.
+			if (it->bindings != activation.sorted_dst ||
+			    (config.seperate_lineage && (!it->filter->IsExact() || !activation.filter->IsExact()))) {
 				++it;
 				continue;
 			}
@@ -410,6 +446,19 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 		CascadeFilter cf;
 		cf.bindings = activation.sorted_dst;
 		cf.filter = activation.filter;
+		if (config.seperate_lineage) {
+			if (activation.filter->IsExact()) {
+				cf.acceptance = activation.snapshot;
+			} else {
+				auto found = acceptance_lineage_.find(activation.filter.get());
+				if (found == acceptance_lineage_.end()) {
+					found = acceptance_lineage_
+					            .emplace(activation.filter.get(), state_.Lineage().NewPredicate(activation.sorted_src))
+					            .first;
+				}
+				cf.acceptance = found->second;
+			}
+		}
 		cf.lineage = std::move(activation.snapshot);
 		dest_filters.push_back(std::move(cf));
 		auto *dest_op = table_operator_manager.GetTableOperator(activation.edge->destination);

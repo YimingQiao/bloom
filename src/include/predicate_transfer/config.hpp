@@ -112,6 +112,8 @@ public:
 	//! and does not require the profiler (SET bloom_log_transfer_steps=true or
 	//! env BLOOM_LOG_TRANSFER_STEPS=1). Used to diff oracle vs sampling paths.
 	bool log_transfer_steps = false;
+	//! Per-complete-key result lineage / satisfied constraints.
+	bool seperate_lineage = true;
 	//! Excitation threshold: re-excite if cardinality drops below this ratio of baseline
 	double excitation_threshold = 1.0;
 	//! How a re-excited source decides whether it carries new information.

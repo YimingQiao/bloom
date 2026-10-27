@@ -9,17 +9,10 @@ namespace duckdb {
 
 class RPTFilter;
 
-//! Cross-flooding-round cache for built Bloom transfer filters.
-//!
-//! The per-step cache used to key by source `ColumnBinding` (table_index,
-//! column_index). Two aliases of a lifted CTE — same underlying data,
-//! different table_index — therefore missed it and rebuilt byte-identical BFs.
-//!
-//! RPTFilterCache instead keys by the source's **lineage snapshot**. A snapshot
-//! captures both the origin rowsets (post-alias canonicalisation) and the
-//! column-level lineage; two sources with equal snapshots have equal
-//! post-filter rowsets on the cached columns, so their BFs are interchangeable.
-//! Built filters persist across flooding rounds (whole `Optimize` call).
+//! Reuses transfer filters across rounds within one Optimize call. Cache
+//! identity includes the source, immutable lineage snapshot, and ordered key
+//! columns. Separate lineage keeps CDC aliases independent; legacy lineage
+//! canonicalises aliases so equivalent snapshots can share filters.
 class RPTFilterCache {
 public:
 	shared_ptr<RPTFilter> Lookup(idx_t source_lineage_id, const LineageTracker::Snapshot &snapshot) const;

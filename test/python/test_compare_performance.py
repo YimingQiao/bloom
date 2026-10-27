@@ -82,24 +82,28 @@ class SummarizeTimingsTest(unittest.TestCase):
 
 
 class DuckDBBaselineTest(unittest.TestCase):
-    def test_disables_bloom_on_candidate_runner(self):
-        with TemporaryDirectory() as directory:
-            args = SimpleNamespace(out_dir=Path(directory), threads=1, timed_runs=1)
-            completed = SimpleNamespace(
-                returncode=0,
-                stdout="",
-                stderr="benchmark/tpch_sf1/q01.benchmark\t1\t0.10\n",
-            )
-            with (
-                patch("scripts.compare_performance.subprocess.run", return_value=completed) as execute,
-                redirect_stdout(StringIO()),
-            ):
-                run_once(args, "tpch_sf1", "duckdb", Path("/candidate/runner"), 0)
+    def test_candidate_native_only_overrides_storage_when_requested(self):
+        for version in (None, "v1.5.0"):
+            with self.subTest(storage_version=version), TemporaryDirectory() as directory:
+                args = SimpleNamespace(out_dir=Path(directory), threads=1, timed_runs=1, storage_version=version)
+                completed = SimpleNamespace(
+                    returncode=0,
+                    stdout="",
+                    stderr="benchmark/tpch_sf1/q01.benchmark\t1\t0.10\n",
+                )
+                with (
+                    patch("scripts.compare_performance.subprocess.run", return_value=completed) as execute,
+                    redirect_stdout(StringIO()),
+                ):
+                    run_once(args, "tpch_sf1", "duckdb", Path("/candidate/runner"), 0)
 
-            command = execute.call_args.args[0]
-            self.assertIn("--baseline", command)
-            self.assertIn("/candidate/runner", command)
-            self.assertEqual(command[command.index("--storage-version") + 1], "v1.5.0")
+                command = execute.call_args.args[0]
+                self.assertIn("--baseline", command)
+                self.assertIn("/candidate/runner", command)
+                if version is None:
+                    self.assertNotIn("--storage-version", command)
+                else:
+                    self.assertEqual(command[command.index("--storage-version") + 1], version)
 
     def test_candidate_native_generates_data_then_reverses_both_comparisons(self):
         timings = defaultdict(

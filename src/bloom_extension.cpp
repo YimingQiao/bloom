@@ -277,6 +277,9 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	if (input.context.TryGetCurrentSetting("bloom_sample_memory_cache", setting)) {
 		config.sampling.prepared_memory_cache = setting.GetValue<bool>();
 	}
+	if (input.context.TryGetCurrentSetting("bloom_seperate_lineage", setting)) {
+		config.seperate_lineage = setting.GetValue<bool>();
+	}
 	if (input.context.TryGetCurrentSetting("bloom_log_transfer_steps", setting)) {
 		config.log_transfer_steps = setting.GetValue<bool>();
 	}
@@ -296,7 +299,7 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	if (input.context.config.enable_profiler || config.log_transfer_steps) {
 		auto debug_info = optimizer.GetDebugInfo();
 		if (!debug_info.empty()) {
-			std::cerr << debug_info << std::endl;
+			std::cerr << debug_info << '\n';
 		}
 	}
 }
@@ -353,6 +356,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                          "Cache prepared samples in the process object cache to skip disk reloads across queries "
 	                          "(advanced)",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SAMPLE_MEMORY_CACHE", true)));
+	config.AddExtensionOption("bloom_seperate_lineage", "Complete-key L/C lineage with applied-filter feedback",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_SEPERATE_LINEAGE", true)));
 	config.AddExtensionOption("bloom_log_transfer_steps", "Log the transfer plan to stderr for debugging",
 	                          LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LOG_TRANSFER_STEPS", false)));
 	config.AddExtensionOption(

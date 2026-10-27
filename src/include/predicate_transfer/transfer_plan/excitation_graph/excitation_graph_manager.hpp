@@ -83,7 +83,7 @@ private:
 	idx_t ComputeBaseTableRowIdSpan(const LogicalOperator &op) const;
 
 	// Edge construction
-	vector<shared_ptr<GraphEdge>> CollectOutgoingEdges(idx_t table_id) const;
+	vector<shared_ptr<GraphEdge>> CollectOutgoingEdges(idx_t table_id, bool pending = false) const;
 	shared_ptr<GraphEdge> MakeBloomFilterEdge(idx_t source_id, idx_t dest_id, const EdgeInfo &edge) const;
 
 	// Cardinality update
@@ -92,6 +92,7 @@ private:
 
 	// Manager-side helpers coordinating TransferExecutor
 	void PrepareSourceTable(idx_t source_table_id);
+	void CommitKeyFilters(idx_t table_id);
 	void GenerateJoinStageExecutionPlan();
 
 	vector<shared_ptr<GraphEdge>> ActivateTables(idx_t source_table_id, const vector<shared_ptr<GraphEdge>> &edges);
@@ -100,7 +101,9 @@ private:
 	struct CascadeFilter {
 		vector<ColumnBinding> bindings; // size 1 = single column, N = composite key
 		shared_ptr<RPTFilter> filter;
-		LineageTracker::Snapshot lineage; // for subsumption + oracle cache key
+		LineageTracker::Snapshot lineage;    // immutable result lineage
+		LineageTracker::Snapshot acceptance; // actual predicate, including Bloom false positives
+		bool applied = false;
 	};
 
 	ExcitationWorkingSet state_;
@@ -115,6 +118,10 @@ private:
 	unordered_map<idx_t, shared_ptr<RPTFilter>> row_id_filters_;
 	unordered_map<idx_t, vector<DirectFilterInfo>> direct_filters_;
 	RPTFilterCache filter_cache_;
+	unordered_set<idx_t> key_processed_;
+	unordered_set<idx_t> key_pending_;
+	unordered_map<const RPTFilter *, LineageTracker::Snapshot> acceptance_lineage_;
+
 	//! Every excitation round before final-plan pruning. This distinguishes
 	//! identical final edge sets that were reached through different (and
 	//! potentially much more expensive) materialization schedules.
