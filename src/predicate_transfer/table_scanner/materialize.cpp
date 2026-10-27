@@ -12,7 +12,6 @@
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/expression_heuristics.hpp"
-#include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
@@ -20,6 +19,7 @@
 #include "duckdb/planner/expression/expression_barrier.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
+#include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_filter.hpp"
@@ -342,17 +342,18 @@ static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 
 //! Statistics propagation can leave range predicates above an already-filtered
 //! scan. An isolated materialization cannot rely on the enclosing join's runtime
-//! filters to prune that scan. Let DuckDB push these remaining predicates into
-//! storage, keeping the FILTER's output projection and any residual expressions.
-static void PushdownMaterializationFilters(ClientContext &context, LogicalOperator &op) {
+//! filters to prune that scan. Add native optional filters for storage pruning,
+//! preserving the original FILTER and its row-level evaluation order.
+static void AddMaterializationRangePruning(LogicalOperator &op) {
 	for (auto &child : op.children) {
-		PushdownMaterializationFilters(context, *child);
+		AddMaterializationRangePruning(*child);
 	}
 	if (op.type != LogicalOperatorType::LOGICAL_FILTER || op.children[0]->type != LogicalOperatorType::LOGICAL_GET) {
 		return;
 	}
 	auto &get = op.children[0]->Cast<LogicalGet>();
-	if (!get.GetTable() || !get.function.filter_pushdown || get.ordinality_idx.IsValid()) {
+	auto table = get.GetTable();
+	if (!table || !table->IsDuckTable() || !get.function.filter_pushdown || get.ordinality_idx.IsValid()) {
 		return;
 	}
 	for (auto &entry : get.table_filters) {
@@ -361,15 +362,35 @@ static void PushdownMaterializationFilters(ClientContext &context, LogicalOperat
 			return;
 		}
 	}
-	FilterCombiner combiner(context);
-	for (idx_t i = 0; i < op.expressions.size();) {
-		auto &expr = *op.expressions[i];
-		if (!expr.CanThrow() && !expr.IsVolatile() && !ExpressionBarrier::Contains(expr) &&
-		    combiner.TryPushdownGenericExpression(get, expr) == FilterPushdownResult::PUSHED_DOWN_FULLY) {
-			op.expressions.erase_at(i);
-		} else {
-			i++;
+	for (auto &expression : op.expressions) {
+		auto &expr = *expression;
+		// Revisit only column-to-constant ranges introduced by statistics.
+		// Moving other residuals (notably string OR predicates) into the scan
+		// can defeat the cheaper evaluation order chosen by DuckDB.
+		auto type = expr.GetExpressionType();
+		bool range = type == ExpressionType::COMPARE_BETWEEN || type == ExpressionType::COMPARE_LESSTHAN ||
+		             type == ExpressionType::COMPARE_GREATERTHAN || type == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
+		             type == ExpressionType::COMPARE_GREATERTHANOREQUALTO;
+		idx_t columns = 0;
+		optional_ptr<const BoundColumnRefExpression> column;
+		ExpressionIterator::EnumerateChildren(expr, [&](const Expression &child) {
+			if (child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF) {
+				column = &child.Cast<BoundColumnRefExpression>();
+				columns++;
+			}
+			range &= child.GetExpressionClass() == ExpressionClass::BOUND_COLUMN_REF ||
+			         child.GetExpressionClass() == ExpressionClass::BOUND_CONSTANT;
+		});
+		if (!range || columns != 1) {
+			continue;
 		}
+		D_ASSERT(column->Binding().table_index == get.table_index);
+		auto &column_type = column->GetReturnType();
+		BoundReferenceExpression reference(column_type, storage_t(0));
+		auto filter_expr = ExpressionIterator::ReplaceExpression(expr, *column, reference);
+		get.table_filters.PushFilter(
+		    column->Binding().column_index,
+		    make_uniq<ExpressionFilter>(CreateOptionalFilterExpression(std::move(filter_expr), column_type)));
 	}
 }
 
@@ -383,7 +404,7 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	}
 
 	auto plan_copy = table_op_.Copy(context_);
-	PushdownMaterializationFilters(context_, *plan_copy);
+	AddMaterializationRangePruning(*plan_copy);
 	auto copy_end = MaterializeClock::now();
 	if (log_timing) {
 		LogMaterializePlan(*plan_copy, "before_rpt");

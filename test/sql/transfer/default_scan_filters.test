@@ -55,7 +55,7 @@ JOIN rpt_output_keys b USING (id);
 0
 
 # Statistics can add a range FILTER after the scan already has local filters.
-# Moving that range into the materialization scan must preserve its output
+# Adding storage pruning must preserve the row-level range check and output
 # projection, including when filter-only columns precede the returned columns.
 statement ok
 CREATE TABLE rpt_range_source AS
