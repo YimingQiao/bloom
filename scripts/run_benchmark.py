@@ -142,10 +142,21 @@ def can_open_read_write(database: Path) -> bool:
         return False
 
 
+def storage_version(value):
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", value):
+        raise argparse.ArgumentTypeError("storage version must have the form v1.5.0")
+    return value
+
+
 def parse_args():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workload", choices=sorted(WORKLOADS), default="imdb")
     parser.add_argument("--db", type=Path, help="Database file (default: .bench_cache/data/<cache>)")
+    parser.add_argument(
+        "--storage-version",
+        type=storage_version,
+        help="Storage format for generated databases; uses a separate default cache",
+    )
     parser.add_argument("--runner", type=Path, default=ROOT / "build" / "release" / "benchmark" / "benchmark_runner")
     parser.add_argument(
         "--required-extension",
@@ -183,6 +194,7 @@ def write_benchmark_root(
     db: "Path | None",
     required_extension: str,
     exclude_pattern: "re.Pattern | None" = None,
+    storage_version: "str | None" = None,
 ):
     spec = WORKLOADS[workload]
     bench_dir = root / "benchmark" / workload
@@ -194,7 +206,10 @@ def write_benchmark_root(
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     benchmark_data = root / "duckdb_benchmark_data"
     benchmark_data.mkdir()
-    database = db or (DATA_DIR / spec["cache"]).resolve()
+    cache = Path(spec["cache"])
+    if storage_version:
+        cache = cache.with_name(f"{cache.stem}.{storage_version}{cache.suffix}")
+    database = db or (DATA_DIR / cache).resolve()
 
     db_exists = database.is_file()
     database_is_read_only = db_exists and not can_open_read_write(database)
@@ -249,6 +264,8 @@ def write_benchmark_root(
             ]
         else:
             lines += ["", f"cache {spec['cache']}"]
+            if storage_version:
+                lines += ["", f"storage persistent {storage_version}"]
             if not db_exists:
                 lines += ["", f"load {load_path}"]
             # An existing cache must never fall through to remote regeneration
@@ -312,6 +329,7 @@ def main():
             db,
             args.required_extension,
             re.compile(args.exclude_pattern) if args.exclude_pattern else None,
+            args.storage_version,
         )
         warm_page_cache(database)
 

@@ -99,6 +99,7 @@ class DuckDBBaselineTest(unittest.TestCase):
             command = execute.call_args.args[0]
             self.assertIn("--baseline", command)
             self.assertIn("/candidate/runner", command)
+            self.assertEqual(command[command.index("--storage-version") + 1], "v1.5.0")
 
     def test_candidate_native_generates_data_then_reverses_both_comparisons(self):
         timings = defaultdict(
@@ -142,6 +143,22 @@ class DuckDBBaselineTest(unittest.TestCase):
 
 
 class BenchmarkGenerationTest(unittest.TestCase):
+    def test_compatible_storage_uses_a_separate_cache_and_native_format_setting(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            data = root / "data"
+            data.mkdir()
+            existing = data / "tpch_sf1.duckdb"
+            existing.write_bytes(b"existing current-format database")
+            with patch.object(run_benchmark, "DATA_DIR", data):
+                database = run_benchmark.write_benchmark_root(root, "tpch_sf1", None, "bloom", storage_version="v1.5.0")
+
+            self.assertEqual(database, data / "tpch_sf1.v1.5.0.duckdb")
+            self.assertEqual(existing.read_bytes(), b"existing current-format database")
+            benchmark = (root / "benchmark" / "tpch_sf1" / "q01.benchmark").read_text(encoding="ascii")
+            self.assertIn("storage persistent v1.5.0", benchmark)
+            self.assertIn("load benchmark/tpch_sf1/load.sql", benchmark)
+
     def test_cold_job_database_requires_remote_readers(self):
         with TemporaryDirectory() as directory:
             root = Path(directory)
