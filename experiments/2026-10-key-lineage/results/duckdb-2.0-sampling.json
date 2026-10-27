@@ -159,5 +159,41 @@
   "raw_reports": [
     "build/lineage-sampling-performance",
     "build/lineage-sampling-instant"
-  ]
+  ],
+  "full_upstream_comparison": {
+    "enabled_commit": "9ec75539d85b5db7b23226d3a57001686ba0d6c8",
+    "runs": {
+      "disabled": {
+        "passed": 8570,
+        "failed": 7,
+        "skipped": 173,
+        "failures": [
+          "Test specific serialized plans",
+          "test/sql/copy/parquet/writer/parquet_write_memory_limit.test_slow",
+          "test/sql/outofcore/buffer_managed_query_result.test_slow",
+          "test/sql/settings/operator_memory_limit.test",
+          "test/sql/storage/external_file_cache/external_file_cache_spill.test_slow",
+          "test/sql/storage/test_eviction_queue_dead_nodes_underflow.test",
+          "test/sql/window/window_partition_paging.test_slow"
+        ]
+      },
+      "enabled": {
+        "passed": 8560,
+        "failed": 7,
+        "skipped": 173,
+        "failures": [
+          "Test specific serialized plans",
+          "test/sql/copy/parquet/writer/parquet_write_memory_limit.test_slow",
+          "test/sql/outofcore/buffer_managed_query_result.test_slow",
+          "test/sql/settings/operator_memory_limit.test",
+          "test/sql/storage/external_file_cache/external_file_cache_spill.test_slow",
+          "test/sql/storage/test_eviction_queue_dead_nodes_underflow.test",
+          "test/sql/table_function/duckdb_functions.test_slow"
+        ]
+      }
+    },
+    "followup_fix": "Name the registered internal filter argument col; removes the extra col0 entry in duckdb_functions().",
+    "targeted_followup": "TPC-DS SF0.01 and duckdb_functions passed together (29281 assertions); duckdb_functions also passed with Bloom disabled.",
+    "remaining_baseline_issue": "Native serialization assertion and memory-limit failures remain; this is not an entirely passing upstream suite."
+  }
 }

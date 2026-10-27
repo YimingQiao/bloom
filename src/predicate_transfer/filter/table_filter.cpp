@@ -89,6 +89,7 @@ static unique_ptr<FunctionData> RPTFilterDeserialize(Deserializer &, BoundScalar
 static ScalarFunction RPTFilterScalarFunction(const LogicalType &input_type) {
 	ScalarFunction function("__internal_bloom_rpt_filter", {input_type}, LogicalType::BOOLEAN, RPTFilterExecute,
 	                        RPTFilterBind);
+	function.GetSignature().GetParameter(0).SetName("col");
 	function.SetNullHandling(FunctionNullHandling::SPECIAL_HANDLING);
 	function.SetFilterPruneCallback(RPTFilterPrune);
 	function.SetSerializeCallback(RPTFilterSerialize);
