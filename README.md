@@ -1,18 +1,39 @@
-# Bloom
+<h1 align="center">Bloom</h1>
 
-[![Version: 0.0.3](https://img.shields.io/badge/version-0.0.3-blue)](extension_config.cmake)
-[![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+<p align="center"><strong>Faster multi-join queries in DuckDB.</strong><br>
+Adaptive predicate transfer, built into your query plan.</p>
+
+<p align="center">
+  <a href="extension_config.cmake"><img src="https://img.shields.io/badge/Bloom-0.0.3-1e5688" alt="Bloom 0.0.3"></a>
+  <a href="#compatibility"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
+  <a href="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg" alt="CI"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="License: MIT"></a>
+</p>
+
+<p align="center">
+  <a href="#build-and-load">Get started</a> ·
+  <a href="#benchmarks">Benchmarks</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#configuration">Configuration</a>
+</p>
 
 Bloom speeds up complex join queries in DuckDB by moving selective filters
 across the join graph. Built on **robust predicate transfer (RPT)**, it uses
 Bloom and bitmap filters to prune rows before they reach the joins.
 
-Instead of fixing the entire transfer plan up front, Bloom combines lightweight
-sampling with execution feedback. Sampling suggests which transfer to try next;
-after each step, Bloom observes the new cardinalities and adjusts its decision.
-Together, these signals avoid low-value transfers and keep later decisions
-grounded in the query's actual behavior.
+| Up to **8.69×** faster | **22 / 113** queries | **1.41×** overall |
+|:---:|:---:|:---:|
+| Best individual JOB query | JOB queries with **2–8.69×** speedups | Complete JOB workload |
+
+Measured with Bloom v0.0.3 and DuckDB v2.0.0, one thread, on compressed IMDB.
+Speedups compare per-query median runtimes; the overall figure compares their
+sums. Results vary by query, including slowdowns.
+[See the measurements and methodology →](#benchmarks)
+
+Bloom combines lightweight sampling with execution feedback. Sampling suggests
+which transfer to try next; after each step, Bloom observes the new cardinalities
+and adjusts its decision. These signals help avoid low-value transfers and keep
+later decisions grounded in the query's actual behavior.
 
 DuckDB already applies Bloom filters within selective hash joins
 ([duckdb/duckdb#19502](https://github.com/duckdb/duckdb/pull/19502)). Bloom
@@ -20,11 +41,9 @@ complements this by moving filters in both directions and across multiple joins.
 
 ## How it works
 
-- **Estimate.** Sample the tables and rank promising filter transfers.
-- **Transfer and adapt.** Apply one transfer, update the affected cardinalities,
-  and choose again. Selective intermediate results are materialized and reused.
-- **Filter at the scan.** Push transfer filters into DuckDB table scans, where
-  they can also help with row-group pruning.
+| 1 · Estimate | 2 · Transfer and adapt | 3 · Filter at the scan |
+|:---|:---|:---|
+| Sample the tables and rank promising transfers. | Apply a transfer, observe cardinalities, and choose again. Reuse selective intermediate results. | Push filters into DuckDB scans to prune rows and help skip row groups. |
 
 ## Compatibility
 
@@ -55,6 +74,34 @@ SELECT current_setting('enable_bloom');
 ```
 
 ## Benchmarks
+
+### DuckDB 2.0
+
+| Workload | Database | Queries | DuckDB baseline | Bloom | Total speedup |
+|---|---:|---:|---:|---:|---:|
+| [JOB](https://www.vldb.org/pvldb/vol9/p204-leis.pdf) | compressed IMDB, 2.05 GB | 113 | 28.427 s | 20.114 s | **1.413×** |
+| TPC-H SF10 | 2.68 GB | 22 | 17.180 s | 15.336 s | **1.120×** |
+
+On JOB, **22 of 113 queries achieve 2–8.69× speedups**. The largest gain is
+query **12b**, from 188.038 ms to 21.643 ms. Across the complete workload,
+77 queries are faster and 36 are slower; per-query speedups range from
+0.132× to 8.688×. The largest slowdown is query 11b, from 13.945 ms to
+105.267 ms. The headline maximum describes an individual query, while the
+total speedup above includes all 113 queries.
+
+Both workloads use one thread, default prepared sampling (10,000 rows per
+table, seed 2), and DuckDB's built-in join filters enabled on both sides.
+The database is brought into the OS page cache before each benchmark process;
+each query gets one discarded warmup and five timed runs. Reported totals are
+**sums of per-query medians**, including Bloom's optimizer-time work but
+excluding initial sample preparation during warmup. All queries completed
+successfully and passed the benchmark runner's result checks.
+
+[Full per-query timings](docs/benchmarks/duckdb-2.0/timings.csv) ·
+[Measurement details and reproduction](docs/benchmarks/duckdb-2.0/README.md)
+
+<details>
+<summary><strong>Historical results · seven workloads on the previous DuckDB development build</strong></summary>
 
 The results below were measured on the previous DuckDB development commit
 `21aca042`; they are historical results, not DuckDB 2.0 measurements.
@@ -87,6 +134,8 @@ Join Order Benchmark over the IMDB data set.
 Bloom sees its largest gains on the many-join CEB and JOB workloads. TPC-H and
 TPC-DS benefit less because DuckDB's built-in join filters already handle much
 of their filtering.
+
+</details>
 
 ### Running the benchmarks
 
