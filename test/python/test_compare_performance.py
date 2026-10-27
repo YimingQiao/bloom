@@ -100,7 +100,7 @@ class DuckDBBaselineTest(unittest.TestCase):
             self.assertIn("--baseline", command)
             self.assertIn("/candidate/runner", command)
 
-    def test_alternates_both_comparisons(self):
+    def test_candidate_native_generates_data_then_reverses_both_comparisons(self):
         timings = defaultdict(
             list,
             {f"benchmark/tpch_sf1/q{index:03}.benchmark": [1.0] for index in range(22)},
@@ -117,7 +117,7 @@ class DuckDBBaselineTest(unittest.TestCase):
 
         self.assertEqual(
             [call.args[2] for call in execute.call_args_list],
-            ["base", "candidate", "duckdb", "duckdb", "candidate", "base"],
+            ["duckdb", "base", "candidate", "candidate", "base", "duckdb"],
         )
         duckdb_calls = [call for call in execute.call_args_list if call.args[2] == "duckdb"]
         self.assertTrue(all(call.args[3] == args.candidate_runner for call in duckdb_calls))
