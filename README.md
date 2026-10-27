@@ -12,7 +12,6 @@ Adaptive predicate transfer, built into your query plan.</p>
 
 <p align="center">
   <a href="#build-and-load">Get started</a> ·
-  <a href="#try-it-in-duckdb">SQL demo</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/USAGE.md">Documentation</a>
@@ -21,7 +20,7 @@ Adaptive predicate transfer, built into your query plan.</p>
 Bloom is a DuckDB extension that speeds up queries across multiple tables.
 
 **Up to 8.69× faster on an individual JOB query.**
-[Try the SQL demo ↓](#try-it-in-duckdb) · [See the measurements →](#benchmarks)
+[See the measurements →](#benchmarks)
 
 ## How it works
 
@@ -43,77 +42,6 @@ Load the extension in DuckDB started with `-unsigned`:
 ```sql
 LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
 ```
-
-## Try it in DuckDB
-
-From the repository root, open your compressed IMDB database in a fresh
-session of standard DuckDB v2.0.0:
-
-```bash
-duckdb -unsigned /path/to/imdb.duckdb
-```
-
-Use `.timer on` in the CLI, or the execution time shown by your native DuckDB
-UI. Define JOB query **12b** below, then run each statement separately.
-
-<details>
-<summary><strong>SQL setup · JOB query 12b</strong></summary>
-
-```sql
-SET threads = 1;
-
-CREATE TEMP VIEW job_12b AS
-SELECT MIN(mi.info) AS budget,
-       MIN(t.title) AS unsuccsessful_movie
-FROM company_name AS cn,
-     company_type AS ct,
-     info_type AS it1,
-     info_type AS it2,
-     movie_companies AS mc,
-     movie_info AS mi,
-     movie_info_idx AS mi_idx,
-     title AS t
-WHERE cn.country_code = '[us]'
-  AND ct.kind IS NOT NULL
-  AND (ct.kind = 'production companies' OR ct.kind = 'distributors')
-  AND it1.info = 'budget'
-  AND it2.info = 'bottom 10 rank'
-  AND t.production_year > 2000
-  AND (t.title LIKE 'Birdemic%' OR t.title LIKE '%Movie%')
-  AND t.id = mi.movie_id
-  AND t.id = mi_idx.movie_id
-  AND mi.info_type_id = it1.id
-  AND mi_idx.info_type_id = it2.id
-  AND t.id = mc.movie_id
-  AND ct.id = mc.company_type_id
-  AND cn.id = mc.company_id
-  AND mc.movie_id = mi.movie_id
-  AND mc.movie_id = mi_idx.movie_id
-  AND mi.movie_id = mi_idx.movie_id;
-```
-
-The view names the [original JOB query](https://github.com/duckdb/duckdb/blob/d54cbbe3df17e8e5ce68312f483b4155836112aa/benchmark/imdb_plan_cost/queries/12b.sql);
-it does not cache its result.
-
-</details>
-
-Warm up once on each side, then compare:
-
-```sql
--- DuckDB
-SELECT * FROM job_12b; -- warmup
-SELECT * FROM job_12b; -- timed
-
-LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
-
--- DuckDB + Bloom
-SELECT * FROM job_12b; -- warmup, including sample preparation
-SELECT * FROM job_12b; -- timed
-```
-
-Example: **171 ms → 36 ms (4.75×)**, with identical results. These are medians
-of five timed runs after warmup; repeat each timed `SELECT` five times for the
-same comparison. Timings vary by machine and query.
 
 ## Benchmarks
 
