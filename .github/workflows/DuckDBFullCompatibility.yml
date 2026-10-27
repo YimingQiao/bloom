@@ -27,7 +27,6 @@ jobs:
     timeout-minutes: 240
     env:
       BUILD_DIR: build/fulltest
-      BLOOM_SAMPLE_CACHE_DIR: ${{ github.workspace }}/build/fulltest-bloom-samples
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -94,6 +93,7 @@ jobs:
         if: inputs.mode == 'both' || inputs.mode == 'disabled'
         env:
           BLOOM_ENABLE: "0"
+          BLOOM_SAMPLE_CACHE_DIR: ${{ github.workspace }}/build/fulltest-bloom-samples
         run: |
           status=0
           python3 duckdb/scripts/ci/run_tests.py \
@@ -112,6 +112,7 @@ jobs:
         if: ${{ !cancelled() && steps.discovery.outcome == 'success' && (inputs.mode == 'both' || inputs.mode == 'enabled') }}
         env:
           BLOOM_ENABLE: "1"
+          BLOOM_SAMPLE_CACHE_DIR: ${{ github.workspace }}/build/fulltest-bloom-samples
         run: |
           status=0
           python3 duckdb/scripts/ci/run_tests.py \
