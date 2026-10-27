@@ -44,23 +44,6 @@ struct OwnedPrefixRangeFunctionData final : PrefixRangeFunctionData {
 	shared_ptr<RPTFilter> owner;
 };
 
-struct OwnedBloomFilterFunctionData final : BloomFilterFunctionData {
-	OwnedBloomFilterFunctionData(shared_ptr<RPTFilter> owner_p, BloomFilter &filter_p, const LogicalType &input_type_p)
-	    : BloomFilterFunctionData(&filter_p, true, string(), input_type_p, 0.0f, idx_t(0)), owner(std::move(owner_p)) {
-	}
-
-	unique_ptr<FunctionData> Copy() const override {
-		auto &adapter = static_cast<DuckDBBloomFilterAdapter &>(*owner);
-		return make_uniq<OwnedBloomFilterFunctionData>(owner, adapter.GetBloomFilter(), key_type);
-	}
-
-	bool Equals(const FunctionData &other) const override {
-		return BloomFilterFunctionData::Equals(other);
-	}
-
-	shared_ptr<RPTFilter> owner;
-};
-
 static void RPTFilterExecute(DataChunk &args, ExpressionState &state, Vector &result) {
 	auto &expression = state.expr.Cast<BoundFunctionExpression>();
 	auto &data = expression.BindInfo()->Cast<RPTFilterFunctionData>();
@@ -105,7 +88,11 @@ unique_ptr<ExpressionFilter> RPTTableFilter::GetFilter(float selectivity_thresho
 		auto function = BloomFilterScalarFun::GetFunction(input_type_);
 		vector<unique_ptr<Expression>> arguments;
 		arguments.push_back(make_uniq<BoundReferenceExpression>(input_type_, storage_t(0)));
-		auto bind_data = make_uniq<OwnedBloomFilterFunctionData>(filter_, duckdb_filter->GetBloomFilter(), input_type_);
+		// DuckDB 2.0 retains a shared filter. Alias the adapter's ownership so
+		// native FunctionData copies keep its embedded BloomFilter alive too.
+		auto bind_data =
+		    make_uniq<BloomFilterFunctionData>(shared_ptr<const BloomFilter>(filter_, &duckdb_filter->GetBloomFilter()),
+		                                       true, string(), input_type_, 0.0f, idx_t(0));
 		unique_ptr<Expression> expression = make_uniq<BoundFunctionExpression>(
 		    BoundScalarFunction(function), std::move(arguments), std::move(bind_data));
 		if (selectivity_threshold < 1.0f) {

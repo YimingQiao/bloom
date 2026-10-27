@@ -129,11 +129,20 @@ void BaseGraphManager::AddEdgePair(LogicalOperator &left_node, vector<ColumnBind
 // BaseGraphManager — Build
 //===--------------------------------------------------------------------===//
 
-bool BaseGraphManager::Build(LogicalOperator &plan) {
+bool BaseGraphManager::Build(LogicalOperator &plan, const char *&skip_reason) {
+	skip_reason = "no_transfer_graph";
 	// 1. Discover all table operators and join operators in the plan.
 	table_operator_manager.Build(plan);
 	if (table_operator_manager.GetAllTableOperators().size() < 2) {
 		return false;
+	}
+	// Inspect exactly the subtrees Bloom may execute, not the outer joins that
+	// remain in DuckDB's runtime plan. Do this before sampling or materializing.
+	for (auto &entry : table_operator_manager.GetAllTableOperators()) {
+		if (auto reason = OptimizerExecutionUnsafeReason(entry.second.get(), context)) {
+			skip_reason = reason;
+			return false;
+		}
 	}
 
 	// 2. Translate joins into edges, then close under join-key equivalence.

@@ -6,12 +6,12 @@ on:
       duckdb_version:
         description: Full 40-character DuckDB commit used for compilation
         required: true
-        default: 21aca0424f1faf78b593b1e6fbfdd4846624c987
+        default: d54cbbe3df17e8e5ce68312f483b4155836112aa
         type: string
       extension_version:
         description: Bloom version from extension_config.cmake (without v)
         required: true
-        default: 0.0.2
+        default: 0.0.3
         type: string
 
 permissions:
@@ -20,12 +20,14 @@ permissions:
 jobs:
   build:
     name: Build native release matrix
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@64aec33f4f659eed8e542507b3afa3b262b37e42
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@2de802913caf5c9bba0ef267658b20f3cc0486c3
     with:
-      duckdb_version: ${{ inputs.duckdb_version }}
-      ci_tools_version: 64aec33f4f659eed8e542507b3afa3b262b37e42
+      duckdb_version: v2.0.0
+      duckdb_commit: ${{ inputs.duckdb_version }}
+      ci_tools_version: 2de802913caf5c9bba0ef267658b20f3cc0486c3
       extension_name: bloom
       reduced_ci_mode: disabled
+      opt_in_archs: osx_amd64
       exclude_archs: linux_amd64_musl;linux_arm64_musl;windows_arm64;windows_amd64_mingw;wasm_mvp;wasm_eh;wasm_threads
       artifact_postfix: -release-candidate
 
@@ -59,21 +61,12 @@ jobs:
             exit 1
           fi
 
-          revision="${duckdb_ref:0:10}"
-          tag_refs="$(
-            git ls-remote --tags https://github.com/duckdb/duckdb.git \
-              'v[0-9]*' 'v[0-9]*^{}'
-          )"
-          while read -r tag_commit tag_ref; do
-            tag="${tag_ref#refs/tags/}"
-            tag="${tag%^\{\}}"
-            if [[ "${tag_commit}" == "${duckdb_ref}" &&
-                  "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              revision="${tag}"
-              break
-            fi
-          done <<< "${tag_refs}"
-          echo "revision=${revision}" >> "${GITHUB_OUTPUT}"
+          if [[ "${duckdb_ref}" != "d54cbbe3df17e8e5ce68312f483b4155836112aa" ]]; then
+            echo "::error::This release targets DuckDB v2.0.0"
+            exit 1
+          fi
+
+          echo "revision=v2.0.0" >> "${GITHUB_OUTPUT}"
 
       - name: Download platform artifacts
         uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
@@ -89,7 +82,7 @@ jobs:
             --extension-version '${{ inputs.extension_version }}' \
             --duckdb-revision '${{ steps.versions.outputs.revision }}' \
             --duckdb-build-ref '${{ inputs.duckdb_version }}' \
-            --artifact-prefix 'bloom-${{ inputs.duckdb_version }}-extension-' \
+            --artifact-prefix 'bloom-v2.0.0-extension-' \
             --artifact-postfix=-release-candidate \
             --expected-platforms \
               linux_amd64,linux_arm64,osx_amd64,osx_arm64,windows_amd64

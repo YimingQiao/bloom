@@ -4,7 +4,7 @@
 #include "duckdb/execution/operator/helper/physical_result_collector.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_context.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
@@ -94,8 +94,8 @@ unique_ptr<QueryResult> RPTResultCollector::GetResult(GlobalSinkState &state) co
 	if (!global.collection) {
 		global.collection = CreateRPTCollection(*context);
 	}
-	return make_uniq<MaterializedQueryResult>(statement_type, properties, IdentifiersToStrings(names),
-	                                          std::move(global.collection), context->GetClientProperties());
+	return make_uniq<QueryResult>(statement_type, properties, names, std::move(global.collection),
+	                              context->GetClientProperties());
 }
 
 } // namespace

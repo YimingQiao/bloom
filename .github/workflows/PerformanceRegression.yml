@@ -102,13 +102,14 @@ jobs:
             -S duckdb \
             -B build/performance \
             -DCMAKE_BUILD_TYPE=Release \
+            -DDUCKDB_EXPLICIT_VERSION=v2.0.0 \
             -DEXTENSION_STATIC_BUILD=1 \
             -DDUCKDB_EXTENSION_CONFIGS="${GITHUB_WORKSPACE}/extension_config.cmake" \
             -DBUILD_EXTENSIONS='tpch;httpfs;parquet' \
+            -DLINK_CORE_EXTENSIONS=ON \
             -DBUILD_BENCHMARKS=TRUE \
             -DBUILD_UNITTESTS=TRUE \
-            -DENABLE_EXTENSION_AUTOLOADING=0 \
-            -DENABLE_EXTENSION_AUTOINSTALL=0
+            -DDUCKDB_CAPABILITIES=loadable_extensions
           cmake --build build/performance --target benchmark_runner --parallel 2
 
       - name: Build base benchmark runner
@@ -118,18 +119,20 @@ jobs:
           CCACHE_NOHASHDIR: 'true'
           CCACHE_TEMPDIR: ${{ runner.temp }}/ccache-tmp
         run: |
+          base_duckdb_version="$(git -C "${BASE_DIR}/duckdb" describe --tags --exact-match --match 'v[0-9]*' 2>/dev/null || true)"
           cmake \
             -G Ninja \
             -S "${BASE_DIR}/duckdb" \
             -B "${BASE_DIR}/build/performance" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DDUCKDB_EXPLICIT_VERSION="${base_duckdb_version}" \
             -DEXTENSION_STATIC_BUILD=1 \
             -DDUCKDB_EXTENSION_CONFIGS="${BASE_DIR}/extension_config.cmake" \
             -DBUILD_EXTENSIONS='tpch;httpfs;parquet' \
+            -DLINK_CORE_EXTENSIONS=ON \
             -DBUILD_BENCHMARKS=TRUE \
             -DBUILD_UNITTESTS=TRUE \
-            -DENABLE_EXTENSION_AUTOLOADING=0 \
-            -DENABLE_EXTENSION_AUTOINSTALL=0
+            -DDUCKDB_CAPABILITIES=loadable_extensions
           cmake --build "${BASE_DIR}/build/performance" --target benchmark_runner --parallel 2
 
       - name: Show compiler cache statistics

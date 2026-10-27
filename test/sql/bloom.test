@@ -4,6 +4,16 @@
 
 require bloom
 
+query T
+SELECT version();
+----
+v2.0.0
+
+query T
+SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'bloom';
+----
+v0.0.3
+
 query I
 SELECT current_setting('enable_bloom');
 ----
@@ -68,9 +78,9 @@ WHERE r.keep AND l.middle_col >= 0;
 ----
 100	495000	1188	296
 
-# Bloom's large retained objects must use DuckDB's non-spill BufferAllocator.
-# EXECUTE lazily optimizes the prepared statement, after which its physical
-# plan keeps the rewritten memory scans alive until DEALLOCATE.
+# Bloom materializations use DuckDB's non-spill BufferAllocator. DuckDB 2.0
+# rebinds prepared reads on each EXECUTE, so allocations must be released
+# after execution and subsequent executions must see current table contents.
 statement ok
 SET bloom_sample_memory_cache = false;
 
@@ -93,17 +103,11 @@ EXECUTE rpt_allocator_lifetime;
 100	1188
 
 query I
-SELECT (memory_usage_bytes - bytes > 65536)::INTEGER
+SELECT (abs(memory_usage_bytes - bytes) <= 65536)::INTEGER
 FROM duckdb_memory(), rpt_allocator_baseline
 WHERE tag = 'ALLOCATOR';
 ----
 1
-
-statement ok
-CREATE TEMP TABLE rpt_allocator_retained AS
-SELECT memory_usage_bytes - bytes AS bytes
-FROM duckdb_memory(), rpt_allocator_baseline
-WHERE tag = 'ALLOCATOR';
 
 query I
 SELECT temporary_storage_bytes
@@ -111,6 +115,22 @@ FROM duckdb_memory()
 WHERE tag = 'ALLOCATOR';
 ----
 0
+
+statement ok
+UPDATE rpt_sparse_right SET keep = true WHERE id = 1;
+
+query II
+EXECUTE rpt_allocator_lifetime;
+----
+101	1197
+
+statement ok
+UPDATE rpt_sparse_right SET keep = false WHERE id = 1;
+
+query II
+EXECUTE rpt_allocator_lifetime;
+----
+100	1188
 
 statement ok
 DEALLOCATE rpt_allocator_lifetime;
@@ -141,8 +161,8 @@ EXECUTE rpt_allocator_fallback;
 100	1188
 
 query I
-SELECT (memory_usage_bytes - baseline.bytes < retained.bytes)::INTEGER
-FROM duckdb_memory(), rpt_allocator_baseline baseline, rpt_allocator_retained retained
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER
+FROM duckdb_memory(), rpt_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 ----
 1
@@ -150,9 +170,9 @@ WHERE tag = 'ALLOCATOR';
 statement ok
 DEALLOCATE rpt_allocator_fallback;
 
-# DuckDB may retain or release one small allocator block around prepared-plan
-# destruction. The materialized Bloom footprint measured above is larger than
-# this tolerance, so the bound still detects retained transfer state.
+# DuckDB 2.0 rebinds prepared reads instead of retaining executable plans.
+# Transfer allocations must be released after execution, before DEALLOCATE too.
+# Allow one small allocator block of native worker-state noise.
 query II
 SELECT (abs(memory_usage_bytes - bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER

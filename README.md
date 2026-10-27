@@ -1,6 +1,6 @@
 # Bloom
 
-[![Version: 0.0.2](https://img.shields.io/badge/version-0.0.2-blue)](extension_config.cmake)
+[![Version: 0.0.3](https://img.shields.io/badge/version-0.0.3-blue)](extension_config.cmake)
 [![CI](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg)](https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
@@ -28,12 +28,16 @@ complements this by moving filters in both directions and across multiple joins.
 
 ## Compatibility
 
-Bloom currently targets DuckDB `main` at commit `21aca042`. It relies on the
-extensible table-filter API introduced in
-[duckdb/duckdb#20633](https://github.com/duckdb/duckdb/pull/20633), so current
-builds must use this exact DuckDB commit. Formal support will start with
-DuckDB's next stable release. See [RELEASING.md](RELEASING.md) for the release
-checklist.
+Bloom v0.0.3 targets **DuckDB v2.0.0** (commit
+`d54cbbe3df17e8e5ce68312f483b4155836112aa`). The DuckDB submodule and CI
+builds are pinned to this release. C++ extension binaries must be built for
+the matching DuckDB version; older Bloom binaries must be rebuilt.
+See [RELEASING.md](RELEASING.md) for the release checklist.
+
+Bloom does no sampling or materialization during `PREPARE`. It runs when DuckDB
+rebinds and optimizes the statement at `EXECUTE`; statements that reuse a cached
+plan keep their native plan. If scan field extraction changes the storage-column
+layout, Bloom uses DuckDB's cardinality estimate for that subtree.
 
 ## Build and load
 
@@ -52,7 +56,9 @@ SELECT current_setting('enable_bloom');
 
 ## Benchmarks
 
-The results below compare Bloom's default prepared sampling with the DuckDB
+The results below were measured on the previous DuckDB development commit
+`21aca042`; they are historical results, not DuckDB 2.0 measurements.
+They compare Bloom's default prepared sampling with the DuckDB
 baseline using one thread. The database is brought into the OS page cache
 before each benchmark process starts. Each query then gets one same-process
 warmup and five timed runs; CEB Stack uses one timed run because of its scale.

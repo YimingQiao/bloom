@@ -15,19 +15,19 @@ permissions:
   contents: read
 
 jobs:
-  duckdb-next-build:
-    name: Build DuckDB next-release candidate binaries
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@64aec33f4f659eed8e542507b3afa3b262b37e42
+  duckdb-stable-build:
+    name: Build DuckDB 2.0.0 binaries
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_distribution.yml@2de802913caf5c9bba0ef267658b20f3cc0486c3
     with:
-      duckdb_version: 21aca0424f1faf78b593b1e6fbfdd4846624c987
-      ci_tools_version: 64aec33f4f659eed8e542507b3afa3b262b37e42
+      duckdb_version: v2.0.0
+      duckdb_commit: d54cbbe3df17e8e5ce68312f483b4155836112aa
+      ci_tools_version: 2de802913caf5c9bba0ef267658b20f3cc0486c3
       extension_name: bloom
 
   code-quality-check:
     name: Code Quality Check
-    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@64aec33f4f659eed8e542507b3afa3b262b37e42
+    uses: duckdb/extension-ci-tools/.github/workflows/_extension_code_quality.yml@2de802913caf5c9bba0ef267658b20f3cc0486c3
     with:
-      duckdb_version: 21aca0424f1faf78b593b1e6fbfdd4846624c987
-      ci_tools_version: 64aec33f4f659eed8e542507b3afa3b262b37e42
+      ci_tools_version: 2de802913caf5c9bba0ef267658b20f3cc0486c3
       extension_name: bloom
       format_checks: 'format;tidy'

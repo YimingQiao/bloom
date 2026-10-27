@@ -1,4 +1,6 @@
 #include "predicate_transfer/table_operator_manager.hpp"
+#include "duckdb/main/settings.hpp"
+#include "duckdb/parallel/task_scheduler.hpp"
 
 #include "duckdb/planner/operator/logical_aggregate.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
@@ -12,6 +14,54 @@
 #include "duckdb/planner/expression_iterator.hpp"
 
 namespace duckdb {
+
+const char *OptimizerExecutionUnsafeReason(const LogicalOperator &op, ClientContext &context) {
+	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
+	    op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
+		auto &join = op.Cast<LogicalComparisonJoin>();
+		bool has_equality = false;
+		idx_t range_count = 0;
+		for (auto &condition : join.conditions) {
+			if (!condition.IsComparison()) {
+				continue;
+			}
+			auto comparison = condition.GetComparisonType();
+			if (comparison == ExpressionType::COMPARE_EQUAL ||
+			    comparison == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
+				has_equality = true;
+			} else if (comparison == ExpressionType::COMPARE_LESSTHAN ||
+			           comparison == ExpressionType::COMPARE_GREATERTHAN ||
+			           comparison == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
+			           comparison == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
+				range_count++;
+			}
+		}
+
+		// A pure range comparison can become PIECEWISE_MERGE_JOIN / IE_JOIN.
+		// With prefer_range_joins enabled, a mixed join with at least two range
+		// keys can become IE_JOIN as well. Their materialization tasks always
+		// look up the active query Executor, even with one scheduler thread.
+		bool prefers_iejoin = range_count >= 2 && Settings::Get<PreferRangeJoinsSetting>(context);
+		if (range_count > 0 && (!has_equality || prefers_iejoin)) {
+			return "logical_range_join_may_require_active_executor";
+		}
+
+		auto thread_count = TaskScheduler::GetScheduler(context).NumberOfThreads();
+		if (has_equality && (thread_count > 1 || context.config.verify_parallelism)) {
+			// Equality comparisons normally become PhysicalHashJoin. Its
+			// runtime build count can trigger parallel finalize regardless of
+			// the optimizer's cardinality estimate.
+			return "logical_hash_join_may_require_active_executor";
+		}
+	}
+
+	for (auto &child : op.children) {
+		if (auto reason = OptimizerExecutionUnsafeReason(*child, context)) {
+			return reason;
+		}
+	}
+	return nullptr;
+}
 
 void TableOperatorManager::FindInnerColumnRef(Expression &expr, BoundColumnRefExpression *&out_ref) {
 	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {

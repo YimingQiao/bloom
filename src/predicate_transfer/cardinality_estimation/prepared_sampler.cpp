@@ -60,7 +60,7 @@ static string SampleCacheKey(TableCatalogEntry &table, const RPTSamplingConfig &
 	// Prepared samples contain every physical column in storage order, so the
 	// identity is independent of any one query's projected column set.
 	auto &catalog = table.ParentCatalog();
-	string key = "bloom_sample_v4|" + catalog.GetName();
+	string key = "bloom_sample_v5|" + catalog.GetName();
 	key += "|path=" + catalog.GetDBPath();
 	key += "|" + table.schema.name + "|" + table.name;
 	key += "|rows=" + std::to_string(table.GetStorage().GetTotalRows());

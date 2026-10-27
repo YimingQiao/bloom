@@ -46,17 +46,23 @@ jobs:
             -S duckdb \
             -B "$BUILD_DIR" \
             -DCMAKE_BUILD_TYPE=Release \
+            -DDUCKDB_EXPLICIT_VERSION=v2.0.0 \
             -DEXTENSION_STATIC_BUILD=1 \
             -DDUCKDB_EXTENSION_CONFIGS="$GITHUB_WORKSPACE/extension_config.cmake" \
-            -DBUILD_EXTENSIONS='core_functions;parquet' \
+            -DBUILD_EXTENSIONS='core_functions;parquet;tpch;tpcds' \
+            -DLINK_CORE_EXTENSIONS=ON \
             -DBUILD_UNITTESTS=TRUE \
             -DENABLE_UNITTEST_CPP_TESTS=TRUE \
             -DUNITTEST_ROOT_DIRECTORY="$GITHUB_WORKSPACE/duckdb" \
-            -DENABLE_EXTENSION_AUTOLOADING=0 \
-            -DENABLE_EXTENSION_AUTOINSTALL=0
+            -DDUCKDB_CAPABILITIES=loadable_extensions
 
       - name: Build DuckDB and Bloom
         run: cmake --build "$BUILD_DIR" --target all --parallel 48
+
+      - name: Check sample filter estimates
+        env:
+          BLOOM_TEST_DUCKDB: ${{ github.workspace }}/build/fulltest/duckdb
+        run: python3 -m unittest discover --start-directory test/python -p test_sample_filters.py
 
       - name: Verify full test discovery
         run: |

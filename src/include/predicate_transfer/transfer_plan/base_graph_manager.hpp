@@ -32,7 +32,7 @@ public:
 	//===----------------------------------------------------------------===//
 	//! Extract tables and join edges from the logical plan, then generate
 	//! the transfer plan via the strategy-specific ExecuteTransfer().
-	bool Build(LogicalOperator &op);
+	bool Build(LogicalOperator &op, const char *&skip_reason);
 
 	//! Debug output.
 	virtual string TransferPlanToString() {

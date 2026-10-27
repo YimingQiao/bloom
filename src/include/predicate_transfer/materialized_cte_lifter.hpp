@@ -19,9 +19,9 @@ namespace duckdb {
 //!      shares the materialized data via shared_ptr.
 //!   4. Returning children[1] in place of the MATERIALIZED_CTE node.
 //!
-//! After lifting, the resulting plan contains zero MATERIALIZED_CTE nodes; the
-//! materialized CTE results appear as LOGICAL_CHUNK_GET operators that the
-//! parent PT scope picks up as ordinary table operators.
+//! Lifted results appear as LOGICAL_CHUNK_GET operators that the parent PT
+//! scope picks up as ordinary table operators. Definitions requiring an active
+//! query executor remain MATERIALIZED_CTE nodes for normal query execution.
 //!
 //! LOGICAL_RECURSIVE_CTE is not handled here.
 class MaterializedCTELifter {
@@ -37,11 +37,6 @@ private:
 	//! Execute a logical plan that has passed the logical safety preflight and
 	//! return the resulting ColumnDataCollection.
 	unique_ptr<ColumnDataCollection> ExecutePlan(unique_ptr<LogicalOperator> plan);
-
-	//! Reject a logical CTE definition before any child Bloom or physical
-	//! planning when it contains a join that could require DuckDB's outer
-	//! query Executor.
-	bool IsSafeForOptimizerExecution(const LogicalOperator &op, string &unsafe_reason) const;
 
 	//! Replace every LOGICAL_CTE_REF whose cte_index matches `target_cte_index`
 	//! with a LogicalColumnDataGet that scans `shared_data`.

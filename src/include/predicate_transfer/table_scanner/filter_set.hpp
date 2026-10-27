@@ -8,6 +8,7 @@
 namespace duckdb {
 
 class LogicalOperator;
+class LogicalGet;
 
 //! Owns every transfer filter attached to a scanner. It is responsible for
 //! filter identity, logical-GET pushdown, output-binding resolution, and
@@ -25,6 +26,8 @@ public:
 	void Add(const vector<ColumnBinding> &bindings, shared_ptr<RPTFilter> filter, size_t identity_hash);
 
 	size_t Fingerprint() const;
+	//! Scan reachable without moving a filter across a value/layout boundary.
+	static LogicalGet *GetPushdownScan(LogicalOperator &plan);
 	void Pushdown(LogicalOperator &plan);
 	void Resolve(const vector<ColumnBinding> &output_bindings);
 	void Apply(DataChunk &chunk) const;

@@ -1,7 +1,7 @@
 extension:
   name: bloom
   description: Robust predicate transfer using Bloom and bitmap filters
-  version: 0.0.2
+  version: 0.0.3
   language: C++
   build: cmake
   license: MIT
@@ -15,7 +15,7 @@ repo:
 docs:
   hello_world: |
     LOAD bloom;
-    SELECT current_setting('enable_rpt');
+    SELECT current_setting('enable_bloom');
   extended_description: |
     Bloom combines sampling-based estimates with execution-guided robust
     predicate transfer. Sampling predicts useful transfers; Bloom applies one

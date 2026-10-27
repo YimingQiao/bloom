@@ -1,0 +1,55 @@
+# name: test/sql/transfer/default_scan_filters.test
+# description: transfer filters respect scan types and subtree output bindings
+# group: [transfer]
+
+require bloom
+
+statement ok
+CREATE TABLE rpt_output_layout(id INTEGER, s STRUCT(a INTEGER, b VARCHAR), x INTEGER);
+
+statement ok
+INSERT INTO rpt_output_layout VALUES (1, {'a': 1, 'b': NULL}, 10), (2, {'a': 2, 'b': 'y'}, 20);
+
+statement ok
+CHECKPOINT;
+
+# DuckDB late materialization introduces a rowid join and a projection below
+# TOP_N. A filter on its output rowid must not become a filter on scan column id.
+query II
+SELECT s, x FROM rpt_output_layout WHERE s.a = 1 ORDER BY id LIMIT 1;
+----
+{'a': 1, 'b': NULL}	10
+
+query II
+SELECT s, x FROM rpt_output_layout WHERE s.a = 2 ORDER BY id LIMIT 1;
+----
+{'a': 2, 'b': y}	20
+
+# The same result without the rowid-join rewrite.
+statement ok
+SET disabled_optimizers = 'late_materialization';
+
+query II
+SELECT s, x FROM rpt_output_layout WHERE s.a = 1 ORDER BY id LIMIT 1;
+----
+{'a': 1, 'b': NULL}	10
+
+statement ok
+SET disabled_optimizers = '';
+
+# Moving a transfer filter below a LIMIT can admit rows outside the original
+# limited result. Evaluate it on the subtree output instead.
+statement ok
+CREATE TABLE rpt_output_probe AS SELECT i::INTEGER id FROM range(100) t(i);
+
+statement ok
+CREATE TABLE rpt_output_keys AS SELECT i::INTEGER id FROM range(50, 100) t(i);
+
+statement ok
+CHECKPOINT;
+
+query I
+SELECT count(*) FROM (SELECT id FROM rpt_output_probe ORDER BY id LIMIT 20) a
+JOIN rpt_output_keys b USING (id);
+----
+0

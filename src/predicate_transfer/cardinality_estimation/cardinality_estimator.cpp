@@ -4,7 +4,7 @@
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_data.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
@@ -19,8 +19,6 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 
 	PreparedStatementData data(StatementType::SELECT_STATEMENT);
 	data.physical_plan = std::move(physical_plan);
-	data.memory_type = QueryResultMemoryType::IN_MEMORY;
-	data.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 
 	auto &root = data.physical_plan->Root();
 	data.types = root.types;
@@ -36,7 +34,7 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 	auto collector = GetRPTResultCollector(context, data);
 	executor.Initialize(std::move(collector));
 
-	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
+	while (executor.ExecuteTask() != QueryResultState::FINISHED) {
 	}
 
 	auto result = executor.GetResult();
@@ -46,8 +44,7 @@ shared_ptr<ColumnDataCollection> ExecutePlanAndCollect(ClientContext &context, u
 		client_data.profiler = std::move(previous_profiler);
 		result->ThrowError();
 	}
-	auto &mat_result = result->Cast<MaterializedQueryResult>();
-	auto result_cdc = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
+	auto result_cdc = shared_ptr<ColumnDataCollection>(result->TakeCollection().release());
 	if (!result_cdc) {
 		result_cdc = make_shared_ptr<ColumnDataCollection>(BufferAllocator::Get(context), col_types);
 	}

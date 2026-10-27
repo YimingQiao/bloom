@@ -1,15 +1,18 @@
 # Release checklist
 
-Bloom will provide formal release support starting with DuckDB's next stable
-release. Until then, `main` tracks a pinned DuckDB commit and release-candidate
-workflows only produce downloadable CI artifacts; they do not publish a GitHub
-release.
+Bloom v0.0.3 targets DuckDB **v2.0.0**, pinned at
+`d54cbbe3df17e8e5ce68312f483b4155836112aa`. Release-candidate workflows produce
+downloadable CI artifacts; community publication and immutable release tags
+follow the gates below.
 
 ## Before a release
 
-1. Update the `duckdb` submodule and the identical full commit in
-   `.github/workflows/MainDistributionPipeline.yml` and
-   `.github/workflows/ReleaseCandidate.yml`.
+1. Keep the `duckdb` submodule, distribution workflow's `duckdb_commit`, and
+   release-candidate default fixed to the full commit above. Keep the
+   `duckdb_version`, Makefile's `OVERRIDE_GIT_DESCRIBE`, and direct CMake builds'
+   `DUCKDB_EXPLICIT_VERSION` at `v2.0.0`. DuckDB 2.0 does not infer its release
+   version from Git tags. Pin `extension-ci-tools` and reusable workflows to
+   the same full tools commit.
 2. Update `EXTENSION_VERSION` in `extension_config.cmake`, the README version
    badge, and `community-extension-description.yml.template`.
 3. Build with `make release -j"$(nproc)"` and run:
@@ -18,6 +21,7 @@ release.
    make format-check
    make tidy-check
    build/release/test/unittest 'test/sql/*'
+   python3 -m unittest discover --start-directory test/python
    ```
 
 4. Run both `DuckDB Full Compatibility` configurations. RPT-disabled results
@@ -46,11 +50,10 @@ release.
 7. Test at least one packaged artifact with the matching DuckDB binary using
    `-unsigned`, then run the Bloom SQL tests against the packaged extension.
 
-## Next stable DuckDB release
+## Publish for DuckDB 2.0.0
 
-1. Replace the pinned development commit with the commit behind the final
-   stable tag and repeat every gate above. The packaging workflow detects the
-   tag and uses it as DuckDB's repository revision.
+1. Complete every gate above against the pinned stable commit. The packaged
+   custom repository uses `v2.0.0` as its DuckDB revision.
 2. Copy `community-extension-description.yml.template` to
    `extensions/bloom/description.yml` in
    [duckdb/community-extensions](https://github.com/duckdb/community-extensions),
@@ -63,7 +66,7 @@ release.
    ```sql
    INSTALL bloom FROM community;
    LOAD bloom;
-   SELECT current_setting('enable_rpt');
+   SELECT current_setting('enable_bloom');
    ```
 
 For a future DuckDB version that requires incompatible source changes, use a

@@ -1,7 +1,10 @@
 duckdb_extension_load(bloom
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-    EXTENSION_VERSION v0.0.2
+    EXTENSION_VERSION v0.0.3
 )
+
+# DuckDB 2.0 builds extensions without linking them unless requested explicitly.
+duckdb_extension_statically_link(bloom)
 
 # To reproduce the TPC-H / TPC-DS benchmark suites, build the runner with the
 # data generators too:

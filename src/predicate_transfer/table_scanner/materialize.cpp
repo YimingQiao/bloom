@@ -8,7 +8,7 @@
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/client_data.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/expression_heuristics.hpp"
@@ -189,8 +189,6 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 
 	PreparedStatementData stmt_data(StatementType::SELECT_STATEMENT);
 	stmt_data.physical_plan = std::move(physical_plan);
-	stmt_data.memory_type = QueryResultMemoryType::IN_MEMORY;
-	stmt_data.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 
 	auto &root = stmt_data.physical_plan->Root();
 	stmt_data.types = root.types;
@@ -208,7 +206,7 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 	executor.Initialize(std::move(collector));
 	auto executor_init_end = MaterializeClock::now();
 
-	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
+	while (executor.ExecuteTask() != QueryResultState::FINISHED) {
 	}
 	auto execute_tasks_end = MaterializeClock::now();
 
@@ -220,11 +218,10 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 		result->ThrowError();
 	}
 	auto get_result_end = MaterializeClock::now();
-	auto &mat_result = result->Cast<MaterializedQueryResult>();
-	data_ = shared_ptr<ColumnDataCollection>(mat_result.TakeCollection().release());
+	data_ = shared_ptr<ColumnDataCollection>(result->TakeCollection().release());
 	if (!data_) {
 		data_ = shared_ptr<ColumnDataCollection>(
-		    make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), mat_result.types).release());
+		    make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), result->GetTypes()).release());
 	}
 	auto take_collection_end = MaterializeClock::now();
 	client_data.profiler = std::move(previous_profiler);
@@ -253,8 +250,8 @@ bool TableMaterialization::ExecutePlan(unique_ptr<LogicalOperator> plan_copy) {
 //===--------------------------------------------------------------------===//
 //
 // Three-step pipeline applied to every table operator subtree:
-//   1. Filter pushdown — DFS the subtree, push each pending BF/Bitmap filter
-//      into the matching LogicalGet's table_filters (matching by table_index).
+//   1. Filter pushdown — push each pending BF/Bitmap filter into a matching
+//      LogicalGet reached through filters or MARK left inputs, preserving semantics.
 //      Pushed filters are removed from the set; un-pushed ones (e.g. on
 //      grouped-AGG output, on CHUNK_GET, on virtual columns) stay and will
 //      be applied in-memory by Scan() / Compact() after execution.
@@ -357,7 +354,7 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	}
 	auto before_log_end = MaterializeClock::now();
 
-	// Step 1: Push BF/Bitmap filters into any LogicalGet in the subtree whose
+	// Step 1: Push BF/Bitmap filters into a safely reachable LogicalGet whose
 	// table_index matches a filter binding. Removes pushed entries from
 	// the filter set; remaining entries stay and will be applied in-memory by
 	// Scan() / Compact() after execution.

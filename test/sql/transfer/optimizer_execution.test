@@ -1,0 +1,98 @@
+# name: test/sql/transfer/optimizer_execution.test
+# description: optimizer-time execution must not require DuckDB's active query executor
+# group: [transfer]
+
+require bloom
+
+statement ok
+CREATE TABLE rpt_executor_a AS SELECT i::INTEGER id, (i % 100)::INTEGER k FROM range(1000) t(i);
+
+statement ok
+CREATE TABLE rpt_executor_b AS SELECT i::INTEGER id FROM range(1000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+CALL enable_logging('Bloom', storage = 'memory');
+
+statement ok
+SET threads = 1;
+
+# Filters on a MARK join's left columns may reach its left scan without
+# changing IN's three-valued result or the position of its output marker.
+foreach late false true
+
+statement ok
+SET bloom_late_materialize = {late};
+
+query II
+SELECT count(*), sum(a.k) FROM rpt_executor_a a JOIN rpt_executor_b b USING (id)
+WHERE a.k IN (3, 9, 14, 19, 23, 36, 45, 49) AND b.id % 7 = 0;
+----
+13	328
+
+query III
+SELECT count(*), count(a.k IN (3, 9, 14, 19, 23, 36, 45, 49, NULL)),
+       sum((a.k IN (3, 9, 14, 19, 23, 36, 45, 49, NULL))::INTEGER)
+FROM rpt_executor_a a JOIN rpt_executor_b b USING (id) WHERE b.id % 7 = 0;
+----
+143	13	13
+
+endloop
+
+statement ok
+SET bloom_late_materialize = false;
+
+# verify_parallelism forces hash-join finalize tasks even with a small build.
+statement ok
+PRAGMA verify_parallelism;
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# The sparse IN list becomes a MARK join inside a Bloom table subtree.
+query II
+SELECT count(*), sum(a.k) FROM rpt_executor_a a JOIN rpt_executor_b b USING (id)
+WHERE a.k IN (3, 9, 14, 19, 23, 36, 45, 49);
+----
+80	1980
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'skipped' AND reason = 'logical_hash_join_may_require_active_executor';
+----
+true
+
+statement ok
+SET threads = 4;
+
+query II
+SELECT count(*), sum(a.k) FROM rpt_executor_a a JOIN rpt_executor_b b USING (id)
+WHERE a.k IN (3, 9, 14, 19, 23, 36, 45, 49);
+----
+80	1980
+
+# A regular join remains eligible: only the executable table subtrees are
+# checked, not joins left in DuckDB's runtime plan.
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+PREPARE rpt_executor_prepared AS
+SELECT count(*) FROM rpt_executor_a a JOIN rpt_executor_b b USING (id) WHERE a.k < 20;
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('Bloom');
+----
+0
+
+query I
+EXECUTE rpt_executor_prepared;
+----
+200
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('Bloom') WHERE event = 'transfer';
+----
+true

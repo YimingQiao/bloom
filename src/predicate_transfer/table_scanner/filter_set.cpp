@@ -2,11 +2,10 @@
 #include "predicate_transfer/filter/table_filter.hpp"
 
 #include "duckdb/common/types/selection_vector.hpp"
+#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
 
 #include <algorithm>
-#include <functional>
-#include <unordered_map>
 
 namespace duckdb {
 
@@ -36,14 +35,21 @@ size_t ScannerFilterSet::Fingerprint() const {
 	return fingerprint;
 }
 
-static void CollectGetsByTableIndex(LogicalOperator &op, unordered_map<idx_t, LogicalGet *> &result) {
-	if (op.type == LogicalOperatorType::LOGICAL_GET) {
-		auto &get = op.Cast<LogicalGet>();
-		result.emplace(get.table_index.index, &get);
+LogicalGet *ScannerFilterSet::GetPushdownScan(LogicalOperator &plan) {
+	auto *leaf = &plan;
+	// Left-input filtering preserves a MARK join's marks (including NULLs).
+	// Stop at value/layout boundaries such as TOP_N/LIMIT or projections.
+	while (true) {
+		if (leaf->type == LogicalOperatorType::LOGICAL_FILTER && leaf->children.size() == 1) {
+			leaf = leaf->children[0].get();
+		} else if (leaf->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN &&
+		           leaf->Cast<LogicalComparisonJoin>().join_type == JoinType::MARK) {
+			leaf = leaf->children[0].get();
+		} else {
+			break;
+		}
 	}
-	for (auto &child : op.children) {
-		CollectGetsByTableIndex(*child, result);
-	}
+	return leaf->type == LogicalOperatorType::LOGICAL_GET ? &leaf->Cast<LogicalGet>() : nullptr;
 }
 
 void ScannerFilterSet::Pushdown(LogicalOperator &plan) {
@@ -51,9 +57,8 @@ void ScannerFilterSet::Pushdown(LogicalOperator &plan) {
 		return;
 	}
 
-	unordered_map<idx_t, LogicalGet *> gets_by_table_index;
-	CollectGetsByTableIndex(plan, gets_by_table_index);
-	if (gets_by_table_index.empty()) {
+	auto scan = GetPushdownScan(plan);
+	if (!scan) {
 		return;
 	}
 
@@ -62,19 +67,16 @@ void ScannerFilterSet::Pushdown(LogicalOperator &plan) {
 			return false;
 		}
 		auto &binding = entry.bindings.front();
-		auto get_it = gets_by_table_index.find(binding.table_index.index);
-		if (get_it == gets_by_table_index.end()) {
+		if (binding.table_index != scan->table_index) {
 			return false;
 		}
-		auto &get = *get_it->second;
+		auto &get = *scan;
 		auto &column_ids = get.GetMutableColumnIds();
 		idx_t projection_position = binding.column_index;
 		if (projection_position >= column_ids.size() || column_ids[projection_position].IsVirtualColumn()) {
 			return false;
 		}
-		auto storage_column = column_ids[projection_position].GetPrimaryIndex();
-		auto key_type =
-		    storage_column < get.returned_types.size() ? get.returned_types[storage_column] : LogicalType::BIGINT;
+		auto &key_type = get.GetColumnType(column_ids[projection_position]);
 		get.table_filters.PushFilter(ProjectionIndex(projection_position),
 		                             RPTTableFilter::MakeOptional(entry.filter, key_type));
 		return true;

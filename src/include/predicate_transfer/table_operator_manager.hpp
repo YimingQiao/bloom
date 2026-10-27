@@ -6,6 +6,10 @@
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 
 namespace duckdb {
+//! Reject subtrees whose tasks may look up DuckDB's active query Executor,
+//! which is not registered while Bloom runs during optimization.
+const char *OptimizerExecutionUnsafeReason(const LogicalOperator &op, ClientContext &context);
+
 class TableOperatorManager {
 public:
 	explicit TableOperatorManager(ClientContext &context) : context(context) {

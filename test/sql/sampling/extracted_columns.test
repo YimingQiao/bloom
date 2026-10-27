@@ -1,0 +1,39 @@
+# name: test/sql/sampling/extracted_columns.test
+# description: scan field extractions must not index whole-column samples as scalars
+# group: [sampling]
+
+require bloom
+
+statement ok
+CREATE TABLE rpt_extracted AS
+SELECT {'id': i::INTEGER, 'label': CASE WHEN i % 3 = 0 THEN 'yes' ELSE 'no' END,
+        'v': (i % 7)::INTEGER} c FROM range(100) t(i);
+
+statement ok
+CREATE TABLE rpt_extracted_probe AS SELECT i::INTEGER id FROM range(100) t(i);
+
+statement ok
+CHECKPOINT;
+
+foreach mode prepared instant
+
+statement ok
+SET bloom_sample_mode = '{mode}';
+
+# The scan exposes c.id, c.label and c.v as separate columns. A stored sample
+# still contains the complete STRUCT, so use the native cardinality estimate.
+query II
+SELECT count(*), sum(p.id) FROM rpt_extracted s JOIN rpt_extracted_probe p ON s.c.id = p.id
+WHERE s.c.label = 'yes' OR s.c.v = 2;
+----
+43	2093
+
+# Different field selections in consecutive queries must not reinterpret a
+# process-cached full-width sample as a different scalar layout.
+query II
+SELECT count(*), sum(p.id) FROM rpt_extracted s JOIN rpt_extracted_probe p ON s.c.id = p.id
+WHERE s.c.label = 'yes';
+----
+34	1683
+
+endloop

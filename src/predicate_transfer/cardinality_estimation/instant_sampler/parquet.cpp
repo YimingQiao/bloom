@@ -1,6 +1,6 @@
 #include "predicate_transfer/cardinality_estimation/instant_sampler/common.hpp"
 
-#include "duckdb/common/multi_file/multi_file_read_ahead.hpp"
+#include "duckdb/parallel/scan_read_ahead.hpp"
 #include "duckdb/common/multi_file/multi_file_reader.hpp"
 #include "duckdb/common/multi_file/multi_file_states.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -79,7 +79,7 @@ struct ParquetRowGroup {
 
 struct ParquetMetadataLoadJob {
 	ClientContext &context;
-	const TableFunction &function;
+	const BoundTableFunction &function;
 	const MultiFileBindData &source_bind;
 	const vector<OpenFileInfo> &files;
 	vector<vector<InstantSampleRange>> &file_row_groups;
@@ -363,7 +363,7 @@ struct DirectParquetWorkerResult {
 
 class DirectParquetSampleSharedState {
 public:
-	DirectParquetSampleSharedState(ClientContext &context, const TableFunction &function,
+	DirectParquetSampleSharedState(ClientContext &context, const BoundTableFunction &function,
 	                               unique_ptr<FunctionData> bind_data, vector<ColumnIndex> column_ids,
 	                               vector<idx_t> projection_ids, unique_ptr<TableFilterSet> filters,
 	                               vector<LogicalType> output_types)
@@ -386,7 +386,7 @@ public:
 	}
 
 	ClientContext &context;
-	const TableFunction &function;
+	const BoundTableFunction &function;
 	unique_ptr<FunctionData> bind_data;
 	vector<ColumnIndex> column_ids;
 	vector<idx_t> projection_ids;

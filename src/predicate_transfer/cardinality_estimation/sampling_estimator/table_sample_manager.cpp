@@ -48,6 +48,22 @@ bool TableSampleManager::LogEnabled() const {
 	return context_.TryGetCurrentSetting("bloom_log_transfer_steps", setting) && setting.GetValue<bool>();
 }
 
+//! Storage samples contain whole columns. A scan that has consumed a field
+//! extraction may expose several scalars for one storage column, so its
+//! bindings cannot index that sample. Use DuckDB's estimate for this layout.
+static bool HasStorageSampleLayout(const LogicalGet &get) {
+	if (get.has_pushed_projection) {
+		return false;
+	}
+	for (auto &column : get.GetColumnIds()) {
+		if (!column.IsVirtualColumn() &&
+		    (column.IsPushdownExtract() || get.GetColumnType(column) != get.returned_types[column.GetPrimaryIndex()])) {
+			return false;
+		}
+	}
+	return true;
+}
+
 //! True when a logical column reference could not be mapped to the sample
 //! layout. Such a predicate cannot run in a bare ExpressionExecutor, so sample
 //! evaluation conservatively leaves it unapplied.
@@ -103,6 +119,31 @@ static unique_ptr<Expression> UnwrapOptionalFilterExpressions(const Expression &
 	return result;
 }
 
+//! References in a table filter index its own input columns, not the sample.
+//! Keep the bound expression's types and operators intact; if any input cannot
+//! be represented by the sample, the caller must discard the whole predicate.
+static bool RewriteFilterRefsToSample(Expression &expression, const vector<idx_t> &sample_columns,
+                                      const vector<LogicalType> &sample_types) {
+	if (expression.GetExpressionClass() == ExpressionClass::BOUND_REF) {
+		auto &reference = expression.Cast<BoundReferenceExpression>();
+		D_ASSERT(reference.Index() < sample_columns.size());
+		auto column = sample_columns[reference.Index()];
+		D_ASSERT(column < sample_types.size());
+		if (reference.GetReturnType() != sample_types[column]) {
+			return false;
+		}
+		reference.IndexMutable() = column;
+		return true;
+	}
+	bool mapped = true;
+	ExpressionIterator::EnumerateChildren(expression, [&](Expression &child) {
+		if (!RewriteFilterRefsToSample(child, sample_columns, sample_types)) {
+			mapped = false;
+		}
+	});
+	return mapped;
+}
+
 unique_ptr<Expression> TableSampleManager::BuildLocalPredicate(const Entry &sample, const LogicalOperator &op,
                                                                const vector<LogicalType> &sample_types,
                                                                idx_t &predicate_count, bool emit_log) const {
@@ -155,43 +196,73 @@ unique_ptr<Expression> TableSampleManager::BuildLocalPredicate(const Entry &samp
 		if (emit_log) {
 			std::cerr << "    [Get] table_index=" << get->table_index.index
 			          << " projected_cols=" << get->GetColumnIds().size()
-			          << " table_filters=" << get->table_filters.FilterCount() << '\n';
+			          << " table_filters=" << get->table_filters.FilterCount()
+			          << " multi_column_filters=" << get->table_filters.GetMultiColumnFilters().size() << '\n';
 		}
-		for (auto &filter_entry : get->table_filters) {
-			auto projection_column = filter_entry.GetIndex().GetIndex();
-			if (projection_column >= get->GetColumnIds().size() ||
-			    get->GetColumnIds()[projection_column].IsVirtualColumn()) {
-				if (emit_log) {
-					std::cerr << "      [TableFilter] projection=" << projection_column
-					          << " SKIPPED(out-of-range/virtual)" << '\n';
+		auto append_filter = [&](const ExpressionFilter &expression_filter,
+		                         const vector<ProjectionIndex> &projection_columns) {
+			vector<idx_t> sample_columns;
+			sample_columns.reserve(projection_columns.size());
+			for (auto projection : projection_columns) {
+				auto projection_column = projection.GetIndex();
+				if (projection_column >= get->GetColumnIds().size() ||
+				    get->GetColumnIds()[projection_column].IsVirtualColumn()) {
+					break;
 				}
-				continue;
+				auto storage_column = get->GetColumnIds()[projection_column].GetPrimaryIndex();
+				idx_t chunk_column = DConstants::INVALID_INDEX;
+				for (idx_t i = 0; i < sample.needed_storage_columns.size(); i++) {
+					if (sample.needed_storage_columns[i] == storage_column) {
+						chunk_column = i;
+						break;
+					}
+				}
+				if (chunk_column >= sample_types.size()) {
+					break;
+				}
+				sample_columns.push_back(chunk_column);
 			}
-			idx_t storage_column = get->GetColumnIds()[projection_column].GetPrimaryIndex();
-			idx_t chunk_column = DConstants::INVALID_INDEX;
-			for (idx_t i = 0; i < sample.needed_storage_columns.size(); i++) {
-				if (sample.needed_storage_columns[i] == storage_column) {
-					chunk_column = i;
+			if (sample_columns.size() != projection_columns.size()) {
+				if (emit_log) {
+					std::cerr << "      [TableFilter] SKIPPED(unavailable sample column)" << '\n';
+				}
+				return;
+			}
+			auto predicate = UnwrapOptionalFilterExpressions(*expression_filter.expr);
+			if (!RewriteFilterRefsToSample(*predicate, sample_columns, sample_types)) {
+				if (emit_log) {
+					std::cerr << "      [TableFilter] SKIPPED(incompatible sample column type)" << '\n';
+				}
+				return;
+			}
+			// Multi-column pushdown can leave the same predicate in a LogicalFilter
+			// above the scan. Evaluate identical mapped predicates only once.
+			bool duplicate = false;
+			for (auto &existing : predicates) {
+				if (predicate->Equals(*existing)) {
+					duplicate = true;
 					break;
 				}
 			}
-			if (chunk_column == DConstants::INVALID_INDEX || chunk_column >= sample_types.size()) {
-				if (emit_log) {
-					std::cerr << "      [TableFilter] projection=" << projection_column << " storage=" << storage_column
-					          << " SKIPPED(not-in-sample)" << '\n';
-				}
-				continue;
-			}
-			BoundReferenceExpression column_ref(sample_types[chunk_column], chunk_column);
-			auto &expression_filter = filter_entry.Filter().Cast<ExpressionFilter>();
-			auto predicate = UnwrapOptionalFilterExpressions(*expression_filter.expr);
-			ExpressionFilter::ReplaceExpressionRecursive(predicate, column_ref);
 			if (emit_log) {
-				std::cerr << "      [TableFilter] projection=" << projection_column << " storage=" << storage_column
-				          << " sample=" << chunk_column << " filter=" << expression_filter.DebugToString()
-				          << " expr=" << predicate->ToString() << " APPLIED" << '\n';
+				std::cerr << "      [TableFilter] columns=" << sample_columns.size()
+				          << " filter=" << expression_filter.expr->ToString() << " expr=" << predicate->ToString()
+				          << (duplicate ? " REUSED" : " APPLIED") << '\n';
 			}
-			predicates.push_back(std::move(predicate));
+			if (!duplicate) {
+				predicates.push_back(std::move(predicate));
+			}
+		};
+		for (auto &filter_entry : get->table_filters) {
+			auto &filter = filter_entry.Filter().Cast<ExpressionFilter>();
+			D_ASSERT(filter.column_indexes.empty());
+			append_filter(filter, {filter_entry.GetIndex()});
+		}
+		// DuckDB stores multi-column filters separately; the regular iterator
+		// and FilterCount only cover single-column filters.
+		for (auto &filter : get->table_filters.GetMultiColumnFilters()) {
+			auto &expression_filter = filter->Cast<ExpressionFilter>();
+			append_filter(expression_filter, expression_filter.column_indexes);
 		}
 	}
 
@@ -470,8 +541,16 @@ optional_idx TableSampleManager::TryGetExactLocalCardinality(const Entry &sample
 		}
 		if (node->type == LogicalOperatorType::LOGICAL_GET) {
 			auto &get = node->Cast<LogicalGet>();
+			if (!HasStorageSampleLayout(get)) {
+				return optional_idx();
+			}
 			auto table = get.GetTable();
 			if (!table) {
+				return optional_idx();
+			}
+			// Multi-column filters need statistics for every input. Do not mistake
+			// an empty single-column map for an unfiltered scan.
+			if (get.table_filters.HasMultiColumnFilters()) {
 				return optional_idx();
 			}
 			if (get.table_filters.FilterCount() == 0) {
@@ -580,6 +659,13 @@ void TableSampleManager::EnsureSample(Entry &entry, const LogicalOperator &op) {
 		leaf = leaf->children[0].get();
 	}
 	if (leaf->type != LogicalOperatorType::LOGICAL_GET) {
+		return;
+	}
+	if (!HasStorageSampleLayout(leaf->Cast<LogicalGet>())) {
+		if (LogEnabled()) {
+			std::cerr << "  [Bloom-SampleUnavailable] table=" << entry.table_name
+			          << " reason=scan_projection_changes_storage_layout" << '\n';
+		}
 		return;
 	}
 

@@ -174,7 +174,7 @@ struct RPTSamplePreloadGlobalState : public GlobalTableFunctionState {
 };
 
 static unique_ptr<FunctionData> RPTSamplePreloadBind(ClientContext &context, TableFunctionBindInput &input,
-                                                     vector<LogicalType> &return_types, vector<string> &names) {
+                                                     vector<LogicalType> &return_types, vector<Identifier> &names) {
 	return_types.emplace_back(LogicalType::UBIGINT);
 	names.emplace_back("loaded_samples");
 	return nullptr;
@@ -216,6 +216,11 @@ static void RPTSamplePreloadFunction(ClientContext &context, TableFunctionInput 
 void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_ptr<LogicalOperator> &plan) {
 	Value setting;
 	if (input.context.TryGetCurrentSetting("enable_bloom", setting) && !setting.GetValue<bool>()) {
+		return;
+	}
+	// Never sample or materialize while preparing a statement. Data-dependent
+	// prepared statements are rebound and optimized again at EXECUTE time.
+	if (plan->type == LogicalOperatorType::LOGICAL_PREPARE) {
 		return;
 	}
 	// EXPLAIN must only inspect DuckDB's native plan. Bloom executes selected

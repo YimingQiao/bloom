@@ -1,16 +1,14 @@
 #include "predicate_transfer/materialized_cte_lifter.hpp"
 #include "predicate_transfer/rpt_result_collector.hpp"
+#include "predicate_transfer/table_operator_manager.hpp"
 
 #include "duckdb/execution/executor.hpp"
 #include "duckdb/execution/physical_plan_generator.hpp"
 #include "duckdb/main/client_data.hpp"
-#include "duckdb/main/materialized_query_result.hpp"
+#include "duckdb/main/query_result.hpp"
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
-#include "duckdb/main/settings.hpp"
-#include "duckdb/parallel/task_scheduler.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
-#include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_cteref.hpp"
 #include "duckdb/planner/operator/logical_materialized_cte.hpp"
 #include "predicate_transfer/predicate_transfer_optimizer.hpp"
@@ -126,11 +124,10 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::Lift(unique_ptr<LogicalOperat
 
 	// 1. Check the untouched logical definition before running child Bloom or
 	//    constructing a physical plan.
-	string unsafe_reason;
-	if (!IsSafeForOptimizerExecution(*op->children[0], unsafe_reason)) {
+	if (auto unsafe_reason = OptimizerExecutionUnsafeReason(*op->children[0], context)) {
 		if (config.log_transfer_steps) {
 			fprintf(stderr, "[Bloom-Excitation] CTE %llu retained: %s\n",
-			        static_cast<unsigned long long>(cte_index.index), unsafe_reason.c_str());
+			        static_cast<unsigned long long>(cte_index.index), unsafe_reason);
 		}
 		op->children[1] = Lift(std::move(op->children[1]));
 		return op;
@@ -181,56 +178,6 @@ unique_ptr<LogicalOperator> MaterializedCTELifter::ReplaceCTERefs(unique_ptr<Log
 	return op;
 }
 
-bool MaterializedCTELifter::IsSafeForOptimizerExecution(const LogicalOperator &op, string &unsafe_reason) const {
-	if (op.type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN || op.type == LogicalOperatorType::LOGICAL_DELIM_JOIN ||
-	    op.type == LogicalOperatorType::LOGICAL_ASOF_JOIN) {
-		auto &join = op.Cast<LogicalComparisonJoin>();
-		bool has_equality = false;
-		idx_t range_count = 0;
-		for (auto &condition : join.conditions) {
-			if (!condition.IsComparison()) {
-				continue;
-			}
-			auto comparison = condition.GetComparisonType();
-			if (comparison == ExpressionType::COMPARE_EQUAL ||
-			    comparison == ExpressionType::COMPARE_NOT_DISTINCT_FROM) {
-				has_equality = true;
-			} else if (comparison == ExpressionType::COMPARE_LESSTHAN ||
-			           comparison == ExpressionType::COMPARE_GREATERTHAN ||
-			           comparison == ExpressionType::COMPARE_LESSTHANOREQUALTO ||
-			           comparison == ExpressionType::COMPARE_GREATERTHANOREQUALTO) {
-				range_count++;
-			}
-		}
-
-		// A pure range comparison can become PIECEWISE_MERGE_JOIN / IE_JOIN.
-		// With prefer_range_joins enabled, a mixed join with at least two range
-		// keys can become IE_JOIN as well. Their materialization tasks always
-		// look up the active query Executor, even with one scheduler thread.
-		bool prefers_iejoin = range_count >= 2 && Settings::Get<PreferRangeJoinsSetting>(context);
-		if (range_count > 0 && (!has_equality || prefers_iejoin)) {
-			unsafe_reason = "logical_range_join_may_require_active_executor";
-			return false;
-		}
-
-		auto thread_count = TaskScheduler::GetScheduler(context).NumberOfThreads();
-		if (has_equality && (thread_count > 1 || context.config.verify_parallelism)) {
-			// Equality comparisons normally become PhysicalHashJoin. Its
-			// runtime build count can trigger parallel finalize regardless of
-			// the optimizer's cardinality estimate.
-			unsafe_reason = "logical_hash_join_may_require_active_executor";
-			return false;
-		}
-	}
-
-	for (auto &child : op.children) {
-		if (!IsSafeForOptimizerExecution(*child, unsafe_reason)) {
-			return false;
-		}
-	}
-	return true;
-}
-
 unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<LogicalOperator> plan) {
 	plan->ResolveOperatorTypes();
 
@@ -239,8 +186,6 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 
 	PreparedStatementData stmt_data(StatementType::SELECT_STATEMENT);
 	stmt_data.physical_plan = std::move(physical_plan);
-	stmt_data.memory_type = QueryResultMemoryType::IN_MEMORY;
-	stmt_data.output_type = QueryResultOutputType::FORCE_MATERIALIZED;
 
 	auto &root = stmt_data.physical_plan->Root();
 	stmt_data.types = root.types;
@@ -256,7 +201,7 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 	auto collector = GetRPTResultCollector(context, stmt_data);
 	executor.Initialize(std::move(collector));
 
-	while (executor.ExecuteTask() != PendingExecutionResult::EXECUTION_FINISHED) {
+	while (executor.ExecuteTask() != QueryResultState::FINISHED) {
 	}
 	auto result = executor.GetResult();
 	D_ASSERT(result);
@@ -265,8 +210,7 @@ unique_ptr<ColumnDataCollection> MaterializedCTELifter::ExecutePlan(unique_ptr<L
 		client_data.profiler = std::move(previous_profiler);
 		result->ThrowError();
 	}
-	auto &mat_result = result->Cast<MaterializedQueryResult>();
-	unique_ptr<ColumnDataCollection> result_data = mat_result.TakeCollection();
+	auto result_data = result->TakeCollection();
 
 	client_data.profiler = std::move(previous_profiler);
 	return result_data;

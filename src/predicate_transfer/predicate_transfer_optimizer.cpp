@@ -7,6 +7,7 @@
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/planner/operator/logical_get.hpp"
+#include "duckdb/planner/operator/logical_filter.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
 #include "duckdb/planner/operator/logical_comparison_join.hpp"
 #include "duckdb/planner/operator/logical_empty_result.hpp"
@@ -18,7 +19,6 @@
 
 #include "duckdb/optimizer/column_binding_replacer.hpp"
 #include "duckdb/optimizer/optimizer.hpp"
-#include "duckdb/optimizer/empty_result_pullup.hpp"
 #include "duckdb/main/client_config.hpp"
 #include "duckdb/main/config.hpp"
 #include "duckdb/storage/data_table.hpp"
@@ -400,8 +400,8 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	};
 
-	// Bloom may introduce and then pull up LogicalEmptyResult nodes. Respect
-	// DuckDB's explicit optimizer setting: doing that rewrite when
+	// Bloom may introduce LogicalEmptyResult nodes. Respect
+	// DuckDB's explicit optimizer setting: introducing empty inputs when
 	// empty_result_pullup is disabled can suppress errors in unreachable
 	// branches and observably change query semantics.
 	if (optimizer.OptimizerDisabled(OptimizerType::EMPTY_RESULT_PULLUP)) {
@@ -472,8 +472,8 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 		}
 	}
 
-	if (!graph_manager->Build(*plan)) {
-		log_skip("no_transfer_graph");
+	if (!graph_manager->Build(*plan, skip_reason)) {
+		log_skip(skip_reason);
 		return plan;
 	}
 	auto &excitation_manager = static_cast<ExcitationGraphManager &>(*graph_manager);
@@ -604,23 +604,13 @@ static unique_ptr<LogicalOperator> BuildMemoryScan(ExcitationGraphManager &manag
 	return unique_ptr<LogicalOperator>(std::move(projection));
 }
 
-static LogicalGet *FindLeafGet(LogicalOperator &op) {
-	auto *leaf = &op;
-	while (leaf->type != LogicalOperatorType::LOGICAL_GET && !leaf->children.empty()) {
-		leaf = leaf->children[0].get();
-	}
-	if (leaf->type != LogicalOperatorType::LOGICAL_GET) {
-		return nullptr;
-	}
-	return &leaf->Cast<LogicalGet>();
-}
-
-static void InjectDefaultScanFilters(ExcitationGraphManager &manager, LogicalGet &get,
+static void InjectDefaultScanFilters(ExcitationGraphManager &manager, unique_ptr<LogicalOperator> &op,
                                      const shared_ptr<RPTFilter> &row_id_filter,
                                      const vector<DirectFilterInfo> *direct_filters) {
-	auto &column_ids = get.GetMutableColumnIds();
+	auto *get = ScannerFilterSet::GetPushdownScan(*op);
 
-	if (row_id_filter) {
+	if (row_id_filter && get) {
+		auto &column_ids = get->GetMutableColumnIds();
 		idx_t row_id_col_index = 0;
 		bool found = false;
 		for (idx_t i = 0; i < column_ids.size(); i++) {
@@ -632,26 +622,56 @@ static void InjectDefaultScanFilters(ExcitationGraphManager &manager, LogicalGet
 		}
 		if (!found) {
 			row_id_col_index = column_ids.size();
+			// The extra column is only a filter input. Preserve the scan's
+			// output so parent projection maps and MARK columns do not move.
+			if (get->projection_ids.empty()) {
+				for (idx_t i = 0; i < column_ids.size(); i++) {
+					get->projection_ids.emplace_back(i);
+				}
+			}
 			column_ids.push_back(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID));
 		}
 		auto retained_filter = manager.RetainFilterForExecution(row_id_filter);
-		get.table_filters.PushFilter(ProjectionIndex(row_id_col_index),
-		                             RPTTableFilter::MakeOptional(std::move(retained_filter), LogicalType::ROW_TYPE));
+		get->table_filters.PushFilter(ProjectionIndex(row_id_col_index),
+		                              RPTTableFilter::MakeOptional(std::move(retained_filter), LogicalType::ROW_TYPE));
 	}
 
 	if (!direct_filters) {
 		return;
 	}
+	op->ResolveOperatorTypes();
+	auto output_bindings = op->GetColumnBindings();
+	vector<unique_ptr<Expression>> expressions;
 	for (auto &df : *direct_filters) {
-		idx_t pos = df.binding.column_index;
-		if (pos >= column_ids.size() || column_ids[pos].IsVirtualColumn()) {
-			continue;
+		if (get && df.binding.table_index == get->table_index) {
+			auto &column_ids = get->GetColumnIds();
+			idx_t pos = df.binding.column_index;
+			if (pos < column_ids.size() && !column_ids[pos].IsVirtualColumn()) {
+				auto retained_filter = manager.RetainFilterForExecution(df.filter);
+				get->table_filters.PushFilter(
+				    ProjectionIndex(pos),
+				    RPTTableFilter::MakeOptional(std::move(retained_filter), get->GetColumnType(column_ids[pos])));
+				continue;
+			}
 		}
-		auto col_id = column_ids[pos].GetPrimaryIndex();
-		auto key_type = (col_id < get.returned_types.size()) ? get.returned_types[col_id] : LogicalType::BIGINT;
-		auto retained_filter = manager.RetainFilterForExecution(df.filter);
-		get.table_filters.PushFilter(ProjectionIndex(pos),
-		                             RPTTableFilter::MakeOptional(std::move(retained_filter), key_type));
+		// The binding belongs to the subtree's output. Evaluate there instead
+		// of treating its column number as a position in an unrelated scan.
+		for (idx_t i = 0; i < output_bindings.size(); i++) {
+			if (output_bindings[i] == df.binding) {
+				auto retained_filter = manager.RetainFilterForExecution(df.filter);
+				auto filter = RPTTableFilter(std::move(retained_filter), op->types[i]).GetFilter();
+				BoundColumnRefExpression column(op->types[i], df.binding);
+				expressions.push_back(filter->ToExpression(column));
+				break;
+			}
+		}
+	}
+	if (!expressions.empty()) {
+		auto filter = make_uniq<LogicalFilter>();
+		filter->expressions = std::move(expressions);
+		filter->children.push_back(std::move(op));
+		filter->ResolveOperatorTypes();
+		op = std::move(filter);
 	}
 }
 
@@ -686,7 +706,9 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			if (enable_profiler) {
 				fprintf(stderr, "\t[RewriteQueryPlan] table_id=%lu → EmptyResult\n", table_id);
 			}
-			return make_uniq<LogicalEmptyResult>(op->types, op->GetColumnBindings());
+			// The native constructor resolves projection maps before capturing
+			// the output layout; cached types can predate column pruning.
+			return make_uniq<LogicalEmptyResult>(std::move(op));
 
 		case TableTransferResult::Kind::MemoryScan: {
 			// Pending expr filter never baked — the original op still holds
@@ -733,9 +755,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 			if (enable_profiler) {
 				fprintf(stderr, "\t[RewriteQueryPlan] table_id=%lu → DefaultScan\n", table_id);
 			}
-			if (auto *get = FindLeafGet(*op)) {
-				InjectDefaultScanFilters(excitation_mgr, *get, result.row_id_filter, result.direct_filters);
-			}
+			InjectDefaultScanFilters(excitation_mgr, op, result.row_id_filter, result.direct_filters);
 			return op;
 		}
 		return op;
@@ -745,8 +765,10 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::RewriteQueryPlan(unique_
 	if (!binding_replacer.replacement_bindings.empty()) {
 		binding_replacer.VisitOperator(*plan);
 	}
-	EmptyResultPullup empty_result_pullup;
-	plan = empty_result_pullup.Optimize(std::move(plan));
+	// Keep empty children in place. Re-running EmptyResultPullup here can
+	// remove an ANTI join's output projection without remapping its parent's
+	// positional projection map. Physical planning handles empty inputs while
+	// preserving the output layout of every existing operator.
 	excitation_mgr.ClearMaterializedScanners();
 	excitation_mgr.FinalizeMemoryReservationForExecution();
 	return plan;

@@ -60,9 +60,9 @@ SELECT memory_usage_bytes AS bytes
 FROM duckdb_memory()
 WHERE tag = 'ALLOCATOR';
 
-# DuckDB can retain or release one 64 KiB allocator block as prepared plans and
-# worker state are created. Cleanup checks allow only that native-runtime noise;
-# retained Bloom plans below are required to exceed it.
+# DuckDB 2.0 rebinds prepared reads on EXECUTE and does not retain their
+# physical plans. Allow one 64 KiB allocator block of native worker-state noise
+# and require cleanup after EXECUTE as well as after DEALLOCATE.
 
 # Measure the allocator footprint of DuckDB's native prepared plan. Every
 # whole-query fallback below must retain this footprint within one allocator
@@ -91,7 +91,7 @@ FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 
 query II
-SELECT (native.bytes > 0)::INTEGER,
+SELECT (abs(native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory, rpt_low_native_retained native
 WHERE memory.tag = 'ALLOCATOR';
@@ -235,11 +235,17 @@ statement ok
 SET debug_force_external = false;
 
 # ============================================================================
-# Retained-plan memory ladder and repeated cleanup
+# Memory budgets and repeated execution cleanup
 # ============================================================================
 
-# A generous Bloom budget establishes how much memory the complete rewrite
-# retains in its prepared physical plan.
+# A generous Bloom budget permits the complete rewrite. Its transfer state
+# must be released at query completion even while the prepared statement exists.
+statement ok
+CALL enable_logging('Bloom', storage = 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
 statement ok
 SET bloom_memory_limit = '32MB';
 
@@ -256,6 +262,13 @@ EXECUTE rpt_low_full;
 ----
 800	409600	409600
 
+query I
+SELECT max(retained_bytes) > 65536
+FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'transfer_complete' AND status = 'applied';
+----
+true
+
 statement ok
 CREATE TEMP TABLE rpt_low_full_retained AS
 SELECT memory_usage_bytes - baseline.bytes AS bytes
@@ -263,7 +276,7 @@ FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 
 query II
-SELECT (retained.bytes - native.bytes > 65536)::INTEGER,
+SELECT (abs(retained.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_full_retained retained,
@@ -286,6 +299,9 @@ WHERE tag = 'ALLOCATOR';
 # This budget admits the first wide source but not the second one. Bloom must
 # stop expanding the transfer, keep the completed work, and execute correctly.
 statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
 SET bloom_memory_limit = '14.4MB';
 
 statement ok
@@ -301,11 +317,24 @@ EXECUTE rpt_low_partial;
 ----
 800	409600	409600
 
-# Partial transfer retains some Bloom data, but less than the complete rewrite,
-# and the non-spill allocator never has temporary storage.
+query II
+SELECT count(*) > 0, max(retained_bytes) > 65536
+FROM duckdb_logs_parsed('Bloom')
+WHERE event = 'transfer_complete' AND status = 'partial_stop';
+----
+true	true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+CALL disable_logging();
+
+# Partial and complete transfers both release their state after EXECUTE;
+# the non-spill allocator must never have temporary storage.
 query III
-SELECT (memory.memory_usage_bytes - baseline.bytes - native.bytes > 65536)::INTEGER,
-       (memory.memory_usage_bytes - baseline.bytes < retained.bytes)::INTEGER,
+SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
+       (abs(memory.memory_usage_bytes - baseline.bytes - retained.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_allocator_baseline baseline,
@@ -446,8 +475,8 @@ SET bytes = memory.memory_usage_bytes
 FROM duckdb_memory() memory
 WHERE memory.tag = 'ALLOCATOR';
 
-# Once DuckDB's native worker state is warm, repeated fallback executions must
-# not accumulate allocator memory.
+# Rebinding can retain or release one native allocator block even after
+# warmup. Repeated fallback executions must stay within that bound.
 loop i 0 5
 
 query II
@@ -462,7 +491,7 @@ WHERE w1.keep AND w2.keep;
 endloop
 
 query II
-SELECT (memory_usage_bytes = baseline.bytes)::INTEGER,
+SELECT (abs(memory_usage_bytes - baseline.bytes) <= 65536)::INTEGER,
        (temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
@@ -516,12 +545,12 @@ WHERE tag = 'ALLOCATOR';
 1	1
 
 # ============================================================================
-# Database-wide budget contention across connections
+# Prepared-query cleanup across connections
 # ============================================================================
 
-# Temporary-memory reservations are database-wide. Keep a large Bloom rewrite
-# alive on one connection, then verify that another connection's auto budget is
-# computed from the remaining memory and retains only its native plan.
+# DuckDB 2.0 no longer retains the large rewrite after EXECUTE on con1.
+# Verify that a second connection can execute under its automatic memory
+# budget, and that neither connection retains transfer allocations.
 statement ok
 SET memory_limit = '64MB';
 
@@ -565,7 +594,7 @@ FROM duckdb_memory(), rpt_low_allocator_baseline baseline
 WHERE tag = 'ALLOCATOR';
 
 query II
-SELECT (pressure.bytes > retained.bytes)::INTEGER,
+SELECT (abs(pressure.bytes - retained.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
 FROM duckdb_memory() memory,
      rpt_low_pressure_retained pressure,
@@ -574,8 +603,8 @@ WHERE memory.tag = 'ALLOCATOR';
 ----
 1	1
 
-# Measure the second connection's native prepared-plan footprint while the
-# first reservation is held; this is the fallback reference under pressure.
+# Measure the second connection's native footprint after the first connection
+# has released its transfer state.
 statement ok con2
 SET threads = 8;
 
@@ -604,7 +633,7 @@ FROM duckdb_memory() memory,
 WHERE memory.tag = 'ALLOCATOR';
 
 query I
-SELECT (bytes > 0)::INTEGER
+SELECT (abs(bytes) <= 65536)::INTEGER
 FROM rpt_low_contended_native_retained;
 ----
 1
@@ -655,9 +684,8 @@ EXECUTE rpt_low_contended_auto;
 ----
 800	409600	409600
 
-# Concurrent native prepared plans can differ by one small allocator block.
-# Allow 64 KiB of native-plan noise; the smallest retained Bloom rewrite measured
-# above is hundreds of KiB larger than this fallback footprint.
+# Allow one small allocator block of native worker-state noise after the
+# second connection completes its query.
 query II
 SELECT (abs(memory.memory_usage_bytes - baseline.bytes - pressure.bytes - native.bytes) <= 65536)::INTEGER,
        (memory.temporary_storage_bytes = 0)::INTEGER
