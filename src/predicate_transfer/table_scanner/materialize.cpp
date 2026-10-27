@@ -12,10 +12,12 @@
 #include "duckdb/main/prepared_statement_data.hpp"
 #include "duckdb/main/query_profiler.hpp"
 #include "duckdb/optimizer/expression_heuristics.hpp"
+#include "duckdb/optimizer/filter_combiner.hpp"
 #include "duckdb/optimizer/remove_unused_columns.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
 #include "duckdb/planner/expression/bound_conjunction_expression.hpp"
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
+#include "duckdb/planner/expression/expression_barrier.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
@@ -338,6 +340,39 @@ static void LogMaterializePlan(LogicalOperator &plan, const char *phase) {
 	LogResidualFilters(plan, phase);
 }
 
+//! Statistics propagation can leave range predicates above an already-filtered
+//! scan. An isolated materialization cannot rely on the enclosing join's runtime
+//! filters to prune that scan. Let DuckDB push these remaining predicates into
+//! storage, keeping the FILTER's output projection and any residual expressions.
+static void PushdownMaterializationFilters(ClientContext &context, LogicalOperator &op) {
+	for (auto &child : op.children) {
+		PushdownMaterializationFilters(context, *child);
+	}
+	if (op.type != LogicalOperatorType::LOGICAL_FILTER || op.children[0]->type != LogicalOperatorType::LOGICAL_GET) {
+		return;
+	}
+	auto &get = op.children[0]->Cast<LogicalGet>();
+	if (!get.GetTable() || !get.function.filter_pushdown || get.ordinality_idx.IsValid()) {
+		return;
+	}
+	for (auto &entry : get.table_filters) {
+		auto &expr = *entry.Filter().Cast<ExpressionFilter>().expr;
+		if (expr.CanThrow() || expr.IsVolatile() || ExpressionBarrier::Contains(expr)) {
+			return;
+		}
+	}
+	FilterCombiner combiner(context);
+	for (idx_t i = 0; i < op.expressions.size();) {
+		auto &expr = *op.expressions[i];
+		if (!expr.CanThrow() && !expr.IsVolatile() && !ExpressionBarrier::Contains(expr) &&
+		    combiner.TryPushdownGenericExpression(get, expr) == FilterPushdownResult::PUSHED_DOWN_FULLY) {
+			op.expressions.erase_at(i);
+		} else {
+			i++;
+		}
+	}
+}
+
 void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	auto total_start = MaterializeClock::now();
 	auto log_timing = LogEnabled();
@@ -348,6 +383,7 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	}
 
 	auto plan_copy = table_op_.Copy(context_);
+	PushdownMaterializationFilters(context_, *plan_copy);
 	auto copy_end = MaterializeClock::now();
 	if (log_timing) {
 		LogMaterializePlan(*plan_copy, "before_rpt");

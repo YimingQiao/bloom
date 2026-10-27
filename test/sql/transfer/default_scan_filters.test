@@ -53,3 +53,50 @@ SELECT count(*) FROM (SELECT id FROM rpt_output_probe ORDER BY id LIMIT 20) a
 JOIN rpt_output_keys b USING (id);
 ----
 0
+
+# Statistics can add a range FILTER after the scan already has local filters.
+# Moving that range into the materialization scan must preserve its output
+# projection, including when filter-only columns precede the returned columns.
+statement ok
+CREATE TABLE rpt_range_source AS
+SELECT i % 2 = 0 AS keep, repeat('unused', 8) filler,
+       ('value_' || i)::VARCHAR payload, i::INTEGER id
+FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE rpt_range_keys AS SELECT i::INTEGER id FROM range(2, 5000) t(i);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+CALL enable_logging('Bloom', storage = 'memory');
+
+statement ok
+CALL truncate_duckdb_logs();
+
+query IIT
+SELECT count(*), sum(s.id), min(s.payload)
+FROM rpt_range_source s JOIN rpt_range_keys k USING (id)
+WHERE s.keep;
+----
+2499	6247500	value_10
+
+query I
+SELECT coalesce(max(completed_sources) > 0, false) = current_setting('enable_bloom')
+FROM duckdb_logs_parsed('Bloom') WHERE event = 'transfer_complete';
+----
+true
+
+statement ok
+CALL disable_logging();
+
+statement ok
+SET enable_bloom = false;
+
+query IIT
+SELECT count(*), sum(s.id), min(s.payload)
+FROM rpt_range_source s JOIN rpt_range_keys k USING (id)
+WHERE s.keep;
+----
+2499	6247500	value_10
