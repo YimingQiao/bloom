@@ -5,7 +5,7 @@ Adaptive predicate transfer, built into your query plan.</p>
 
 <p align="center">
   <a href="extension_config.cmake"><img src="https://img.shields.io/badge/Bloom-0.0.3-1e5688" alt="Bloom 0.0.3"></a>
-  <a href="#compatibility"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
+  <a href="#build-and-load"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
   <a href="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="License: MIT"></a>
 </p>
@@ -27,35 +27,15 @@ and DuckDB v2.0.0, one thread, on compressed IMDB.
 [Try the SQL demo ↓](#try-it-in-duckdb) ·
 [Full benchmark results and methodology →](#benchmarks)
 
-Bloom combines lightweight sampling with execution feedback. Sampling suggests
-which transfer to try next; after each step, Bloom observes the new cardinalities
-and adjusts its decision. These signals help avoid low-value transfers and keep
-later decisions grounded in the query's actual behavior.
-
-DuckDB already applies Bloom filters within selective hash joins
-([duckdb/duckdb#19502](https://github.com/duckdb/duckdb/pull/19502)). Bloom
-complements this by moving filters in both directions and across multiple joins.
-
 ## How it works
 
-| 1 · Estimate | 2 · Transfer and adapt | 3 · Filter at the scan |
-|:---|:---|:---|
-| Sample the tables and rank promising transfers. | Apply a transfer, observe cardinalities, and choose again. Reuse selective intermediate results. | Push filters into DuckDB scans to prune rows and help skip row groups. |
-
-## Compatibility
-
-Bloom v0.0.3 targets **DuckDB v2.0.0** (commit
-`d54cbbe3df17e8e5ce68312f483b4155836112aa`). The DuckDB submodule and CI
-builds are pinned to this release. C++ extension binaries must be built for
-the matching DuckDB version; older Bloom binaries must be rebuilt.
-See [RELEASING.md](RELEASING.md) for the release checklist.
-
-Bloom does no sampling or materialization during `PREPARE`. It runs when DuckDB
-rebinds and optimizes the statement at `EXECUTE`; statements that reuse a cached
-plan keep their native plan. If scan field extraction changes the storage-column
-layout, Bloom uses DuckDB's cardinality estimate for that subtree.
+When a query combines several tables, Bloom uses what it learns from one table
+to rule out irrelevant rows in the others. It adjusts as it goes, so later
+steps have less data to process. Your SQL and query results stay the same.
 
 ## Build and load
+
+Bloom v0.0.3 is built for **DuckDB v2.0.0**.
 
 ```bash
 git submodule update --init --recursive
