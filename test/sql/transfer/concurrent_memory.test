@@ -1,0 +1,124 @@
+# name: test/sql/transfer/concurrent_memory.test
+# description: concurrent cold-cache sampling and bounded transfers release query state
+# group: [transfer]
+
+require bloom
+
+load {TEST_DIR}/rpt_concurrent_memory.db
+
+statement ok
+CREATE TABLE concurrent_hub AS SELECT i::INTEGER id FROM range(25000) t(i);
+
+statement ok
+CREATE TABLE concurrent_left AS
+SELECT i::INTEGER id, repeat('x', 64) payload, i % 100 = 0 AS keep FROM range(25000) t(i);
+
+statement ok
+CREATE TABLE concurrent_right AS
+SELECT i::INTEGER id, repeat('y', 64) payload, i % 50 = 0 AS keep FROM range(25000) t(i);
+
+statement ok
+CHECKPOINT;
+
+restart
+
+statement ok
+SET threads = 4;
+
+statement ok
+SET memory_limit = '128MB';
+
+# Four connections race to create the same prepared sample cache. Every result
+# must agree with the exact count and sum, including the first uncached query.
+concurrentloop connection 0 4
+
+statement ok
+SET bloom_sample_size = 1000;
+
+statement ok
+SET bloom_memory_limit = 'auto';
+
+loop repeat 0 5
+
+query IIII
+SELECT count(*), sum(h.id), sum(length(l.payload)), sum(length(r.payload))
+FROM concurrent_hub h JOIN concurrent_left l USING (id) JOIN concurrent_right r USING (id)
+WHERE l.keep AND r.keep;
+----
+250	3112500	16000	16000
+
+endloop
+
+endloop
+
+# Reopening removes the process sample cache. Instant samples now exercise
+# query-local ownership under a tighter shared database memory budget.
+restart
+
+statement ok
+SET threads = 4;
+
+statement ok
+SET memory_limit = '32MB';
+
+statement ok
+CREATE TEMP TABLE concurrent_memory_before AS
+SELECT memory_usage_bytes bytes FROM duckdb_memory() WHERE tag = 'ALLOCATOR';
+
+concurrentloop connection 0 4
+
+statement ok
+SET bloom_sample_mode = 'instant';
+
+statement ok
+SET bloom_sample_memory_cache = false;
+
+statement ok
+SET bloom_instant_access_points = 4;
+
+statement ok
+SET bloom_instant_rows_per_access = 64;
+
+statement ok
+SET bloom_memory_limit = 'auto';
+
+loop repeat 0 10
+
+# At 32 MB even native concurrent joins may exhaust memory. A query may
+# succeed with the exact result or report OOM; other errors remain failures.
+statement maybe
+SELECT CAST(CASE WHEN count(*) = 250 AND sum(h.id) = 3112500
+                      AND sum(length(l.payload)) = 16000 AND sum(length(r.payload)) = 16000
+                 THEN '1' ELSE 'Incorrect concurrent Bloom result' END AS INTEGER)
+FROM concurrent_hub h JOIN concurrent_left l USING (id) JOIN concurrent_right r USING (id)
+WHERE l.keep AND r.keep;
+----
+Out of Memory Error
+
+endloop
+
+endloop
+
+# Allow one native allocator block per connection, while rejecting retained
+# sample/materialization buffers after all concurrent queries have completed.
+query II
+SELECT abs(memory_usage_bytes - bytes) <= 4 * 65536, temporary_storage_bytes = 0
+FROM duckdb_memory(), concurrent_memory_before WHERE tag = 'ALLOCATOR';
+----
+true	true
+
+query I
+SELECT 42;
+----
+42
+
+# Once contention ends, the same connection/database can execute the query.
+statement ok
+SET bloom_memory_limit = '0B';
+
+query IIII
+SELECT count(*), sum(h.id), sum(length(l.payload)), sum(length(r.payload))
+FROM concurrent_hub h JOIN concurrent_left l USING (id) JOIN concurrent_right r USING (id)
+WHERE l.keep AND r.keep;
+----
+250	3112500	16000	16000
