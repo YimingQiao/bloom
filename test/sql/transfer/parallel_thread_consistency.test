@@ -27,6 +27,12 @@ SELECT i::INTEGER bridge,
        (i % 4 != 3) keep
 FROM range(400000) t(i);
 
+# Exercise both ordered batch collection and unordered task-local collection.
+foreach preserve true false
+
+statement ok
+SET preserve_insertion_order = {preserve};
+
 # One prefix build state is approximately 1 MB. One and two threads exercise
 # the serial/private paths; eight threads use private lanes; 32 requested
 # threads exceed the 16 MB private-state budget and use one shared atomic state.
@@ -81,3 +87,5 @@ JOIN rpt_thread_edge e ON a.bridge = e.bridge
 WHERE s.keep AND e.keep;
 ----
 300000	59999700000
+
+endloop
