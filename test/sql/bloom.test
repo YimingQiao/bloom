@@ -12,7 +12,7 @@ v2.0.0
 query T
 SELECT extension_version FROM duckdb_extensions() WHERE extension_name = 'bloom';
 ----
-v0.0.3
+v0.0.4
 
 query I
 SELECT current_setting('enable_bloom');

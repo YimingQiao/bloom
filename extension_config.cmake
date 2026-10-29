@@ -1,6 +1,6 @@
 duckdb_extension_load(bloom
     SOURCE_DIR ${CMAKE_CURRENT_LIST_DIR}
-    EXTENSION_VERSION v0.0.3
+    EXTENSION_VERSION v0.0.4
 )
 
 # DuckDB 2.0 builds extensions without linking them unless requested explicitly.

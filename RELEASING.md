@@ -1,6 +1,6 @@
 # Release checklist
 
-Bloom v0.0.3 targets DuckDB **v2.0.0**, pinned at
+Bloom v0.0.4 targets DuckDB **v2.0.0**, pinned at
 `d54cbbe3df17e8e5ce68312f483b4155836112aa`. Release-candidate workflows produce
 downloadable CI artifacts; community publication and immutable release tags
 follow the gates below.
@@ -68,6 +68,17 @@ follow the gates below.
    LOAD bloom;
    SELECT current_setting('enable_bloom');
    ```
+
+For an update, bump the extension version and submit a new community PR that
+updates both `extension.version` and `repo.ref`. Pushing Bloom's `main` alone
+does not update the community artifact. Existing installations can download
+the published update with `FORCE INSTALL bloom FROM community;`; restart the
+DuckDB process before loading it. Check the installed version and repository:
+
+```sql
+SELECT extension_version, installed_from
+FROM duckdb_extensions() WHERE extension_name = 'bloom';
+```
 
 For a future DuckDB version that requires incompatible source changes, use a
 `vX.Y-<codename>` compatibility branch and the community descriptor's

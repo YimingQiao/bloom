@@ -25,7 +25,7 @@ Yiming Qiao's papers:
 Adaptive predicate transfer, built into your query plan.</p>
 
 <p align="center">
-  <a href="extension_config.cmake"><img src="https://img.shields.io/badge/Bloom-0.0.3-1e5688" alt="Bloom 0.0.3"></a>
+  <a href="extension_config.cmake"><img src="https://img.shields.io/badge/Bloom-0.0.4-1e5688" alt="Bloom 0.0.4"></a>
   <a href="#install-and-load"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
   <a href="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="License: MIT"></a>
@@ -87,6 +87,12 @@ LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
 
 ## Benchmarks
 
+Bloom 0.0.4 improves parallel materialization. At eight threads, the complete
+JOB workload took 5.524 s versus 12.241 s with Bloom 0.0.3 and 6.192 s with
+native DuckDB. Individual regressions remain;
+[see the multithreaded measurements and methodology](docs/benchmarks/parallel-2.0/README.md).
+
+The single-thread measurements below were collected with Bloom 0.0.3.
 DuckDB v2.0.0, one thread. Totals are sums of per-query medians from five timed
 runs after warmup; JOB uses compressed IMDB.
 

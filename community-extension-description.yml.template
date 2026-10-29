@@ -1,7 +1,7 @@
 extension:
   name: bloom
   description: Robust predicate transfer using Bloom and bitmap filters
-  version: 0.0.3
+  version: 0.0.4
   language: C++
   build: cmake
   license: MIT
