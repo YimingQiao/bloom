@@ -26,13 +26,13 @@ Adaptive predicate transfer, built into your query plan.</p>
 
 <p align="center">
   <a href="extension_config.cmake"><img src="https://img.shields.io/badge/Bloom-0.0.3-1e5688" alt="Bloom 0.0.3"></a>
-  <a href="#build-and-load"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
+  <a href="#install-and-load"><img src="https://img.shields.io/badge/DuckDB-2.0.0-1e5688" alt="DuckDB 2.0.0"></a>
   <a href="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml"><img src="https://github.com/YimingQiao/bloom/actions/workflows/MainDistributionPipeline.yml/badge.svg" alt="CI"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-64748b" alt="License: MIT"></a>
 </p>
 
 <p align="center">
-  <a href="#build-and-load">Get started</a> ·
+  <a href="#install-and-load">Get started</a> ·
   <a href="#benchmarks">Benchmarks</a> ·
   <a href="#how-it-works">How it works</a> ·
   <a href="docs/USAGE.md">Documentation</a>
@@ -57,16 +57,29 @@ Bloom uses what it learns from one table to rule out irrelevant rows in others.
 It adjusts as it goes, so later steps process less data. Your SQL and results
 stay the same.
 
-## Build and load
+## Install and load
 
-For **DuckDB v2.0.0**. Build from this repository:
+For **DuckDB v2.0.0**, install Bloom from the community extension repository:
+
+```sql
+INSTALL bloom FROM community;
+LOAD bloom;
+SELECT current_setting('enable_bloom'); -- true
+```
+
+Loading Bloom enables the optimizer automatically. Continue using your existing
+SQL, and run `LOAD bloom;` in each new DuckDB session.
+
+### Build from source
+
+To build Bloom locally from this repository:
 
 ```bash
 git submodule update --init --recursive
 make release -j"$(nproc)"
 ```
 
-Load the extension in DuckDB started with `-unsigned`:
+Load the locally built extension in DuckDB started with `-unsigned`:
 
 ```sql
 LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
