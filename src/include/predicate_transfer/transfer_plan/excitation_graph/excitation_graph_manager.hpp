@@ -137,7 +137,6 @@ private:
 	unordered_set<const ColumnDataCollection *> execution_collections_;
 	unordered_set<const RPTFilter *> execution_filters_;
 	idx_t materialized_source_count_ = 0;
-	idx_t structured_log_sequence_ = 0;
 	bool memory_stopped_ = false;
 };
 

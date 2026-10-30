@@ -6,6 +6,7 @@
 #include "duckdb/logging/log_type.hpp"
 #include "duckdb/logging/logger.hpp"
 #include "duckdb/main/client_context.hpp"
+#include "duckdb/main/client_context_state.hpp"
 #include "duckdb/main/database.hpp"
 
 #include <algorithm>
@@ -13,6 +14,21 @@
 namespace duckdb {
 
 namespace {
+
+// Shared by transfer and estimator events, including nested optimization scopes.
+// Reset at query boundaries rather than restarting at each graph manager.
+class BloomLogSequenceState : public ClientContextState {
+public:
+	atomic<idx_t> sequence {0};
+	void QueryBegin(ClientContext &) override {
+		sequence = 0;
+	}
+};
+
+static idx_t NextBloomLogSequence(ClientContext &context) {
+	auto state = context.registered_state->GetOrCreate<BloomLogSequenceState>("bloom_log_sequence");
+	return ++state->sequence;
+}
 
 class BloomLogType : public LogType {
 public:
@@ -125,7 +141,25 @@ bool BloomStructuredLoggingEnabled(ClientContext &context) {
 	return GetBloomLogger(context) != nullptr;
 }
 
-void LogBloomSkipped(ClientContext &context, idx_t event_sequence, const char *phase, const char *reason) {
+bool BloomSampleAuditEnabled(ClientContext &context) {
+	return Logger::Get(context).ShouldLog(BloomLogType::NAME, LogLevel::LOG_DEBUG);
+}
+
+void LogBloomCDCSample(ClientContext &context, idx_t table_index, const char *phase,
+                       const vector<pair<string, string>> &info) {
+	auto logger = GetBloomLogger(context);
+	if (!logger) {
+		return;
+	}
+	child_list_t<Value> fields = {
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
+	    {"destination_table_id", table_index == DConstants::INVALID_INDEX ? Value() : Value::UBIGINT(table_index)},
+	};
+	logger->WriteLog(BloomLogType::NAME, BloomLogType::LEVEL,
+	                 BloomLogType::ConstructLogMessage("cdc_sample", phase, "observed", std::move(fields), info));
+}
+
+void LogBloomSkipped(ClientContext &context, const char *phase, const char *reason) {
 	auto logger = GetBloomLogger(context);
 	if (!logger) {
 		return;
@@ -133,14 +167,14 @@ void LogBloomSkipped(ClientContext &context, idx_t event_sequence, const char *p
 	vector<pair<string, string>> info;
 	child_list_t<Value> fields = {
 	    {"reason", Value(reason)},
-	    {"event_sequence", Value::UBIGINT(event_sequence)},
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
 	};
 	logger->WriteLog(BloomLogType::NAME, BloomLogType::LEVEL,
 	                 BloomLogType::ConstructLogMessage("skipped", phase, "skipped", std::move(fields), info));
 }
 
-void LogBloomStarted(ClientContext &context, idx_t event_sequence, const char *sampling_mode,
-                     const char *excitation_mode, idx_t target_rows, idx_t estimated_sample_bytes, idx_t budget_bytes) {
+void LogBloomStarted(ClientContext &context, const char *sampling_mode, const char *excitation_mode, idx_t target_rows,
+                     idx_t estimated_sample_bytes, idx_t budget_bytes) {
 	auto logger = GetBloomLogger(context);
 	if (!logger) {
 		return;
@@ -152,23 +186,25 @@ void LogBloomStarted(ClientContext &context, idx_t event_sequence, const char *s
 	    {"estimated_sample_bytes", to_string(estimated_sample_bytes)},
 	};
 	child_list_t<Value> fields = {
-	    {"event_sequence", Value::UBIGINT(event_sequence)},
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
 	    {"budget_bytes", Value::UBIGINT(budget_bytes)},
 	};
 	logger->WriteLog(BloomLogType::NAME, BloomLogType::LEVEL,
 	                 BloomLogType::ConstructLogMessage("start", "sampling", "running", std::move(fields), info));
 }
 
-void LogBloomMemoryStopped(ClientContext &context, idx_t event_sequence, const char *phase, bool whole_query_fallback,
-                           idx_t requested_bytes, idx_t retained_bytes, idx_t budget_bytes, idx_t completed_sources) {
+void LogBloomMemoryStopped(ClientContext &context, const char *phase, bool whole_query_fallback, idx_t requested_bytes,
+                           idx_t retained_bytes, idx_t budget_bytes, idx_t completed_sources) {
 	auto logger = GetBloomLogger(context);
 	if (!logger) {
 		return;
 	}
 	vector<pair<string, string>> info;
 	child_list_t<Value> fields = {
-	    {"event_sequence", Value::UBIGINT(event_sequence)},       {"requested_bytes", Value::UBIGINT(requested_bytes)},
-	    {"retained_bytes", Value::UBIGINT(retained_bytes)},       {"budget_bytes", Value::UBIGINT(budget_bytes)},
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
+	    {"requested_bytes", Value::UBIGINT(requested_bytes)},
+	    {"retained_bytes", Value::UBIGINT(retained_bytes)},
+	    {"budget_bytes", Value::UBIGINT(budget_bytes)},
 	    {"completed_sources", Value::UBIGINT(completed_sources)},
 	};
 	logger->WriteLog(BloomLogType::NAME, BloomLogType::LEVEL,
@@ -177,7 +213,7 @@ void LogBloomMemoryStopped(ClientContext &context, idx_t event_sequence, const c
 	                                                   std::move(fields), info));
 }
 
-void LogBloomTransfer(ClientContext &context, idx_t event_sequence, idx_t round, idx_t step_id, idx_t source_table_id,
+void LogBloomTransfer(ClientContext &context, idx_t round, idx_t step_id, idx_t source_table_id,
                       const string &source_table, idx_t destination_table_id, const string &destination_table,
                       idx_t source_rows, idx_t destination_rows_before, idx_t destination_rows_after, idx_t key_count,
                       bool destination_active_after, double round_elapsed_ms) {
@@ -190,7 +226,7 @@ void LogBloomTransfer(ClientContext &context, idx_t event_sequence, idx_t round,
 	    {"destination_active_after", destination_active_after ? "true" : "false"},
 	};
 	child_list_t<Value> fields = {
-	    {"event_sequence", Value::UBIGINT(event_sequence)},
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
 	    {"round_id", Value::UBIGINT(round)},
 	    {"step_id", Value::UBIGINT(step_id)},
 	    {"source_table_id", Value::UBIGINT(source_table_id)},
@@ -206,10 +242,9 @@ void LogBloomTransfer(ClientContext &context, idx_t event_sequence, idx_t round,
 	                 BloomLogType::ConstructLogMessage("transfer", "transfer", "applied", std::move(fields), info));
 }
 
-void LogBloomTransferCompleted(ClientContext &context, idx_t event_sequence, bool partial_stop, idx_t rounds,
-                               idx_t transfer_count, idx_t completed_sources, idx_t retained_bytes, idx_t budget_bytes,
-                               double init_ms, double materialize_ms, double build_filter_ms, double estimate_ms,
-                               double finalize_ms) {
+void LogBloomTransferCompleted(ClientContext &context, bool partial_stop, idx_t rounds, idx_t transfer_count,
+                               idx_t completed_sources, idx_t retained_bytes, idx_t budget_bytes, double init_ms,
+                               double materialize_ms, double build_filter_ms, double estimate_ms, double finalize_ms) {
 	auto logger = GetBloomLogger(context);
 	if (!logger) {
 		return;
@@ -223,9 +258,12 @@ void LogBloomTransferCompleted(ClientContext &context, idx_t event_sequence, boo
 	};
 	auto elapsed_ms = init_ms + materialize_ms + build_filter_ms + estimate_ms + finalize_ms;
 	child_list_t<Value> fields = {
-	    {"event_sequence", Value::UBIGINT(event_sequence)}, {"retained_bytes", Value::UBIGINT(retained_bytes)},
-	    {"budget_bytes", Value::UBIGINT(budget_bytes)},     {"completed_sources", Value::UBIGINT(completed_sources)},
-	    {"rounds_considered", Value::UBIGINT(rounds)},      {"transfer_count", Value::UBIGINT(transfer_count)},
+	    {"event_sequence", Value::UBIGINT(NextBloomLogSequence(context))},
+	    {"retained_bytes", Value::UBIGINT(retained_bytes)},
+	    {"budget_bytes", Value::UBIGINT(budget_bytes)},
+	    {"completed_sources", Value::UBIGINT(completed_sources)},
+	    {"rounds_considered", Value::UBIGINT(rounds)},
+	    {"transfer_count", Value::UBIGINT(transfer_count)},
 	    {"elapsed_ms", Value::DOUBLE(elapsed_ms)},
 	};
 	logger->WriteLog(BloomLogType::NAME, BloomLogType::LEVEL,

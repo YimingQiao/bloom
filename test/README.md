@@ -27,3 +27,15 @@ python3 -m unittest discover --start-directory test/python -p test_sample_filter
 
 These tests default to `build/release/duckdb`. Set `BLOOM_TEST_DUCKDB` to use another
 Bloom-enabled build; they are skipped if the CLI has not been built.
+
+CDC sample diagnostics have a standalone regression check for chunk dispersion,
+short tail chunks, deterministic selection, zero-estimate confirmation, and
+identical estimates with logging enabled or disabled:
+
+```bash
+c++ -std=c++17 -Isrc/include -Iduckdb/src/include \
+    test/cpp/cdc_sample_stats_test.cpp -Lbuild/release/src \
+    -Wl,-rpath,"$PWD/build/release/src" -lduckdb \
+    -o build/release/cdc_sample_stats_test
+build/release/cdc_sample_stats_test
+```

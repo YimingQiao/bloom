@@ -1,4 +1,6 @@
 #include "predicate_transfer/cardinality_estimation/sampling_estimator/sampling_estimator.hpp"
+#include "predicate_transfer/bloom_log.hpp"
+#include "duckdb/common/string_util.hpp"
 
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -12,6 +14,7 @@
 #include <chrono>
 #include <cmath>
 #include <iostream>
+#include <sstream>
 
 namespace duckdb {
 
@@ -54,7 +57,8 @@ static void RewriteRefsToPositions(unique_ptr<Expression> &expr, const vector<Co
 // ---------------------------------------------------------------------------
 
 static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, ExpressionExecutor *expr_exec,
-                          const vector<ScannerFilterSet::Entry> &filters) {
+                          const vector<ScannerFilterSet::Entry> &filters, ClientContext *stats_context = nullptr,
+                          const char *stats_phase = "transfer", idx_t table_index = DConstants::INVALID_INDEX) {
 	idx_t total_chunks = cdc.ChunkCount();
 	if (total_chunks == 0) {
 		return 0;
@@ -64,7 +68,7 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 	if (sample_rate > 0.0 && sample_rate < 1.0) {
 		target_chunks = MaxValue<idx_t>(
 		    1, MinValue<idx_t>(total_chunks,
-		                       static_cast<idx_t>(std::ceil(static_cast<double>(total_chunks) * sample_rate))));
+			                   static_cast<idx_t>(std::ceil(static_cast<double>(total_chunks) * sample_rate))));
 	}
 
 	DataChunk chunk;
@@ -73,6 +77,33 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 
 	idx_t sampled_chunks = 0;
 	idx_t surviving_rows = 0;
+	idx_t sampled_rows = 0, nonempty_chunks = 0, zero_chunks = 0, full_chunks = 0;
+	double rate_mean = 0, rate_m2 = 0, rate_min = 1, rate_max = 0;
+	std::ostringstream chunk_stats;
+	// Diagnostics use only rows already visited by the estimator. Include zero
+	// survivors (including expression-filter early exits) in the distribution.
+	auto record_chunk = [&](idx_t ci, idx_t input, idx_t output) {
+		if (!stats_context) {
+			return;
+		}
+		if (sampled_chunks > 0) {
+			chunk_stats << ',';
+		}
+		chunk_stats << ci << ':' << input << ':' << output;
+		sampled_rows += input;
+		if (input == 0) {
+			return; // An empty chunk has no defined survival fraction.
+		}
+		nonempty_chunks++;
+		zero_chunks += output == 0;
+		full_chunks += output == input;
+		const double rate = double(output) / double(input);
+		const double delta = rate - rate_mean;
+		rate_mean += delta / double(nonempty_chunks);
+		rate_m2 += delta * (rate - rate_mean);
+		rate_min = MinValue(rate_min, rate);
+		rate_max = MaxValue(rate_max, rate);
+	};
 
 	for (idx_t sample_idx = 0; sample_idx < target_chunks; sample_idx++) {
 		// Spread the selected chunks over the collection. Since target_chunks is
@@ -80,7 +111,9 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 		const idx_t ci = sample_idx * total_chunks / target_chunks;
 		chunk.Reset();
 		cdc.FetchChunk(ci, chunk);
+		const idx_t input_rows = chunk.size();
 		if (chunk.size() == 0) {
+			record_chunk(ci, input_rows, 0);
 			sampled_chunks++;
 			continue;
 		}
@@ -89,6 +122,7 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 		if (expr_exec) {
 			idx_t count = expr_exec->SelectExpression(chunk, sel);
 			if (count == 0) {
+				record_chunk(ci, input_rows, 0);
 				sampled_chunks++;
 				continue;
 			}
@@ -127,14 +161,68 @@ static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, E
 		}
 
 		surviving_rows += chunk.size();
+		record_chunk(ci, input_rows, chunk.size());
 		sampled_chunks++;
 	}
 
 	if (sampled_chunks == 0) {
 		return 0;
 	}
-	return static_cast<idx_t>(static_cast<double>(surviving_rows) * static_cast<double>(total_chunks) /
-	                          static_cast<double>(sampled_chunks));
+	const auto estimate = static_cast<idx_t>(static_cast<double>(surviving_rows) * static_cast<double>(total_chunks) /
+	                                         static_cast<double>(sampled_chunks));
+	if (stats_context) {
+		vector<pair<string, string>> info = {
+		    {"design", sampled_chunks == total_chunks ? "census" : "deterministic_spaced"},
+		    {"total_rows", to_string(cdc.Count())},
+		    {"total_chunks", to_string(total_chunks)},
+		    {"sampled_chunks", to_string(sampled_chunks)},
+		    {"sample_rows", to_string(sampled_rows)},
+		    {"survivors", to_string(surviving_rows)},
+		    {"estimate", to_string(estimate)},
+		    {"nonempty_chunks", to_string(nonempty_chunks)},
+		    {"zero_chunks", to_string(zero_chunks)},
+		    {"full_chunks", to_string(full_chunks)},
+		    {"chunks", chunk_stats.str()},
+		    {"filter_count", to_string(filters.size())},
+		    {"expression_filter", expr_exec ? "true" : "false"},
+		    {"sampling_se", sampled_chunks == total_chunks ? "0" : "NA"},
+		};
+		auto number = [](double value) {
+			return StringUtil::Format("%.17g", value);
+		};
+		info.emplace_back("row_survival", sampled_rows ? number(double(surviving_rows) / double(sampled_rows)) : "NA");
+		info.emplace_back("chunk_rate_mean", nonempty_chunks ? number(rate_mean) : "NA");
+		info.emplace_back("chunk_rate_min", nonempty_chunks ? number(rate_min) : "NA");
+		info.emplace_back("chunk_rate_max", nonempty_chunks ? number(rate_max) : "NA");
+		if (nonempty_chunks > 1) {
+			const double variance = MaxValue(0.0, rate_m2 / double(nonempty_chunks - 1));
+			info.emplace_back("chunk_rate_variance", number(variance));
+			info.emplace_back("chunk_rate_sd", number(std::sqrt(variance)));
+		} else {
+			info.emplace_back("chunk_rate_variance", "NA");
+			info.emplace_back("chunk_rate_sd", "NA");
+		}
+		// DEBUG audit uses the same immutable CDC and filters. Its result is
+		// diagnostic only: it must never replace the estimate returned below.
+		const bool audit = BloomSampleAuditEnabled(*stats_context);
+		info.emplace_back("audit", audit ? "true" : "false");
+		if (audit || sampled_chunks == total_chunks) {
+			const auto started = std::chrono::steady_clock::now();
+			const idx_t exact =
+			    sampled_chunks == total_chunks ? surviving_rows : SampleChunks(cdc, 1.0, expr_exec, filters);
+			const double ms =
+			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+			info.emplace_back("exact_rows", to_string(exact));
+			info.emplace_back("audit_extra_rows", to_string(sampled_chunks == total_chunks ? 0 : cdc.Count()));
+			info.emplace_back("audit_ms", number(ms));
+			info.emplace_back("signed_error_rows", number(double(estimate) - double(exact)));
+			info.emplace_back("absolute_error_fraction",
+			                  cdc.Count() ? number(std::abs(double(estimate) - double(exact)) / double(cdc.Count()))
+			                              : "0");
+		}
+		LogBloomCDCSample(*stats_context, table_index, stats_phase, info);
+	}
+	return estimate;
 }
 
 // ---------------------------------------------------------------------------
@@ -205,11 +293,14 @@ idx_t SamplingCardinalityEstimator::SampleCDC(const LogicalOperator &op) {
 
 	// No BF filters at init time.
 	static const vector<ScannerFilterSet::Entry> empty_filters;
-	idx_t v = SampleChunks(cdc, config_.intermediate_rate, expr_exec.get(), empty_filters);
+	const bool stats = BloomStructuredLoggingEnabled(context_);
+	idx_t v = SampleChunks(cdc, config_.intermediate_rate, expr_exec.get(), empty_filters, stats ? &context_ : nullptr,
+	                       "init", chunk_get.table_index.index);
 	if (v == 0 && cdc.Count() > 0) {
 		// A 1% chunk sample can miss a rare survivor; downstream treats 0 as
 		// EmptyResult. In-memory data is cheap to rescan — confirm exactly.
-		v = SampleChunks(cdc, 1.0, expr_exec.get(), empty_filters);
+		v = SampleChunks(cdc, 1.0, expr_exec.get(), empty_filters, stats ? &context_ : nullptr, "init_zero_confirm",
+		                 chunk_get.table_index.index);
 	}
 	return v;
 }
@@ -375,12 +466,17 @@ idx_t SamplingCardinalityEstimator::Estimate(TableScanner &scanner, const vector
 		}
 		filters = &remapped_filters;
 	}
-	idx_t v = SampleChunks(*cdc, config_.intermediate_rate, expr_exec, *filters);
+	const bool stats = BloomStructuredLoggingEnabled(context_);
+	const auto &bindings = scanner.GetOutputBindings();
+	const auto table_index = bindings.empty() ? DConstants::INVALID_INDEX : bindings[0].table_index.index;
+	idx_t v = SampleChunks(*cdc, config_.intermediate_rate, expr_exec, *filters, stats ? &context_ : nullptr,
+	                       "transfer", table_index);
 	if (v == 0 && cdc->Count() > 0) {
 		// A 1% chunk sample can miss a rare survivor while selective BF filters are
 		// applied; a false 0 becomes EmptyResult downstream and wrongly empties the
 		// query. In-memory data is cheap to rescan — confirm the 0 exactly.
-		v = SampleChunks(*cdc, 1.0, expr_exec, *filters);
+		v = SampleChunks(*cdc, 1.0, expr_exec, *filters, stats ? &context_ : nullptr, "transfer_zero_confirm",
+		                 table_index);
 	}
 	return v;
 }

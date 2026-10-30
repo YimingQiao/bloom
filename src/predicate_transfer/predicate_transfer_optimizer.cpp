@@ -396,7 +396,7 @@ unique_ptr<LogicalOperator> PredicateTransferOptimizer::Optimize(unique_ptr<Logi
 			fprintf(stderr, "[Bloom-Excitation] scope skipped: %s\n", reason);
 		}
 		if (monitor_skips) {
-			LogBloomSkipped(optimizer.context, 1, "eligibility", reason);
+			LogBloomSkipped(optimizer.context, "eligibility", reason);
 		}
 	};
 
