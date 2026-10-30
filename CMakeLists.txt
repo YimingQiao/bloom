@@ -45,6 +45,7 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/transfer_plan/excitation_graph/materialize.cpp
     src/predicate_transfer/transfer_plan/excitation_graph/working_set.cpp
     src/predicate_transfer/transfer_plan/lineage_tracker.cpp
+    src/predicate_transfer/transfer_plan/lineage_expression.cpp
     src/predicate_transfer/transfer_plan/rpt_filter_cache.cpp
     src/predicate_transfer/transfer_plan/transfer_executor.cpp)
 

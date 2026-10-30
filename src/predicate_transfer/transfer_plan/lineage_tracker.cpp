@@ -1,109 +1,113 @@
 #include "predicate_transfer/transfer_plan/lineage_tracker.hpp"
-
 #include "predicate_transfer/transfer_plan/transfer_types.hpp"
 #include "duckdb/common/assert.hpp"
-#include "duckdb/common/exception.hpp"
-
 #include <algorithm>
 
 namespace duckdb {
-
 void LineageTracker::Clear() {
-	keys_.clear();
-	next_token_ = 0;
-}
-
-bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
-	auto &source = FindKey(edge.left_bindings).result;
-	auto &dest = FindKey(edge.right_bindings).constraints;
-	return std::any_of(source.begin(), source.end(), [&](idx_t token) { return !dest.count(token); });
-}
-
-size_t LineageTracker::Snapshot::StableHash() const {
-	vector<idx_t> sorted_lineages(lineages.begin(), lineages.end());
-	std::sort(sorted_lineages.begin(), sorted_lineages.end());
-	size_t h = 0xa5a5a5a5a5a5a5a5ULL;
-	for (auto l : sorted_lineages) {
-		h = h * 1315423911u + std::hash<idx_t> {}(l);
-	}
-	for (auto &c : key_columns) {
-		h = h * 1315423911u + (std::hash<idx_t> {}(c.table_index.index) * 3 + std::hash<idx_t> {}(c.column_index));
-	}
-	return h;
-}
-
-LineageTracker::Snapshot LineageTracker::MakeSnapshot(const vector<ColumnBinding> &key) const {
-	return {FindKey(key).result, key};
-}
-
-bool LineageTracker::IsSubset(const Snapshot &a, const Snapshot &b) {
-	return std::all_of(a.lineages.begin(), a.lineages.end(), [&](idx_t token) { return b.lineages.count(token); });
-}
-
-static vector<ColumnBinding> SortedKey(vector<ColumnBinding> key) {
-	std::sort(key.begin(), key.end(), [](const ColumnBinding &a, const ColumnBinding &b) {
-		return a.table_index.index < b.table_index.index ||
-		       (a.table_index == b.table_index && a.column_index < b.column_index);
-	});
-	return key;
+	tables_.clear();
+	next_symbol_ = 0;
 }
 
 void LineageTracker::SeedKey(const vector<ColumnBinding> &key) {
 	D_ASSERT(!key.empty());
-	auto sorted = SortedKey(key);
-	auto &keys = keys_[key.front().table_index.index];
-	for (auto &state : keys) {
-		if (state.key == sorted) {
-			return;
+	const auto table_id = key.front().table_index.index;
+	auto entry = tables_.find(table_id);
+	if (entry == tables_.end()) {
+		TableState state;
+		state.symbol = ++next_symbol_;
+		entry = tables_.emplace(table_id, std::move(state)).first;
+	}
+	auto &table = entry->second;
+	for (auto &column : key) {
+		D_ASSERT(column.table_index.index == table_id);
+		if (std::find(table.columns.begin(), table.columns.end(), column) == table.columns.end()) {
+			D_ASSERT(!table.result);
+			table.columns.push_back(column);
 		}
 	}
-	auto token = ++next_token_;
-	keys.push_back({std::move(sorted), {token}, {token}});
+	std::sort(table.columns.begin(), table.columns.end(),
+	          [](const ColumnBinding &a, const ColumnBinding &b) { return a.column_index < b.column_index; });
 }
 
-const LineageTracker::KeyState &LineageTracker::FindKey(const vector<ColumnBinding> &key) const {
-	auto sorted = SortedKey(key);
-	for (auto &state : keys_.at(key.front().table_index.index)) {
-		if (state.key == sorted) {
-			return state;
-		}
+LineageTracker::TableState &LineageTracker::FindTable(idx_t table_id) const {
+	auto &table = tables_.at(table_id);
+	if (!table.result) {
+		table.result = LineageExpression::Relation(table.symbol, table.columns.size());
+		table.constraints = table.result;
 	}
-	throw InternalException("Unregistered complete key in L/C lineage");
+	return table;
 }
 
+vector<idx_t> LineageTracker::Positions(const TableState &table, const vector<ColumnBinding> &key) {
+	vector<idx_t> positions;
+	for (auto &column : key) {
+		auto found = std::find(table.columns.begin(), table.columns.end(), column);
+		D_ASSERT(found != table.columns.end());
+		positions.push_back(found - table.columns.begin());
+	}
+	return positions;
+}
+
+LineageTracker::Snapshot LineageTracker::Project(const vector<ColumnBinding> &key, bool constraints) const {
+	D_ASSERT(!key.empty());
+	auto &table = FindTable(key.front().table_index.index);
+	auto positions = Positions(table, key);
+	string cache_key;
+	for (auto position : positions) {
+		cache_key += std::to_string(position) + ",";
+	}
+	auto &cache = constraints ? table.constraint_projections : table.result_projections;
+	auto entry = cache.find(cache_key);
+	if (entry == cache.end()) {
+		auto &expression = constraints ? table.constraints : table.result;
+		entry = cache.emplace(cache_key, expression->Project(positions)).first;
+	}
+	return {entry->second, key};
+}
+
+LineageTracker::Snapshot LineageTracker::MakeSnapshot(const vector<ColumnBinding> &key) const {
+	return Project(key, false);
+}
+LineageTracker::Snapshot LineageTracker::MakeConstraintSnapshot(const vector<ColumnBinding> &key) const {
+	return Project(key, true);
+}
+bool LineageTracker::Implies(const Snapshot &premise, const Snapshot &condition) {
+	D_ASSERT(premise.expression && condition.expression);
+	return LineageExpression::Implies(*premise.expression, *condition.expression);
+}
+bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
+	return !Implies(MakeConstraintSnapshot(edge.right_bindings), MakeSnapshot(edge.left_bindings));
+}
+size_t LineageTracker::Snapshot::StableHash() const {
+	D_ASSERT(expression);
+	size_t hash = std::hash<string> {}(expression->Signature());
+	for (auto &column : key_columns) {
+		hash = hash * 1315423911u + std::hash<idx_t> {}(column.table_index.index);
+		hash = hash * 1315423911u + std::hash<idx_t> {}(column.column_index.GetIndexUnsafe());
+	}
+	return hash;
+}
 LineageTracker::Snapshot LineageTracker::NewPredicate(const vector<ColumnBinding> &key) {
-	Snapshot snapshot;
-	snapshot.key_columns = key;
-	snapshot.lineages.insert(++next_token_);
-	return snapshot;
+	return {LineageExpression::Relation(++next_symbol_, key.size()), key};
 }
-
 void LineageTracker::ReceiveFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters,
                                     bool estimated_shrink) {
-	for (auto &state : keys_[table_id]) {
-		bool cross_key = false;
-		LineageSet incoming;
-		for (auto &filter : filters) {
-			bool contained = std::all_of(filter.first.begin(), filter.first.end(), [&](const ColumnBinding &col) {
-				return std::find(state.key.begin(), state.key.end(), col) != state.key.end();
-			});
-			if (contained) {
-				incoming.insert(filter.second.lineages.begin(), filter.second.lineages.end());
-			} else {
-				cross_key = true;
+	auto &table = FindTable(table_id);
+	for (auto &filter : filters) {
+		auto positions = Positions(table, filter.first);
+		auto constraints = LineageExpression::Conjoin(table.constraints, filter.second.expression, positions);
+		if (constraints != table.constraints) {
+			table.constraints = std::move(constraints);
+			table.constraint_projections.clear();
+		}
+		if (estimated_shrink) {
+			auto result = LineageExpression::Conjoin(table.result, filter.second.expression, positions);
+			if (result != table.result) {
+				table.result = std::move(result);
+				table.result_projections.clear();
 			}
-		}
-		state.constraints.insert(incoming.begin(), incoming.end());
-		if (!estimated_shrink) {
-			continue;
-		}
-		state.result.insert(incoming.begin(), incoming.end());
-		if (cross_key) {
-			auto token = ++next_token_;
-			state.result.insert(token);
-			state.constraints.insert(token);
 		}
 	}
 }
-
 } // namespace duckdb

@@ -1,13 +1,10 @@
 #include "predicate_transfer/transfer_plan/rpt_filter_cache.hpp"
 
-#include <algorithm>
-
 namespace duckdb {
 
 RPTFilterCache::Key RPTFilterCache::Canonicalise(const LineageTracker::Snapshot &snapshot) {
 	Key k;
-	k.lineages.assign(snapshot.lineages.begin(), snapshot.lineages.end());
-	std::sort(k.lineages.begin(), k.lineages.end());
+	k.lineage = snapshot.expression->Signature();
 	// key_columns arrive in the edge's canonical order (ActivateTables sorts the
 	// key vector) — keep that order, it is part of the BF's identity.
 	k.key_columns.reserve(snapshot.key_columns.size());

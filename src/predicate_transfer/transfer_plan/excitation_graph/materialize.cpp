@@ -139,7 +139,7 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 			if (cf.bindings.size() != 1) {
 				continue;
 			}
-			direct.push_back({cf.bindings.front(), cf.filter, cf.lineage.lineages});
+			direct.push_back({cf.bindings.front(), cf.filter});
 		}
 	}
 }
@@ -369,13 +369,13 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 				++it;
 				continue;
 			}
-			const bool new_contains_old = LineageTracker::IsSubset(it->lineage, activation.snapshot);
-			const bool old_contains_new = LineageTracker::IsSubset(activation.snapshot, it->lineage);
-			if (old_contains_new && !new_contains_old) {
+			const bool new_implies_old = LineageTracker::Implies(activation.snapshot, it->lineage);
+			const bool old_implies_new = LineageTracker::Implies(it->lineage, activation.snapshot);
+			if (old_implies_new && !new_implies_old) {
 				subsumed = true;
 				break;
 			}
-			if (new_contains_old && !old_contains_new) {
+			if (new_implies_old && !old_implies_new) {
 				it = dest_filters.erase(it);
 			} else {
 				++it;

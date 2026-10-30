@@ -3,14 +3,11 @@
 #include "predicate_transfer/filter/filter.hpp"
 #include "predicate_transfer/table_scanner/table_scanner.hpp"
 
-#include <unordered_set>
-
 namespace duckdb {
 
 struct DirectFilterInfo {
 	ColumnBinding binding;
 	shared_ptr<RPTFilter> filter;
-	unordered_set<idx_t> lineage;
 };
 
 class RPTCardinalityEstimator {

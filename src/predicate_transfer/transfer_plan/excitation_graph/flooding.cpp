@@ -364,7 +364,7 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 
 	const auto &all_tables = table_operator_manager.GetAllTableOperators();
 
-	// Each complete key owns independent result lineage and received constraints.
+	// Register the union of join-key attributes for each table expression.
 	auto init_lineage = [this](idx_t table_id) {
 		auto nm_it = neighbor_matrix.find(table_id);
 		if (nm_it == neighbor_matrix.end()) {
@@ -536,7 +536,7 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 			if (dest_filter.bindings.size() != 1) {
 				continue;
 			}
-			direct_filters.push_back({dest_filter.bindings.front(), dest_filter.filter, dest_filter.lineage.lineages});
+			direct_filters.push_back({dest_filter.bindings.front(), dest_filter.filter});
 		}
 
 		auto *dest_scanner = executor_.Find(*dest_op);
