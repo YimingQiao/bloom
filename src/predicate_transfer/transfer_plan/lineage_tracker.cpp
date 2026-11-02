@@ -6,6 +6,7 @@
 namespace duckdb {
 void LineageTracker::Clear() {
 	tables_.clear();
+	implications_.clear();
 	next_symbol_ = 0;
 }
 
@@ -57,7 +58,9 @@ LineageTracker::Snapshot LineageTracker::Project(const vector<ColumnBinding> &ke
 	for (auto position : positions) {
 		cache_key += std::to_string(position) + ",";
 	}
-	auto &cache = constraints ? table.constraint_projections : table.result_projections;
+	// Identical L and C can share outgoing projections as well as their body.
+	auto &cache =
+	    constraints && table.constraints != table.result ? table.constraint_projections : table.result_projections;
 	auto entry = cache.find(cache_key);
 	if (entry == cache.end()) {
 		auto &expression = constraints ? table.constraints : table.result;
@@ -77,11 +80,26 @@ bool LineageTracker::Implies(const Snapshot &premise, const Snapshot &condition)
 	return LineageExpression::Implies(*premise.expression, *condition.expression);
 }
 bool LineageTracker::EdgeCarriesNewInfo(const EdgeInfo &edge) const {
-	return !Implies(MakeConstraintSnapshot(edge.right_bindings), MakeSnapshot(edge.left_bindings));
+	return !ImpliesCached(MakeConstraintSnapshot(edge.right_bindings), MakeSnapshot(edge.left_bindings));
+}
+bool LineageTracker::ImpliesCached(const Snapshot &premise, const Snapshot &condition) const {
+	ImplicationKey key {premise.expression, condition.expression};
+	auto found = implications_.find(key);
+	if (found != implications_.end()) {
+		return found->second;
+	}
+	const auto result = Implies(premise, condition);
+	// Bound retained snapshots. Eviction only causes recomputation, never a
+	// different inference result. Clear() releases everything between queries.
+	if (implications_.size() >= 256) {
+		implications_.clear();
+	}
+	implications_.emplace(std::move(key), result);
+	return result;
 }
 size_t LineageTracker::Snapshot::StableHash() const {
 	D_ASSERT(expression);
-	size_t hash = std::hash<string> {}(expression->Signature());
+	size_t hash = expression->SignatureHash();
 	for (auto &column : key_columns) {
 		hash = hash * 1315423911u + std::hash<idx_t> {}(column.table_index.index);
 		hash = hash * 1315423911u + std::hash<idx_t> {}(column.column_index.GetIndexUnsafe());
@@ -96,13 +114,15 @@ void LineageTracker::ReceiveFilters(idx_t table_id, const vector<pair<vector<Col
 	auto &table = FindTable(table_id);
 	for (auto &filter : filters) {
 		auto positions = Positions(table, filter.first);
+		const bool shared_result = table.result == table.constraints;
 		auto constraints = LineageExpression::Conjoin(table.constraints, filter.second.expression, positions);
 		if (constraints != table.constraints) {
 			table.constraints = std::move(constraints);
 			table.constraint_projections.clear();
 		}
 		if (estimated_shrink) {
-			auto result = LineageExpression::Conjoin(table.result, filter.second.expression, positions);
+			auto result = shared_result ? table.constraints
+			                            : LineageExpression::Conjoin(table.result, filter.second.expression, positions);
 			if (result != table.result) {
 				table.result = std::move(result);
 				table.result_projections.clear();

@@ -30,8 +30,23 @@ public:
 	void ReceiveFilters(idx_t table_id, const vector<pair<vector<ColumnBinding>, Snapshot>> &filters,
 	                    bool estimated_shrink);
 	static bool Implies(const Snapshot &premise, const Snapshot &condition);
+	//! Bounded query-local memoization, used by the serial transfer scheduler.
+	bool ImpliesCached(const Snapshot &premise, const Snapshot &condition) const;
 
 private:
+	struct ImplicationKey {
+		shared_ptr<const LineageExpression> premise;
+		shared_ptr<const LineageExpression> condition;
+		bool operator==(const ImplicationKey &other) const {
+			return premise == other.premise && condition == other.condition;
+		}
+	};
+	struct ImplicationHash {
+		size_t operator()(const ImplicationKey &key) const {
+			return std::hash<const void *> {}(key.premise.get()) * 1315423911u +
+			       std::hash<const void *> {}(key.condition.get());
+		}
+	};
 	struct TableState {
 		idx_t symbol;
 		vector<ColumnBinding> columns;
@@ -44,6 +59,8 @@ private:
 	static vector<idx_t> Positions(const TableState &table, const vector<ColumnBinding> &key);
 	Snapshot Project(const vector<ColumnBinding> &key, bool constraints) const;
 	mutable unordered_map<idx_t, TableState> tables_;
+	//! Owning keys prevent address reuse from aliasing an old memo entry.
+	mutable unordered_map<ImplicationKey, bool, ImplicationHash> implications_;
 	idx_t next_symbol_ = 0;
 };
 } // namespace duckdb

@@ -2,6 +2,7 @@
 
 #include "duckdb/common/common.hpp"
 #include "duckdb/common/shared_ptr.hpp"
+#include "duckdb/common/unordered_map.hpp"
 
 namespace duckdb {
 
@@ -22,6 +23,9 @@ public:
 	const string &Signature() const {
 		return signature_;
 	}
+	size_t SignatureHash() const {
+		return signature_hash_;
+	}
 	idx_t Arity() const {
 		return head_.size();
 	}
@@ -41,12 +45,16 @@ private:
 		}
 	};
 	void Normalize();
+	void IndexAtoms();
 	void Simplify();
-	static bool HasHomomorphism(const LineageExpression &pattern, const LineageExpression &target);
+	static bool HasHomomorphism(const LineageExpression &pattern, const LineageExpression &target,
+	                            const vector<idx_t> &target_head);
 	vector<idx_t> head_;
 	vector<Atom> atoms_;
 	idx_t variable_count_ = 0;
 	string signature_;
+	size_t signature_hash_ = 0;
+	unordered_map<idx_t, vector<idx_t>> atom_index_;
 };
 
 } // namespace duckdb

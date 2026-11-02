@@ -369,8 +369,8 @@ vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t sourc
 				++it;
 				continue;
 			}
-			const bool new_implies_old = LineageTracker::Implies(activation.snapshot, it->lineage);
-			const bool old_implies_new = LineageTracker::Implies(it->lineage, activation.snapshot);
+			const bool new_implies_old = state_.Lineage().ImpliesCached(activation.snapshot, it->lineage);
+			const bool old_implies_new = state_.Lineage().ImpliesCached(it->lineage, activation.snapshot);
 			if (old_implies_new && !new_implies_old) {
 				subsumed = true;
 				break;

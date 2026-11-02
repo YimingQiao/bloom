@@ -53,37 +53,48 @@ void LineageExpression::Normalize() {
 		out << ')';
 	}
 	signature_ = out.str();
+	signature_hash_ = std::hash<string> {}(signature_);
+	IndexAtoms();
 }
 
-bool LineageExpression::HasHomomorphism(const LineageExpression &pattern, const LineageExpression &target) {
-	if (pattern.head_.size() != target.head_.size()) {
+void LineageExpression::IndexAtoms() {
+	atom_index_.clear();
+	for (idx_t i = 0; i < atoms_.size(); i++) {
+		atom_index_[atoms_[i].symbol].push_back(i);
+	}
+}
+
+bool LineageExpression::HasHomomorphism(const LineageExpression &pattern, const LineageExpression &target,
+                                        const vector<idx_t> &target_head) {
+	if (pattern.head_.size() != target_head.size()) {
 		return false;
 	}
-	vector<idx_t> mapping(pattern.variable_count_, DConstants::INVALID_INDEX);
-	for (idx_t i = 0; i < pattern.head_.size(); i++) {
-		auto &mapped = mapping[pattern.head_[i]];
-		if (mapped != DConstants::INVALID_INDEX && mapped != target.head_[i]) {
-			return false;
-		}
-		mapped = target.head_[i];
-	}
-	unordered_map<idx_t, vector<idx_t>> candidates;
-	for (idx_t i = 0; i < target.atoms_.size(); i++) {
-		candidates[target.atoms_[i].symbol].push_back(i);
-	}
-	vector<idx_t> order(pattern.atoms_.size());
-	std::iota(order.begin(), order.end(), idx_t {0});
+	const auto &candidates = target.atom_index_;
 	for (auto &atom : pattern.atoms_) {
 		if (!candidates.count(atom.symbol)) {
 			return false;
 		}
 	}
+	vector<idx_t> mapping(pattern.variable_count_, DConstants::INVALID_INDEX);
+	for (idx_t i = 0; i < pattern.head_.size(); i++) {
+		auto &mapped = mapping[pattern.head_[i]];
+		if (mapped != DConstants::INVALID_INDEX && mapped != target_head[i]) {
+			return false;
+		}
+		mapped = target_head[i];
+	}
+	vector<idx_t> order(pattern.atoms_.size());
+	std::iota(order.begin(), order.end(), idx_t {0});
 	// Start with the most selective relation symbol. A homomorphism is not
 	// injective: multiple occurrences can legitimately map to one target atom.
 	std::stable_sort(order.begin(), order.end(), [&](idx_t a, idx_t b) {
 		return candidates.at(pattern.atoms_[a].symbol).size() < candidates.at(pattern.atoms_[b].symbol).size();
 	});
-	std::function<bool(idx_t)> search = [&](idx_t depth) {
+	// One assignment trail for the entire search avoids allocating for every
+	// candidate atom. Head bindings are fixed and never put on the trail.
+	vector<idx_t> assigned;
+	assigned.reserve(pattern.variable_count_);
+	auto search = [&](auto &&self, idx_t depth) -> bool {
 		if (depth == order.size()) {
 			return true;
 		}
@@ -93,7 +104,7 @@ bool LineageExpression::HasHomomorphism(const LineageExpression &pattern, const 
 			if (atom.variables.size() != other.variables.size()) {
 				continue;
 			}
-			vector<idx_t> assigned;
+			const auto checkpoint = assigned.size();
 			bool compatible = true;
 			for (idx_t i = 0; i < atom.variables.size(); i++) {
 				const auto variable = atom.variables[i];
@@ -105,23 +116,25 @@ bool LineageExpression::HasHomomorphism(const LineageExpression &pattern, const 
 					break;
 				}
 			}
-			if (compatible && search(depth + 1)) {
+			if (compatible && self(self, depth + 1)) {
 				return true;
 			}
-			for (auto variable : assigned) {
-				mapping[variable] = DConstants::INVALID_INDEX;
+			while (assigned.size() > checkpoint) {
+				mapping[assigned.back()] = DConstants::INVALID_INDEX;
+				assigned.pop_back();
 			}
 		}
 		return false;
 	};
-	return search(0);
+	return search(search, 0);
 }
 
 bool LineageExpression::Implies(const LineageExpression &premise, const LineageExpression &condition) {
-	if (premise.signature_ == condition.signature_) {
+	if (&premise == &condition ||
+	    (premise.signature_hash_ == condition.signature_hash_ && premise.signature_ == condition.signature_)) {
 		return true;
 	}
-	return HasHomomorphism(condition, premise);
+	return HasHomomorphism(condition, premise, premise.head_);
 }
 
 void LineageExpression::Simplify() {
@@ -131,14 +144,16 @@ void LineageExpression::Simplify() {
 	for (idx_t i = atoms_.size(); i > 0;) {
 		--i;
 		const auto symbol = atoms_[i].symbol;
-		if (std::count_if(atoms_.begin(), atoms_.end(), [&](const Atom &atom) { return atom.symbol == symbol; }) < 2) {
+		if (atom_index_.at(symbol).size() < 2) {
 			continue;
 		}
 		auto candidate = *this;
 		candidate.atoms_.erase(candidate.atoms_.begin() + i);
+		candidate.IndexAtoms();
 		// Keep variable numbering while checking; Normalize renumbers afterward.
-		if (HasHomomorphism(*this, candidate)) {
+		if (HasHomomorphism(*this, candidate, candidate.head_)) {
 			atoms_.erase(atoms_.begin() + i);
+			IndexAtoms();
 		}
 	}
 	Normalize();
@@ -151,7 +166,9 @@ shared_ptr<const LineageExpression> LineageExpression::Project(const vector<idx_
 		D_ASSERT(position < head_.size());
 		result->head_.push_back(head_[position]);
 	}
-	result->Simplify();
+	// Projection only hides output variables. Containment does not require a
+	// minimal body; avoid repeating full CQ minimization for each outgoing key.
+	result->Normalize();
 	return result;
 }
 
@@ -160,8 +177,14 @@ shared_ptr<const LineageExpression> LineageExpression::Conjoin(const shared_ptr<
                                                                const vector<idx_t> &left_positions) {
 	D_ASSERT(left_positions.size() == right->head_.size());
 	// Preserve the old immutable result when the new condition is already true.
-	auto projected = left->Project(left_positions);
-	if (Implies(*projected, *right)) {
+	vector<idx_t> projected_head;
+	projected_head.reserve(left_positions.size());
+	for (auto position : left_positions) {
+		D_ASSERT(position < left->head_.size());
+		projected_head.push_back(left->head_[position]);
+	}
+	// Test the projected head against the existing body and index directly.
+	if (HasHomomorphism(*right, *left, projected_head)) {
 		return left;
 	}
 	auto result = make_shared_ptr<LineageExpression>(*left);

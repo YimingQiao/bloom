@@ -4,7 +4,7 @@ namespace duckdb {
 
 RPTFilterCache::Key RPTFilterCache::Canonicalise(const LineageTracker::Snapshot &snapshot) {
 	Key k;
-	k.lineage = snapshot.expression->Signature();
+	k.lineage = snapshot.expression;
 	// key_columns arrive in the edge's canonical order (ActivateTables sorts the
 	// key vector) — keep that order, it is part of the BF's identity.
 	k.key_columns.reserve(snapshot.key_columns.size());

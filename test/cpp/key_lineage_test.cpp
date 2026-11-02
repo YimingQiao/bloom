@@ -122,6 +122,29 @@ static void Separated() {
 	tracker.SeedKey(ra);
 	Check(tracker.MakeSnapshot(ra).expression->AtomCount() == 1, "reset clears query-local expressions");
 }
+static void CachedImplications() {
+	LineageTracker tracker;
+	auto a = Key(0, {0}), b = Key(1, {0});
+	tracker.SeedKey(a);
+	tracker.SeedKey(b);
+	auto before = tracker.MakeSnapshot(a);
+	auto filter = tracker.MakeSnapshot(b);
+	Check(tracker.MakeConstraintSnapshot(a).expression == before.expression, "equal L and C share projected snapshots");
+	Check(!tracker.ImpliesCached(before, filter), "cache remembers a false implication");
+	tracker.ReceiveFilters(0, {{a, filter}}, true);
+	auto after = tracker.MakeSnapshot(a);
+	Check(tracker.MakeConstraintSnapshot(a).expression == after.expression, "equal L and C remain shared after shrink");
+	Check(tracker.ImpliesCached(after, filter), "updated lineage does not reuse a stale negative result");
+	Check(!tracker.ImpliesCached(before, filter), "old snapshots retain their original implication");
+	for (idx_t i = 0; i < 600; i++) {
+		auto predicate = tracker.NewPredicate(a);
+		Check(!tracker.ImpliesCached(after, predicate), "fresh predicates must not alias evicted cache keys");
+		Check(tracker.ImpliesCached(after, filter), "eviction preserves true implications");
+	}
+	tracker.Clear();
+	tracker.SeedKey(a);
+	Check(!tracker.ImpliesCached(tracker.MakeSnapshot(a), filter), "reset clears memoized coverage");
+}
 // Independent relational evaluation over ALL 256 instances of two binary
 // relations on domain {0,1}. Exercise expression simplification and containment
 // against concrete projection and semijoin, not another homomorphism solver.
@@ -207,6 +230,7 @@ int main() {
 	PaperExample(false);
 	PaperExample(true);
 	Separated();
+	CachedImplications();
 	ExhaustiveFiniteModels();
 	std::cout << "paper lineage: " << checks << " checks passed\n";
 }

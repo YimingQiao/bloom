@@ -19,16 +19,17 @@ public:
 
 private:
 	struct Key {
-		string lineage;
+		shared_ptr<const LineageExpression> lineage;
 		//! Key order and arity are part of the physical filter identity.
 		vector<pair<idx_t, idx_t>> key_columns;
 		bool operator==(const Key &other) const {
-			return lineage == other.lineage && key_columns == other.key_columns;
+			return key_columns == other.key_columns &&
+			       (lineage == other.lineage || lineage->Signature() == other.lineage->Signature());
 		}
 	};
 	struct KeyHash {
 		size_t operator()(const Key &k) const {
-			size_t h = std::hash<string> {}(k.lineage);
+			size_t h = k.lineage->SignatureHash();
 			for (auto &c : k.key_columns) {
 				h = h * 1315423911u + (std::hash<idx_t> {}(c.first) * 3 + std::hash<idx_t> {}(c.second));
 			}
