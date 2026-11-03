@@ -44,6 +44,9 @@ public:
 	ColumnDataCollection *GetData() const {
 		return data_.get();
 	}
+	const shared_ptr<ColumnDataCollection> &GetDataReference() const {
+		return data_;
+	}
 	PendingExpression *GetPendingExpression() const {
 		return pending_expression_.get();
 	}

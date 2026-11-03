@@ -27,6 +27,30 @@
 
 namespace duckdb {
 
+TableSampleManager::CDCEntry &TableSampleManager::GetCDCEntry(const shared_ptr<ColumnDataCollection> &source,
+                                                              idx_t table_index) {
+	D_ASSERT(source);
+	for (auto it = cdc_entries_.begin(); it != cdc_entries_.end();) {
+		if (it->second.source.expired()) {
+			it = cdc_entries_.erase(it);
+		} else {
+			++it;
+		}
+	}
+	auto &entry = cdc_entries_[source.get()];
+	if (entry.sample.empty() || entry.total_rows != source->Count() || entry.total_chunks != source->ChunkCount() ||
+	    entry.table_index != table_index || entry.types != source->Types()) {
+		entry.sample.clear();
+		entry.snapshot_id = ++next_cdc_snapshot_id_;
+		entry.source = source;
+		entry.total_rows = source->Count();
+		entry.total_chunks = source->ChunkCount();
+		entry.table_index = table_index;
+		entry.types = source->Types();
+	}
+	return entry;
+}
+
 idx_t TableSampleManager::MemoryUsage() const {
 	unordered_set<const ColumnDataCollection *> seen;
 	idx_t total = 0;
@@ -36,6 +60,13 @@ idx_t TableSampleManager::MemoryUsage() const {
 				continue;
 			}
 			auto allocation = collection->AllocationSize();
+			total = allocation > std::numeric_limits<idx_t>::max() - total ? std::numeric_limits<idx_t>::max()
+			                                                               : total + allocation;
+		}
+	}
+	for (auto &entry : cdc_entries_) {
+		for (auto &chunk : entry.second.sample) {
+			const auto allocation = chunk->GetAllocationSize();
 			total = allocation > std::numeric_limits<idx_t>::max() - total ? std::numeric_limits<idx_t>::max()
 			                                                               : total + allocation;
 		}

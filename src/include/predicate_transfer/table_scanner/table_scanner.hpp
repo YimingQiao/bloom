@@ -68,6 +68,9 @@ public:
 	ColumnDataCollection *GetData() const {
 		return materialization_.GetData();
 	}
+	const shared_ptr<ColumnDataCollection> &GetDataReference() const {
+		return materialization_.GetDataReference();
+	}
 	const vector<ColumnBinding> &GetOutputBindings() const {
 		return materialization_.GetOutputBindings();
 	}

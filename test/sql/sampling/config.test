@@ -85,10 +85,31 @@ SET bloom_sample_size = 0;
 ----
 bloom_sample_size must be between 1 and 1000000000
 
-statement error
-SET bloom_sample_rate = 1.5;
+query I
+SELECT current_setting('bloom_in_memory_sample_size');
 ----
-bloom_sample_rate must be finite and between 0 and 1
+4096
+
+statement ok
+SET bloom_in_memory_sample_size = 8192;
+
+query I
+SELECT current_setting('bloom_in_memory_sample_size');
+----
+8192
+
+statement error
+SET bloom_in_memory_sample_size = 0;
+----
+bloom_in_memory_sample_size must be between 1 and 1000000000
+
+statement ok
+RESET bloom_in_memory_sample_size;
+
+query I
+SELECT count(*) FROM duckdb_settings() WHERE name IN ('bloom_sample_rate', 'bloom_cdc_sample_rows');
+----
+0
 
 statement error
 SET bloom_instant_access_points = 0;

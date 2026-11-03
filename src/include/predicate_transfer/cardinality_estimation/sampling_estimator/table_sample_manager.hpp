@@ -19,6 +19,21 @@ struct InstantSampleResult;
 //! extrapolation remains the estimator's responsibility.
 class TableSampleManager {
 public:
+	//! An unfiltered sample of one materialized scanner snapshot. A weak owner
+	//! prevents retaining replaced CDCs and distinguishes reused addresses.
+	struct CDCEntry {
+		weak_ptr<ColumnDataCollection> source;
+		idx_t snapshot_id = 0;
+		idx_t total_rows = 0;
+		idx_t total_chunks = 0;
+		idx_t table_index = DConstants::INVALID_INDEX;
+		vector<LogicalType> types;
+		vector<column_t> columns;
+		vector<unique_ptr<DataChunk>> sample;
+		idx_t touched_chunks = 0;
+	};
+	CDCEntry &GetCDCEntry(const shared_ptr<ColumnDataCollection> &source, idx_t table_index);
+
 	struct Entry {
 		shared_ptr<ColumnDataCollection> sample;
 		string table_name;
@@ -71,6 +86,8 @@ private:
 	ClientContext &context_;
 	RPTSamplingConfig config_;
 	unordered_map<const LogicalOperator *, Entry> entries_;
+	unordered_map<const ColumnDataCollection *, CDCEntry> cdc_entries_;
+	idx_t next_cdc_snapshot_id_ = 0;
 };
 
 } // namespace duckdb

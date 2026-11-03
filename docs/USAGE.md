@@ -141,31 +141,39 @@ disabled for performance benchmarks. DuckDB's logging storage is separate from
 `SET bloom_log_transfer_steps = true` remains available as a separate option for
 verbose, human-readable diagnostics on stderr.
 
+For in-memory `ColumnDataCollection` (CDC) data, the estimator uniformly selects
+up to `bloom_in_memory_sample_size` rows without replacement (default: 4,096).
+Collections at or below this limit are evaluated in full. Set it independently
+of base-table sampling, for example `SET bloom_in_memory_sample_size = 4096`.
+The unfiltered sample is cached for the current materialized collection and
+reused with the current predicates and transfer filters. Replacing or extending the collection invalidates its sample; adding a required column also
+rebuilds it. Sampling never modifies the source data. When a partial sample has
+no survivors, the estimator returns a small positive row count (the weight of one sample row, rounded down), rather than scanning the
+full collection or declaring it empty. A census can still return an exact zero.
+
+`bloom_sample_seed` controls reproducibility. CDC sampling has no block/row mode
+switch; the former `bloom_sample_rate` setting is removed. Base-table DuckDB and
+Parquet sampling settings are unchanged.
+
 CDC sampling uses the same logging interface. Filter on `event='cdc_sample'`:
 
 ```sql
 CALL enable_logging('Bloom', storage = 'memory');
 -- Run a query.
 SELECT query_id, event_sequence, destination_table_id, phase,
-       info['sampled_chunks']::UBIGINT AS sampled_chunks,
        info['sample_rows']::UBIGINT AS sample_rows,
-       TRY_CAST(info['chunk_rate_sd'] AS DOUBLE) AS chunk_rate_sd,
+       info['sample_reused'] AS sample_reused,
        info['estimate']::UBIGINT AS estimate
 FROM duckdb_logs_parsed('Bloom')
 WHERE event = 'cdc_sample'
 ORDER BY connection_id, query_id, event_sequence;
 ```
 
-`info` includes total/sample row and chunk counts and `chunks`, a list of
-`chunk_index:input_rows:surviving_rows` triples. Actual sizes are recorded rather
-than assuming 2,000 rows. `row_survival` is the row-weighted fraction;
-`chunk_rate_mean`, `chunk_rate_min`, `chunk_rate_max`, `chunk_rate_variance`
-(denominator `n-1`), and `chunk_rate_sd` describe nonempty sampled chunks.
-Fractions use 0–1. Zero-survivor chunks are included; variance is `NA` with
-fewer than two nonempty chunks. Sampling remains deterministic and evenly spaced:
-these statistics describe dispersion, not confidence guarantees. `sampling_se`
-is `NA` for partial samples and `0` for a census. Zero-estimate full confirmations
-have phase `init_zero_confirm` or `transfer_zero_confirm`.
+`info` reports the sampling design, sampled and surviving rows, source chunks
+visited, cache reuse, and acquisition/filtering time. `sampling_se` is an
+estimated standard error of the survival fraction, not a confidence guarantee;
+it is zero for a census. `estimate_status=sampled_zero_floor` identifies a
+zero-survivor partial sample whose estimate was raised to a positive value.
 
 For exact diagnostic verification of the **same CDC and filters**, use DEBUG:
 
@@ -176,13 +184,8 @@ SET logging_level = 'debug';
 
 This additionally filters the entire CDC for each partial sample, recording
 `exact_rows`, `signed_error_rows`, `absolute_error_fraction` (absolute row error
- divided by current CDC size), `audit_extra_rows`, and `audit_ms` in the same
-`cdc_sample` event. Audit results never replace the estimator's answer or
-change its zero-confirmation policy. Exact here means exact application of
-these particular filters, including any Bloom false positives; it is not the
-true final join cardinality. INFO logging adds no data scans. DEBUG audit can
-be expensive and its execution times are not normal performance measurements.
-
-Prepared/instant base-table samples are outside this CDC diagnostic. Disable
-logging for timing measurements. No separate sampling-statistics setting is
-required.
+divided by current CDC size), `audit_extra_rows`, and `audit_ms`. The audit does
+not change the returned estimate. Exact here means exact application of these
+filters, including any Bloom false positives, rather than final join cardinality.
+INFO logging adds no data scans. Disable logging for timing measurements.
+Prepared/instant base-table sampling is outside this CDC diagnostic.

@@ -22,8 +22,8 @@ enum class RPTInstantAccessMode : uint8_t {
 };
 
 struct RPTSamplingConfig {
-	//! Sampling fraction for already-materialized intermediate relations.
-	double intermediate_rate = 0.01;
+	//! Maximum random rows evaluated per in-memory CDC snapshot; smaller CDCs use all rows.
+	idx_t in_memory_sample_size = 4096;
 	//! Target rows for prepared, block, and Parquet samples. Scattered instant
 	//! sampling uses its explicit access-point shape below.
 	idx_t target_rows = 10000;

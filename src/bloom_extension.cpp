@@ -87,13 +87,13 @@ static RPTSamplingMode ReadSampleMode(const Value &value) {
 static RPTInstantAccessMode ReadInstantAccess(const Value &value) {
 	return ReadChoice(value, "bloom_instant_access", "scattered", "block") == "scattered"
 	           ? RPTInstantAccessMode::SCATTERED
-	           : RPTInstantAccessMode::BLOCK;
+			   : RPTInstantAccessMode::BLOCK;
 }
 
 static RPTExcitationMode ReadExcitationMode(const Value &value) {
 	return ReadChoice(value, "bloom_excitation_mode", "table_size", "join_key_ndv") == "table_size"
 	           ? RPTExcitationMode::TABLE_SIZE
-	           : RPTExcitationMode::JOIN_KEY_NDV;
+			   : RPTExcitationMode::JOIN_KEY_NDV;
 }
 
 static optional_idx ReadRPTMemoryLimit(const Value &value) {
@@ -158,8 +158,8 @@ static void ValidateUnitInterval(Value &value, const char *setting) {
 	}
 }
 
-static void ValidateSampleRate(ClientContext &, SetScope, Value &value) {
-	ValidateUnitInterval(value, "bloom_sample_rate");
+static void ValidateInMemorySampleSize(ClientContext &, SetScope, Value &value) {
+	ValidateUnsignedRange(value, "bloom_in_memory_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
 }
 
 static void ValidateExcitationThreshold(ClientContext &, SetScope, Value &value) {
@@ -243,9 +243,9 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 		ValidateUnsignedRange(setting, "bloom_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
 		config.sampling.target_rows = setting.GetValue<idx_t>();
 	}
-	if (input.context.TryGetCurrentSetting("bloom_sample_rate", setting)) {
-		ValidateUnitInterval(setting, "bloom_sample_rate");
-		config.sampling.intermediate_rate = setting.GetValue<double>();
+	if (input.context.TryGetCurrentSetting("bloom_in_memory_sample_size", setting)) {
+		ValidateUnsignedRange(setting, "bloom_in_memory_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
+		config.sampling.in_memory_sample_size = setting.GetValue<idx_t>();
 	}
 	if (input.context.TryGetCurrentSetting("bloom_sample_mode", setting)) {
 		config.sampling.mode = ReadSampleMode(setting);
@@ -320,11 +320,9 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption("bloom_sample_size", "Target rows for prepared, block, and Parquet sampling",
 	                          LogicalType::UBIGINT, Value::UBIGINT(EnvUBigIntDefault("BLOOM_SAMPLE_SIZE", 10000)),
 	                          ValidateSampleSize);
-	config.AddExtensionOption("bloom_sample_rate",
-	                          "Chunk-sampling fraction for estimating cardinalities of already-materialized "
-	                          "intermediate data",
-	                          LogicalType::DOUBLE, Value::DOUBLE(EnvDoubleDefault("BLOOM_SAMPLE_RATE", 0.01)),
-	                          ValidateSampleRate);
+	config.AddExtensionOption(
+	    "bloom_in_memory_sample_size", "Maximum uniformly sampled rows per in-memory CDC", LogicalType::UBIGINT,
+	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_IN_MEMORY_SAMPLE_SIZE", 4096)), ValidateInMemorySampleSize);
 	config.AddExtensionOption("bloom_sample_mode", "Base-table sampling mode: 'prepared' or 'instant'",
 	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_MODE", "prepared")),
 	                          ValidateSampleMode);
@@ -349,7 +347,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption(
 	    "bloom_instant_parquet_row_groups", "Stratified Parquet row groups sampled per table", LogicalType::UBIGINT,
 	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_INSTANT_PARQUET_ROW_GROUPS", 8)), ValidateInstantParquetRowGroups);
-	config.AddExtensionOption("bloom_sample_seed", "Reproducible base-table sample seed", LogicalType::UBIGINT,
+	config.AddExtensionOption("bloom_sample_seed", "Reproducible sampling seed", LogicalType::UBIGINT,
 	                          Value::UBIGINT(EnvUBigIntDefault("BLOOM_SAMPLE_SEED", 2)));
 	config.AddExtensionOption("bloom_sample_memory_cache",
 	                          "Cache prepared samples in the process object cache to skip disk reloads across queries "

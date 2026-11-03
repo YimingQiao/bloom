@@ -1,6 +1,10 @@
 #include "predicate_transfer/cardinality_estimation/sampling_estimator/sampling_estimator.hpp"
-#include "predicate_transfer/bloom_log.hpp"
+#include "duckdb/common/random_engine.hpp"
 #include "duckdb/common/string_util.hpp"
+#include "duckdb/common/types/column/column_data_collection_segment.hpp"
+#include "duckdb/common/types/vector.hpp"
+#include "duckdb/common/vector/flat_vector.hpp"
+#include "predicate_transfer/bloom_log.hpp"
 
 #include "duckdb/execution/expression_executor.hpp"
 #include "duckdb/planner/expression/bound_columnref_expression.hpp"
@@ -11,17 +15,17 @@
 #include "duckdb/planner/operator/logical_filter.hpp"
 
 #include <algorithm>
+#include <array>
 #include <chrono>
 #include <cmath>
 #include <iostream>
-#include <sstream>
 
 namespace duckdb {
 
 SamplingCardinalityEstimator::SamplingCardinalityEstimator(ClientContext &context, RPTSamplingConfig config)
     : context_(context), config_(std::move(config)), samples_(context_, config_) {
-	D_ASSERT(config_.intermediate_rate >= 0.0 && config_.intermediate_rate <= 1.0);
 	D_ASSERT(config_.target_rows > 0);
+	D_ASSERT(config_.in_memory_sample_size > 0);
 	D_ASSERT(config_.instant_access_points > 0);
 	D_ASSERT(config_.instant_rows_per_access > 0);
 	D_ASSERT(config_.instant_block_windows > 0);
@@ -53,176 +57,419 @@ static void RewriteRefsToPositions(unique_ptr<Expression> &expr, const vector<Co
 }
 
 // ---------------------------------------------------------------------------
-// Chunk-level sampling on a ColumnDataCollection (for CDC / in-memory data)
+// Row sampling on a ColumnDataCollection (CDC / in-memory data)
 // ---------------------------------------------------------------------------
 
-static idx_t SampleChunks(const ColumnDataCollection &cdc, double sample_rate, ExpressionExecutor *expr_exec,
-                          const vector<ScannerFilterSet::Entry> &filters, ClientContext *stats_context = nullptr,
-                          const char *stats_phase = "transfer", idx_t table_index = DConstants::INVALID_INDEX) {
-	idx_t total_chunks = cdc.ChunkCount();
-	if (total_chunks == 0) {
-		return 0;
+static void ApplySampleFilters(DataChunk &chunk, ExpressionExecutor *expr_exec,
+                               const vector<ScannerFilterSet::Entry> &filters) {
+	if (expr_exec && chunk.size()) {
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		const auto count = expr_exec->SelectExpression(chunk, sel);
+		if (count < chunk.size()) {
+			chunk.Slice(sel, count);
+		}
 	}
-
-	idx_t target_chunks = total_chunks;
-	if (sample_rate > 0.0 && sample_rate < 1.0) {
-		target_chunks = MaxValue<idx_t>(
-		    1, MinValue<idx_t>(total_chunks,
-			                   static_cast<idx_t>(std::ceil(static_cast<double>(total_chunks) * sample_rate))));
-	}
-
-	DataChunk chunk;
-	chunk.Initialize(cdc.GetAllocator(), cdc.Types());
-	SelectionVector sel(STANDARD_VECTOR_SIZE);
-
-	idx_t sampled_chunks = 0;
-	idx_t surviving_rows = 0;
-	idx_t sampled_rows = 0, nonempty_chunks = 0, zero_chunks = 0, full_chunks = 0;
-	double rate_mean = 0, rate_m2 = 0, rate_min = 1, rate_max = 0;
-	std::ostringstream chunk_stats;
-	// Diagnostics use only rows already visited by the estimator. Include zero
-	// survivors (including expression-filter early exits) in the distribution.
-	auto record_chunk = [&](idx_t ci, idx_t input, idx_t output) {
-		if (!stats_context) {
-			return;
-		}
-		if (sampled_chunks > 0) {
-			chunk_stats << ',';
-		}
-		chunk_stats << ci << ':' << input << ':' << output;
-		sampled_rows += input;
-		if (input == 0) {
-			return; // An empty chunk has no defined survival fraction.
-		}
-		nonempty_chunks++;
-		zero_chunks += output == 0;
-		full_chunks += output == input;
-		const double rate = double(output) / double(input);
-		const double delta = rate - rate_mean;
-		rate_mean += delta / double(nonempty_chunks);
-		rate_m2 += delta * (rate - rate_mean);
-		rate_min = MinValue(rate_min, rate);
-		rate_max = MaxValue(rate_max, rate);
-	};
-
-	for (idx_t sample_idx = 0; sample_idx < target_chunks; sample_idx++) {
-		// Spread the selected chunks over the collection. Since target_chunks is
-		// never larger than total_chunks, this mapping produces unique indices.
-		const idx_t ci = sample_idx * total_chunks / target_chunks;
-		chunk.Reset();
-		cdc.FetchChunk(ci, chunk);
-		const idx_t input_rows = chunk.size();
+	for (auto &entry : filters) {
 		if (chunk.size() == 0) {
-			record_chunk(ci, input_rows, 0);
-			sampled_chunks++;
+			break;
+		}
+		if (!entry.filter || entry.chunk_cols.empty() ||
+		    std::any_of(entry.chunk_cols.begin(), entry.chunk_cols.end(),
+		                [&](idx_t col) { return col >= chunk.ColumnCount(); })) {
 			continue;
 		}
-
-		// Expression filter.
-		if (expr_exec) {
-			idx_t count = expr_exec->SelectExpression(chunk, sel);
-			if (count == 0) {
-				record_chunk(ci, input_rows, 0);
-				sampled_chunks++;
-				continue;
-			}
-			if (count < chunk.size()) {
-				chunk.Slice(sel, count);
-				chunk.Flatten();
-			}
+		// Slice retains its selection; do not overwrite it in the next filter.
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		size_t count = chunk.size();
+		entry.filter->Lookup(chunk, entry.chunk_cols, sel, count);
+		if (count < chunk.size()) {
+			chunk.Slice(sel, count);
 		}
-
-		// BF filters.
-		for (auto &entry : filters) {
-			if (chunk.size() == 0) {
-				break;
-			}
-			if (!entry.filter || entry.chunk_cols.empty()) {
-				continue;
-			}
-			idx_t col_count = chunk.ColumnCount();
-			bool skip = false;
-			for (auto cc : entry.chunk_cols) {
-				if (cc >= col_count) {
-					skip = true;
-					break;
-				}
-			}
-			if (skip) {
-				continue;
-			}
-
-			size_t count = chunk.size();
-			entry.filter->Lookup(chunk, entry.chunk_cols, sel, count);
-			if (count < chunk.size()) {
-				chunk.Slice(sel, count);
-				chunk.Flatten();
-			}
-		}
-
-		surviving_rows += chunk.size();
-		record_chunk(ci, input_rows, chunk.size());
-		sampled_chunks++;
 	}
+}
 
-	if (sampled_chunks == 0) {
+static idx_t ScanCollection(const ColumnDataCollection &cdc, const vector<column_t> &columns,
+                            ExpressionExecutor *executor, const vector<ScannerFilterSet::Entry> &filters) {
+	vector<LogicalType> types;
+	for (auto column : columns) {
+		types.push_back(cdc.Types()[column]);
+	}
+	ChunkManagementState state;
+	state.properties = ColumnDataScanProperties::ALLOW_ZERO_COPY;
+	DataChunk chunk;
+	chunk.Initialize(cdc.GetAllocator(), types);
+	idx_t survivors = 0;
+	for (auto &segment : cdc.GetSegments()) {
+		chunk.Reset();
+		state.handles.clear();
+		for (idx_t ci = 0; ci < segment->chunk_data.size(); ci++) {
+			chunk.Reset();
+			segment->ReadChunk(ci, state, chunk, columns);
+			if (columns.empty()) {
+				chunk.SetCardinalityUnsafe(segment->chunk_data[ci].count);
+			}
+			ApplySampleFilters(chunk, executor, filters);
+			survivors += chunk.size();
+		}
+	}
+	return survivors;
+}
+
+static bool CanGatherDirect(const ColumnDataCollection &cdc, const vector<column_t> &columns) {
+	for (auto col : columns) {
+		switch (cdc.Types()[col].InternalType()) {
+		case PhysicalType::BOOL:
+		case PhysicalType::INT8:
+		case PhysicalType::INT16:
+		case PhysicalType::INT32:
+		case PhysicalType::INT64:
+		case PhysicalType::UINT8:
+		case PhysicalType::UINT16:
+		case PhysicalType::UINT32:
+		case PhysicalType::UINT64:
+		case PhysicalType::INT128:
+		case PhysicalType::UINT128:
+		case PhysicalType::FLOAT:
+		case PhysicalType::DOUBLE:
+		case PhysicalType::INTERVAL:
+			break;
+		default:
+			return false;
+		}
+	}
+	for (auto &segment : cdc.GetSegments()) {
+		if (segment->allocator->GetType() != ColumnDataAllocatorType::IN_MEMORY_ALLOCATOR) {
+			return false;
+		}
+	}
+	return true;
+}
+
+static void GatherDirect(ColumnDataCollectionSegment &segment, idx_t chunk_index, const vector<column_t> &columns,
+                         const SelectionVector &selection, idx_t count, DataChunk &sample) {
+	ChunkManagementState state;
+	const auto output_offset = sample.size();
+	for (idx_t col = 0; col < columns.size(); col++) {
+		auto &meta = segment.GetVectorData(segment.chunk_data[chunk_index].vector_data[columns[col]]);
+		D_ASSERT(!meta.next_data.IsValid());
+		const auto width = GetTypeIdSize(sample.data[col].GetType().InternalType());
+		auto data = segment.allocator->GetDataPointer(state, meta.block_id, meta.offset);
+		// Inspect only selected validity bits, not the entire vector's mask.
+		ValidityMask validity(ColumnDataCollectionSegment::GetValidityPointerForWriting(data, width),
+		                      STANDARD_VECTOR_SIZE);
+		auto output = FlatVector::GetDataMutable(sample.data[col]);
+		auto &output_validity = FlatVector::ValidityMutable(sample.data[col]);
+		for (idx_t row = 0; row < count; row++) {
+			const auto source_row = selection.get_index(row);
+			D_ASSERT(source_row < meta.count);
+			if (validity.RowIsValid(source_row)) {
+				memcpy(output + (output_offset + row) * width, data + source_row * width, width);
+			} else {
+				output_validity.SetInvalid(output_offset + row);
+			}
+		}
+		FlatVector::SetSize(sample.data[col], count_t(output_offset + count));
+	}
+	sample.CheckCardinality(output_offset + count);
+}
+
+// Uniform sampling without replacement; retain raw samples in execution-sized
+// chunks.
+static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> &column_ids, idx_t target_rows,
+                        idx_t seed, ExpressionExecutor *expr_exec, const vector<ScannerFilterSet::Entry> &filters,
+                        ClientContext *stats_context, const char *phase, idx_t table_index,
+                        TableSampleManager::CDCEntry *cache) {
+	const auto started = std::chrono::steady_clock::now();
+	const idx_t n = cdc.Count(), k = MinValue(n, target_rows);
+	if (k == 0) {
 		return 0;
 	}
-	const auto estimate = static_cast<idx_t>(static_cast<double>(surviving_rows) * static_cast<double>(total_chunks) /
-	                                         static_cast<double>(sampled_chunks));
+	vector<LogicalType> types;
+	for (auto col : column_ids)
+		types.push_back(cdc.Types()[col]);
+	DataChunk sample;
+	sample.Initialize(cdc.GetAllocator(), types);
+	const bool reused = cache && !cache->sample.empty() && cache->columns == column_ids;
+	const char *cache_status = reused                   ? "hit"
+	                           : !cache                 ? "unowned"
+	                           : !cache->sample.empty() ? "columns_changed"
+	                                                    : "new_snapshot";
+	const bool direct = CanGatherDirect(cdc, column_ids);
+	idx_t touched = 0;
+	vector<unique_ptr<DataChunk>> acquired_chunks;
+	auto save_chunk = [&]() {
+		if (!sample.size()) {
+			return;
+		}
+		auto chunk = make_uniq<DataChunk>();
+		chunk->Initialize(cdc.GetAllocator(), types);
+		sample.Copy(*chunk);
+		chunk->SetCardinalityUnsafe(sample.size());
+		acquired_chunks.push_back(std::move(chunk));
+		sample.Reset();
+	};
+	if (reused) {
+		touched = cache->touched_chunks;
+	} else {
+		vector<idx_t> rows;
+		rows.reserve(k);
+		if (k == n) {
+			for (idx_t i = 0; i < n; i++) {
+				rows.push_back(i);
+			}
+		} else {
+			RandomEngine rng(0);
+			rng.SetSeed(seed ^ (uint64_t(table_index) * 0x9e3779b97f4a7c15ULL));
+			// Fixed-capacity open addressing avoids a heap allocation per selected
+			// row.
+			idx_t capacity = 1;
+			while (capacity < 2 * k) {
+				capacity *= 2;
+			}
+			vector<idx_t> selected(capacity, DConstants::INVALID_INDEX);
+			auto insert = [&](idx_t value) {
+				idx_t slot = (value * 0x9e3779b97f4a7c15ULL) & (capacity - 1);
+				while (selected[slot] != DConstants::INVALID_INDEX) {
+					if (selected[slot] == value) {
+						return false;
+					}
+					slot = (slot + 1) & (capacity - 1);
+				}
+				selected[slot] = value;
+				return true;
+			};
+			// Floyd sampling, with rejection to avoid bias in bounded integer draws.
+			for (idx_t j = n - k; j < n; j++) {
+				const uint64_t bound = j + 1;
+				const uint64_t threshold = -bound % bound;
+				uint64_t draw;
+				do {
+					draw = rng.NextRandomInteger64();
+				} while (draw < threshold);
+				const idx_t candidate = draw % bound;
+				if (insert(candidate)) {
+					rows.push_back(candidate);
+				} else {
+					insert(j);
+					rows.push_back(j);
+				}
+			}
+			// Sort integer row positions by bytes; only bytes needed for this CDC are
+			// visited. The ascending access order is identical to comparison sorting.
+			vector<idx_t> scratch(k);
+			for (idx_t remaining = n - 1, shift = 0; remaining; remaining >>= 8, shift += 8) {
+				std::array<idx_t, 256> offsets {};
+				for (auto row : rows) {
+					offsets[(row >> shift) & 255]++;
+				}
+				idx_t offset = 0;
+				for (auto &count : offsets) {
+					const auto next = offset + count;
+					count = offset;
+					offset = next;
+				}
+				for (auto row : rows) {
+					scratch[offsets[(row >> shift) & 255]++] = row;
+				}
+				rows.swap(scratch);
+			}
+		}
+		ChunkManagementState read_state;
+		read_state.properties = ColumnDataScanProperties::ALLOW_ZERO_COPY;
+		DataChunk input;
+		if (!direct)
+			input.Initialize(cdc.GetAllocator(), types);
+		// Append copies the selected values; unlike Slice, it does not retain this
+		// buffer.
+		SelectionVector sel(STANDARD_VECTOR_SIZE);
+		idx_t cursor = 0, base = 0;
+		for (auto &segment : cdc.GetSegments()) {
+			if (cursor == k) {
+				break;
+			}
+			if (!direct)
+				input.Reset();
+			read_state.handles.clear();
+			if (rows[cursor] >= base + segment->count) {
+				base += segment->count;
+				continue;
+			}
+			for (idx_t ci = 0; ci < segment->chunk_data.size() && cursor < k; ci++) {
+				const idx_t end = base + segment->chunk_data[ci].count;
+				if (rows[cursor] < end) {
+					if (!direct) {
+						input.Reset();
+						segment->ReadChunk(ci, read_state, input, column_ids);
+					}
+					touched++;
+					while (cursor < k && rows[cursor] < end) {
+						idx_t count = 0;
+						const auto capacity = STANDARD_VECTOR_SIZE - sample.size();
+						while (cursor < k && rows[cursor] < end && count < capacity) {
+							sel.set_index(count++, rows[cursor++] - base);
+						}
+						if (column_ids.empty()) {
+							sample.SetCardinalityUnsafe(sample.size() + count);
+						} else if (direct) {
+							GatherDirect(*segment, ci, column_ids, sel, count, sample);
+						} else {
+							sample.Append(input, sel, count);
+						}
+						if (sample.size() == STANDARD_VECTOR_SIZE) {
+							save_chunk();
+						}
+					}
+				}
+				base = end;
+			}
+		}
+		D_ASSERT(cursor == k);
+		save_chunk();
+		if (cache) {
+			cache->sample = std::move(acquired_chunks);
+			cache->columns = column_ids;
+			cache->touched_chunks = touched;
+		}
+	}
+
+	const auto acquired = std::chrono::steady_clock::now();
+	const auto &chunks = cache ? cache->sample : acquired_chunks;
+	idx_t survivors = 0;
+	for (auto &raw : chunks) {
+		sample.Reset();
+		raw->Copy(sample);
+		sample.SetCardinalityUnsafe(raw->size());
+		ApplySampleFilters(sample, expr_exec, filters);
+		survivors += sample.size();
+	}
+	const auto filtered = std::chrono::steady_clock::now();
+	// No sampled survivor means low selectivity, not a proven empty table.
+	// Use one sample row's weight without scanning additional source rows.
+	const bool zero_floor = survivors == 0 && k < n;
+	const auto estimate =
+	    zero_floor ? n / k : static_cast<idx_t>(std::llround(double(n) * double(survivors) / double(k)));
 	if (stats_context) {
-		vector<pair<string, string>> info = {
-		    {"design", sampled_chunks == total_chunks ? "census" : "deterministic_spaced"},
-		    {"total_rows", to_string(cdc.Count())},
-		    {"total_chunks", to_string(total_chunks)},
-		    {"sampled_chunks", to_string(sampled_chunks)},
-		    {"sample_rows", to_string(sampled_rows)},
-		    {"survivors", to_string(surviving_rows)},
-		    {"estimate", to_string(estimate)},
-		    {"nonempty_chunks", to_string(nonempty_chunks)},
-		    {"zero_chunks", to_string(zero_chunks)},
-		    {"full_chunks", to_string(full_chunks)},
-		    {"chunks", chunk_stats.str()},
-		    {"filter_count", to_string(filters.size())},
-		    {"expression_filter", expr_exec ? "true" : "false"},
-		    {"sampling_se", sampled_chunks == total_chunks ? "0" : "NA"},
+		auto ms = [](auto a, auto b) {
+			return StringUtil::Format("%.17g", std::chrono::duration<double, std::milli>(b - a).count());
 		};
 		auto number = [](double value) {
 			return StringUtil::Format("%.17g", value);
 		};
-		info.emplace_back("row_survival", sampled_rows ? number(double(surviving_rows) / double(sampled_rows)) : "NA");
-		info.emplace_back("chunk_rate_mean", nonempty_chunks ? number(rate_mean) : "NA");
-		info.emplace_back("chunk_rate_min", nonempty_chunks ? number(rate_min) : "NA");
-		info.emplace_back("chunk_rate_max", nonempty_chunks ? number(rate_max) : "NA");
-		if (nonempty_chunks > 1) {
-			const double variance = MaxValue(0.0, rate_m2 / double(nonempty_chunks - 1));
-			info.emplace_back("chunk_rate_variance", number(variance));
-			info.emplace_back("chunk_rate_sd", number(std::sqrt(variance)));
-		} else {
-			info.emplace_back("chunk_rate_variance", "NA");
-			info.emplace_back("chunk_rate_sd", "NA");
-		}
-		// DEBUG audit uses the same immutable CDC and filters. Its result is
-		// diagnostic only: it must never replace the estimate returned below.
+		const double p = double(survivors) / double(k);
+		vector<pair<string, string>> info = {{"domain", "cdc"},
+		                                     {"source", "cdc"},
+		                                     {"mode", "in_memory"},
+		                                     {"design", k == n ? "census" : "uniform_rows_without_replacement"},
+		                                     {"seed", to_string(seed)},
+		                                     {"sample_rng", "duckdb_random_engine"},
+		                                     {"total_rows", to_string(n)},
+		                                     {"sample_reused", reused ? "true" : "false"},
+		                                     {"cache_status", cache_status},
+		                                     {"sample_snapshot", cache ? to_string(cache->snapshot_id) : "NA"},
+		                                     {"gather_path", reused   ? "cache"
+		                                                     : direct ? "direct"
+		                                                              : "read_chunk"},
+		                                     {"read_chunks", to_string(reused ? 0 : touched)},
+		                                     {"total_chunks", to_string(cdc.ChunkCount())},
+		                                     {"sampled_chunks", to_string(touched)},
+		                                     {"sample_rows", to_string(k)},
+		                                     {"survivors", to_string(survivors)},
+		                                     {"estimate", to_string(estimate)},
+		                                     {"estimate_status", zero_floor ? "sampled_zero_floor"
+		                                                         : k == n   ? "exact"
+		                                                                    : "sampled"},
+		                                     {"acquire_ms", ms(started, acquired)},
+		                                     {"filter_ms", ms(acquired, filtered)},
+		                                     {"sample_ms", ms(started, filtered)},
+		                                     {"row_survival", number(p)},
+		                                     {"sample_columns", to_string(column_ids.size())},
+		                                     {"filter_count", to_string(filters.size())},
+		                                     {"expression_filter", expr_exec ? "true" : "false"}};
+		// This is an estimated standard error, not a confidence guarantee.
+		info.emplace_back("sampling_se",
+		                  k == n  ? "0"
+		                  : k > 1 ? number(std::sqrt(p * (1 - p) * double(n - k) / (double(n) * double(k - 1))))
+		                          : "NA");
 		const bool audit = BloomSampleAuditEnabled(*stats_context);
 		info.emplace_back("audit", audit ? "true" : "false");
-		if (audit || sampled_chunks == total_chunks) {
-			const auto started = std::chrono::steady_clock::now();
-			const idx_t exact =
-			    sampled_chunks == total_chunks ? surviving_rows : SampleChunks(cdc, 1.0, expr_exec, filters);
-			const double ms =
-			    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started).count();
+		if (audit || k == n) {
+			const auto audit_started = std::chrono::steady_clock::now();
+			const auto exact = k == n ? survivors : ScanCollection(cdc, column_ids, expr_exec, filters);
 			info.emplace_back("exact_rows", to_string(exact));
-			info.emplace_back("audit_extra_rows", to_string(sampled_chunks == total_chunks ? 0 : cdc.Count()));
-			info.emplace_back("audit_ms", number(ms));
+			info.emplace_back("audit_extra_rows", to_string(k == n ? 0 : n));
+			info.emplace_back("audit_ms", ms(audit_started, std::chrono::steady_clock::now()));
 			info.emplace_back("signed_error_rows", number(double(estimate) - double(exact)));
 			info.emplace_back("absolute_error_fraction",
-			                  cdc.Count() ? number(std::abs(double(estimate) - double(exact)) / double(cdc.Count()))
-			                              : "0");
+			                  number(std::abs(double(estimate) - double(exact)) / double(n)));
 		}
-		LogBloomCDCSample(*stats_context, table_index, stats_phase, info);
+		LogBloomCDCSample(*stats_context, table_index, phase, info);
 	}
 	return estimate;
+}
+
+// Evaluate only columns referenced by the current predicates and filters. Do
+// not mutate the scanner's executor or filter bindings: they are reused for
+// normal execution.
+static idx_t SampleCollection(ClientContext &context, const ColumnDataCollection &cdc, const RPTSamplingConfig &config,
+                              ExpressionExecutor *expr_exec, const vector<ScannerFilterSet::Entry> &filters,
+                              const char *phase, idx_t table_index, TableSampleManager::CDCEntry *cache = nullptr) {
+	vector<bool> used(cdc.Types().size(), false);
+	if (expr_exec) {
+		for (auto expr : expr_exec->expressions) {
+			ExpressionIterator::VisitExpression<BoundReferenceExpression>(*expr,
+			                                                              [&](const BoundReferenceExpression &ref) {
+				                                                              D_ASSERT(ref.Index() < used.size());
+				                                                              used[ref.Index()] = true;
+			                                                              });
+		}
+	}
+	for (auto &entry : filters) {
+		if (entry.filter && !entry.chunk_cols.empty() &&
+		    std::all_of(entry.chunk_cols.begin(), entry.chunk_cols.end(),
+		                [&](idx_t col) { return col < used.size(); })) {
+			for (auto col : entry.chunk_cols) {
+				used[col] = true;
+			}
+		}
+	}
+	vector<column_t> columns;
+	vector<idx_t> positions(used.size(), DConstants::INVALID_INDEX);
+	for (idx_t col = 0; col < used.size(); col++) {
+		if (used[col]) {
+			positions[col] = columns.size();
+			columns.push_back(col);
+		}
+	}
+	vector<unique_ptr<Expression>> expressions;
+	unique_ptr<ExpressionExecutor> projected_executor;
+	vector<ScannerFilterSet::Entry> projected_filters;
+	auto active_filters = &filters;
+	if (columns.size() != used.size()) {
+		if (expr_exec) {
+			projected_executor = make_uniq<ExpressionExecutor>(context);
+			for (auto expr : expr_exec->expressions) {
+				auto copy = expr->Copy();
+				ExpressionIterator::VisitExpressionMutable<BoundReferenceExpression>(
+				    copy, [&](BoundReferenceExpression &ref, unique_ptr<Expression> &) {
+					    ref.IndexMutable() = positions[ref.Index()];
+				    });
+				projected_executor->AddExpression(*copy);
+				expressions.push_back(std::move(copy));
+			}
+			expr_exec = projected_executor.get();
+		}
+		projected_filters = filters;
+		for (auto &entry : projected_filters) {
+			for (auto &col : entry.chunk_cols) {
+				col = col < positions.size() ? positions[col] : DConstants::INVALID_INDEX;
+			}
+		}
+		active_filters = &projected_filters;
+	}
+	const bool stats = BloomStructuredLoggingEnabled(context);
+	auto stats_context = stats ? &context : nullptr;
+	return SampleRows(cdc, columns, config.in_memory_sample_size, config.seed, expr_exec, *active_filters,
+	                  stats_context, phase, table_index, cache);
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +521,7 @@ idx_t SamplingCardinalityEstimator::SampleCDC(const LogicalOperator &op) {
 	}
 
 	// NOTE: ExpressionExecutor::AddExpression stores a *reference*, so final_expr
-	// must outlive every SampleChunks call below — keep it at function scope.
+	// must outlive every SampleCollection call below — keep it at function scope.
 	unique_ptr<Expression> final_expr;
 	unique_ptr<ExpressionExecutor> expr_exec;
 	if (!rewritten.empty()) {
@@ -293,16 +540,8 @@ idx_t SamplingCardinalityEstimator::SampleCDC(const LogicalOperator &op) {
 
 	// No BF filters at init time.
 	static const vector<ScannerFilterSet::Entry> empty_filters;
-	const bool stats = BloomStructuredLoggingEnabled(context_);
-	idx_t v = SampleChunks(cdc, config_.intermediate_rate, expr_exec.get(), empty_filters, stats ? &context_ : nullptr,
-	                       "init", chunk_get.table_index.index);
-	if (v == 0 && cdc.Count() > 0) {
-		// A 1% chunk sample can miss a rare survivor; downstream treats 0 as
-		// EmptyResult. In-memory data is cheap to rescan — confirm exactly.
-		v = SampleChunks(cdc, 1.0, expr_exec.get(), empty_filters, stats ? &context_ : nullptr, "init_zero_confirm",
-		                 chunk_get.table_index.index);
-	}
-	return v;
+	return SampleCollection(context_, cdc, config_, expr_exec.get(), empty_filters, "init",
+	                        chunk_get.table_index.index);
 }
 
 // ---------------------------------------------------------------------------
@@ -327,7 +566,8 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 	}
 	samples_.EnsureLocalFilter(sample, op);
 
-	// Resolve BF filters to sample chunk columns (same order in locally_filtered).
+	// Resolve BF filters to sample chunk columns (same order in
+	// locally_filtered).
 	vector<ScannerFilterSet::Entry> bf_filters;
 	for (auto &bf : filters) {
 		if (!bf.filter) {
@@ -350,11 +590,16 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		bf_filters.push_back(std::move(e));
 	}
 
-	// Survivors after local predicate (+ BF). BF pass scans only the small local set.
+	// Survivors after local predicate (+ BF). BF pass scans only the small local
+	// set.
 	idx_t survivors = sample.local_survivors;
 	auto probe_started = std::chrono::steady_clock::now();
 	if (!bf_filters.empty() && sample.locally_filtered && sample.local_survivors > 0) {
-		survivors = SampleChunks(*sample.locally_filtered, 1.0, nullptr, bf_filters);
+		vector<column_t> columns;
+		for (idx_t col = 0; col < sample.locally_filtered->Types().size(); col++) {
+			columns.push_back(col);
+		}
+		survivors = ScanCollection(*sample.locally_filtered, columns, nullptr, bf_filters);
 	}
 	if (LogEnabled()) {
 		auto elapsed =
@@ -364,13 +609,14 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		          << " survivors=" << survivors << " elapsed=" << elapsed << "ms" << '\n';
 	}
 
-	// Extrapolate to the full table. A 0 estimate is special downstream (treated as
-	// EmptyResult), so only return 0 when we sampled the WHOLE table — a partial
-	// sample can miss a rare-but-present match, and reporting empty would wrongly
-	// drop all rows. With 0 survivors in a partial sample, report the weight of a
-	// single sample row (total/sample) rather than 1: a hard floor of 1 would tie
-	// with genuinely single-row tables (whose full-sample estimate is exact) and
-	// mislead the excitation ordering into flooding an uncertain table first.
+	// Extrapolate to the full table. A 0 estimate is special downstream (treated
+	// as EmptyResult), so only return 0 when we sampled the WHOLE table — a
+	// partial sample can miss a rare-but-present match, and reporting empty would
+	// wrongly drop all rows. With 0 survivors in a partial sample, report the
+	// weight of a single sample row (total/sample) rather than 1: a hard floor of
+	// 1 would tie with genuinely single-row tables (whose full-sample estimate is
+	// exact) and mislead the excitation ordering into flooding an uncertain table
+	// first.
 	//
 	// A 0 is only trustworthy for a pure LOCAL predicate on a fully materialized
 	// sample: then the whole table was checked. With BF filters applied the
@@ -448,7 +694,7 @@ idx_t SamplingCardinalityEstimator::Estimate(TableScanner &scanner, const vector
 	}
 	auto *pf = scanner.GetPendingExprFilter();
 	ExpressionExecutor *expr_exec = (pf && pf->executor) ? pf->executor.get() : nullptr;
-	// SampleChunks fetches RAW chunks from the CDC, but the scanner's filter
+	// Sampling reads RAW chunks from the CDC, but the scanner's filter
 	// chunk_cols were resolved against the (possibly narrower) post-projection
 	// output bindings. When the pending filter carries a projection_map, remap
 	// each chunk_col from its narrow output position to the raw CDC position.
@@ -466,19 +712,10 @@ idx_t SamplingCardinalityEstimator::Estimate(TableScanner &scanner, const vector
 		}
 		filters = &remapped_filters;
 	}
-	const bool stats = BloomStructuredLoggingEnabled(context_);
 	const auto &bindings = scanner.GetOutputBindings();
 	const auto table_index = bindings.empty() ? DConstants::INVALID_INDEX : bindings[0].table_index.index;
-	idx_t v = SampleChunks(*cdc, config_.intermediate_rate, expr_exec, *filters, stats ? &context_ : nullptr,
-	                       "transfer", table_index);
-	if (v == 0 && cdc->Count() > 0) {
-		// A 1% chunk sample can miss a rare survivor while selective BF filters are
-		// applied; a false 0 becomes EmptyResult downstream and wrongly empties the
-		// query. In-memory data is cheap to rescan — confirm the 0 exactly.
-		v = SampleChunks(*cdc, 1.0, expr_exec, *filters, stats ? &context_ : nullptr, "transfer_zero_confirm",
-		                 table_index);
-	}
-	return v;
+	auto cache = &samples_.GetCDCEntry(scanner.GetDataReference(), table_index);
+	return SampleCollection(context_, *cdc, config_, expr_exec, *filters, "transfer", table_index, cache);
 }
 
 } // namespace duckdb
