@@ -185,8 +185,9 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		return 0;
 	}
 	vector<LogicalType> types;
-	for (auto col : column_ids)
+	for (auto col : column_ids) {
 		types.push_back(cdc.Types()[col]);
+	}
 	DataChunk sample;
 	sample.Initialize(cdc.GetAllocator(), types);
 	const bool reused = cache && !cache->sample.empty() && cache->columns == column_ids;
@@ -277,8 +278,9 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		ChunkManagementState read_state;
 		read_state.properties = ColumnDataScanProperties::ALLOW_ZERO_COPY;
 		DataChunk input;
-		if (!direct)
+		if (!direct) {
 			input.Initialize(cdc.GetAllocator(), types);
+		}
 		// Append copies the selected values; unlike Slice, it does not retain this
 		// buffer.
 		SelectionVector sel(STANDARD_VECTOR_SIZE);
@@ -287,8 +289,9 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 			if (cursor == k) {
 				break;
 			}
-			if (!direct)
+			if (!direct) {
 				input.Reset();
+			}
 			read_state.handles.clear();
 			if (rows[cursor] >= base + segment->count) {
 				base += segment->count;
@@ -326,7 +329,7 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		D_ASSERT(cursor == k);
 		save_chunk();
 		if (cache) {
-			cache->sample = std::move(acquired_chunks);
+			cache->sample.swap(acquired_chunks);
 			cache->columns = column_ids;
 			cache->touched_chunks = touched;
 		}

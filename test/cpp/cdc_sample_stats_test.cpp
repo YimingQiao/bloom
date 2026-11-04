@@ -261,8 +261,8 @@ static void CheckDirectGatherValues(Connection &con) {
 				auto make_filter = [&](ColumnDataCollection &source) {
 					auto f = make_uniq<LogicalFilter>(
 					    BoundComparisonExpression::Create(ExpressionType::COMPARE_GREATERTHAN,
-						                                  make_uniq<BoundReferenceExpression>(source.Types()[col], col),
-						                                  make_uniq<BoundConstantExpression>(constants[col])));
+					                                      make_uniq<BoundReferenceExpression>(source.Types()[col], col),
+					                                      make_uniq<BoundConstantExpression>(constants[col])));
 					f->children.push_back(make_uniq<LogicalColumnDataGet>(TableIndex(7), source.Types(), source));
 					return f;
 				};
@@ -281,8 +281,8 @@ static string EstimateCacheLog(Connection &con, SamplingCardinalityEstimator &es
 	Logger::Flush(*con.context);
 	auto result =
 	    con.Query("SELECT ' sample_reused=' || info['sample_reused'] || ' gather_path=' || info['gather_path'] || "
-		          "' read_chunks=' || info['read_chunks'] FROM duckdb_logs_parsed('Bloom') "
-		          "WHERE event='cdc_sample' AND phase='transfer'");
+	              "' read_chunks=' || info['read_chunks'] FROM duckdb_logs_parsed('Bloom') "
+	              "WHERE event='cdc_sample' AND phase='transfer'");
 	result->ThrowIfError();
 	Check(result->RowCount() == 1, "missing cache diagnostic");
 	auto log = result->Fetch()->GetValue(0, 0).ToString();

@@ -1,6 +1,7 @@
 #include "predicate_transfer/transfer_plan/lineage_expression.hpp"
 
 #include "duckdb/common/assert.hpp"
+#include "duckdb/common/numeric_utils.hpp"
 #include "duckdb/common/unordered_map.hpp"
 
 #include <algorithm>
@@ -148,11 +149,11 @@ void LineageExpression::Simplify() {
 			continue;
 		}
 		auto candidate = *this;
-		candidate.atoms_.erase(candidate.atoms_.begin() + i);
+		candidate.atoms_.erase(candidate.atoms_.begin() + NumericCast<ptrdiff_t>(i));
 		candidate.IndexAtoms();
 		// Keep variable numbering while checking; Normalize renumbers afterward.
 		if (HasHomomorphism(*this, candidate, candidate.head_)) {
-			atoms_.erase(atoms_.begin() + i);
+			atoms_.erase(atoms_.begin() + NumericCast<ptrdiff_t>(i));
 			IndexAtoms();
 		}
 	}

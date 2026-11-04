@@ -87,13 +87,13 @@ static RPTSamplingMode ReadSampleMode(const Value &value) {
 static RPTInstantAccessMode ReadInstantAccess(const Value &value) {
 	return ReadChoice(value, "bloom_instant_access", "scattered", "block") == "scattered"
 	           ? RPTInstantAccessMode::SCATTERED
-			   : RPTInstantAccessMode::BLOCK;
+	           : RPTInstantAccessMode::BLOCK;
 }
 
 static RPTExcitationMode ReadExcitationMode(const Value &value) {
 	return ReadChoice(value, "bloom_excitation_mode", "table_size", "join_key_ndv") == "table_size"
 	           ? RPTExcitationMode::TABLE_SIZE
-			   : RPTExcitationMode::JOIN_KEY_NDV;
+	           : RPTExcitationMode::JOIN_KEY_NDV;
 }
 
 static optional_idx ReadRPTMemoryLimit(const Value &value) {

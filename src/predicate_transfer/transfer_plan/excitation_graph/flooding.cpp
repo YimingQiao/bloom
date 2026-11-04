@@ -324,8 +324,8 @@ void ExcitationGraphManager::StopForMemory(const char *phase, idx_t requested, i
 	}
 	// Release abandoned query-local state before asking the log storage for
 	// memory on the whole-query fallback path.
-	LogBloomMemoryStopped(context, phase, whole_query_fallback, requested, retained,
-	                      memory_budget_, materialized_source_count_);
+	LogBloomMemoryStopped(context, phase, whole_query_fallback, requested, retained, memory_budget_,
+	                      materialized_source_count_);
 }
 
 //===--------------------------------------------------------------------===//
@@ -625,8 +625,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	InitializeMemoryBudget();
 	auto estimated_sample_memory = EstimateInitialSampleMemory();
 	if (bloom_structured_log) {
-		LogBloomStarted(context,
-		                config.sampling.mode == RPTSamplingMode::PREPARED ? "prepared" : "instant",
+		LogBloomStarted(context, config.sampling.mode == RPTSamplingMode::PREPARED ? "prepared" : "instant",
 		                config.excitation_mode == RPTExcitationMode::TABLE_SIZE ? "table_size" : "join_key_ndv",
 		                config.sampling.target_rows, estimated_sample_memory, memory_budget_);
 	}
@@ -747,10 +746,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 					auto *destination_op = table_operator_manager.GetTableOperator(edge->destination);
 					auto destination_name =
 					    destination_op ? TableOperatorManager::GetTableName(*destination_op) : string("?");
-					LogBloomTransfer(context, excitation_round, step.id, table_id,
-					                 source_name, edge->destination, destination_name, 0,
-					                 destination_rows_before.at(edge->destination), 0, edge->source_columns.size(),
-					                 false, 0);
+					LogBloomTransfer(context, excitation_round, step.id, table_id, source_name, edge->destination,
+					                 destination_name, 0, destination_rows_before.at(edge->destination), 0,
+					                 edge->source_columns.size(), false, 0);
 					structured_transfer_count++;
 				}
 			}
@@ -871,9 +869,8 @@ void ExcitationGraphManager::ExecuteTransfer() {
 				auto *destination_op = table_operator_manager.GetTableOperator(edge->destination);
 				auto destination_name =
 				    destination_op ? TableOperatorManager::GetTableName(*destination_op) : string("?");
-				LogBloomTransfer(context, excitation_round, step.id, table_id, source_name,
-				                 edge->destination, destination_name, source_rows,
-				                 destination_rows_before.at(edge->destination),
+				LogBloomTransfer(context, excitation_round, step.id, table_id, source_name, edge->destination,
+				                 destination_name, source_rows, destination_rows_before.at(edge->destination),
 				                 static_cast<idx_t>(state_.Cardinality(edge->destination)), edge->source_columns.size(),
 				                 state_.IsActive(edge->destination), round_mat + round_bf + round_est);
 				structured_transfer_count++;
@@ -916,9 +913,9 @@ void ExcitationGraphManager::ExecuteTransfer() {
 		          << "ms total=" << (init_ms + mat_ms + bf_ms + est_ms + finalize_ms) << "ms" << '\n';
 	}
 	if (bloom_structured_log) {
-		LogBloomTransferCompleted(context, memory_stopped_, excitation_round,
-		                          structured_transfer_count, materialized_source_count_, RetainedMemoryUsage(),
-		                          memory_budget_, init_ms, mat_ms, bf_ms, est_ms, finalize_ms);
+		LogBloomTransferCompleted(context, memory_stopped_, excitation_round, structured_transfer_count,
+		                          materialized_source_count_, RetainedMemoryUsage(), memory_budget_, init_ms, mat_ms,
+		                          bf_ms, est_ms, finalize_ms);
 	}
 }
 
