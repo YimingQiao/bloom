@@ -51,9 +51,10 @@ and TPC-DS data generators:
 CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j"$(nproc)"
 ```
 
-Run a workload with Bloom and the baseline. The runners default to `instant`,
-matching the extension. Pass `--sampling-mode prepared` to use the sampling
-mode of the historical measurements:
+Run a workload with Bloom and the baseline. The benchmark runners default to
+`prepared` for comparison with the historical measurements, while the extension
+itself defaults to `instant`. Pass `--sampling-mode instant` to benchmark the
+extension's default sampling mode:
 
 ```bash
 python3 scripts/run_benchmark_suite.py --workload imdb --threads 1

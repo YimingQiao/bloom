@@ -173,8 +173,8 @@ def parse_args():
     parser.add_argument(
         "--sampling-mode",
         choices=("prepared", "instant"),
-        default="instant",
-        help="Sampling path to benchmark (default: instant)",
+        default="prepared",
+        help="Sampling path to benchmark (default: prepared)",
     )
     parser.add_argument("--sample-seed", type=int, default=2, help="Sampling seed (default: 2)")
     parser.add_argument("--out", type=Path)
