@@ -4,24 +4,23 @@
 
 ## Configuration
 
-Bloom works without tuning. Prepared sampling is the default: a 10K-row
-reservoir per table is persisted and reused across queries. Set
-`bloom_sample_mode` to `instant` to use a fresh, query-local sample from native
-DuckDB storage or one or more Parquet files without using a prepared sample.
+Bloom works without tuning. Instant sampling is the default: it acquires a
+query-local sample from native DuckDB storage or one or more Parquet files.
+Set `bloom_sample_mode` to `prepared` to persist and reuse a sample across queries.
 
 The main settings are:
 
 ```sql
 SET enable_bloom = false;
-SET bloom_memory_limit = '512MB';
+SET memory_limit = '512MB';
 SET bloom_sample_cache_dir = '/path/to/cache';
 SET bloom_sample_mode = 'instant';
 SET bloom_excitation_mode = 'join_key_ndv';
 ```
 
 `enable_bloom` defaults to `true`; disable it for troubleshooting or an A/B
-comparison. `bloom_memory_limit` defaults to `auto`, which admits optimizer-time
-Bloom work against at most 25% of currently available DuckDB operator memory.
+comparison. Bloom uses currently available DuckDB operator memory, governed by
+DuckDB's `memory_limit`, without a separate Bloom cap.
 Each phase must also obtain its complete share from DuckDB's temporary-memory
 manager. Bloom's large sample/materialized collections and filter payloads use
 DuckDB's non-spill `BufferAllocator`, so they count against the database-wide
@@ -30,15 +29,14 @@ states are included in admission estimates. If admission fails
 before the first materialization, Bloom keeps DuckDB's original plan; after
 transfer has begun it stops adding new transfer rounds. The reservation for
 tables and filters retained by the rewritten plan remains active until those
-execution objects are destroyed. Set the limit to `0B` to force the fallback
-path. Allocation failures that occur after admission are reported to the query;
-they are not silently converted into a fallback.
+execution objects are destroyed. Allocation failures that occur after admission
+are reported to the query; they are not silently converted into a fallback.
 
 The memory budget is admission control, not a guarantee that a query will fit.
 Concurrent queries share DuckDB's memory limit, and scans, joins, and variable
 length values can need more memory after admission. Under tight limits, reduce
 concurrent queries or threads, disable the optional sample memory cache, or use
-`SET bloom_memory_limit = '0B'` to run the original plan. Native execution can
+`SET enable_bloom = false` to run the original plan. Native execution can
 also run out of memory. Bloom's tests check cleanup and subsequent execution
 after allocation failures, including concurrent queries.
 
@@ -59,7 +57,7 @@ set it to `false` on especially tight memory limits while retaining disk caching
 This build uses sample cache format v6, which distinguishes generated-column
 layouts. Samples from earlier formats are rebuilt on first use.
 
-`bloom_sample_mode` accepts `prepared` (the default) and `instant`.
+`bloom_sample_mode` accepts `instant` (the default) and `prepared`.
 
 Prepared sampling reads table data to build its reservoirs on first use. That
 cost can exceed the query's native execution time; the benchmark's warmup
@@ -135,8 +133,7 @@ CALL enable_logging(
 
 Logging has non-zero cost when enabled. Prefer memory storage for temporary
 diagnosis, use file storage only when persistence is required, and keep logging
-disabled for performance benchmarks. DuckDB's logging storage is separate from
-`bloom_memory_limit`, so clear or rotate it as needed.
+disabled for performance benchmarks. Clear or rotate stored logs as needed.
 
 `SET bloom_log_transfer_steps = true` remains available as a separate option for
 verbose, human-readable diagnostics on stderr.

@@ -18,7 +18,7 @@ SELECT current_setting('bloom_sample_mode'),
        current_setting('bloom_instant_rows_per_access'),
        current_setting('bloom_sample_seed');
 ----
-prepared	scattered	table_size	false	256	32	2
+instant	scattered	table_size	false	256	32	2
 
 query III
 SELECT current_setting('bloom_sample_size'),
@@ -53,21 +53,6 @@ statement error
 SET bloom_excitation_mode = 'unknown';
 ----
 bloom_excitation_mode must be 'table_size' or 'join_key_ndv'
-
-statement error
-SET bloom_memory_limit = 'unknown';
-----
-Memory must have a number (e.g. 1GB)
-
-statement error
-SET bloom_memory_limit = '';
-----
-bloom_memory_limit must be 'auto' or a non-negative memory size
-
-statement error
-SET bloom_memory_limit = '-1GB';
-----
-bloom_memory_limit must be 'auto' or a non-negative memory size
 
 statement ok
 SET bloom_excitation_mode = 'join_key_ndv';

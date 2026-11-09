@@ -1,7 +1,6 @@
 #pragma once
 
 #include "duckdb/common/common.hpp"
-#include "duckdb/common/optional_idx.hpp"
 
 #include <string>
 
@@ -27,9 +26,8 @@ struct RPTSamplingConfig {
 	//! Target rows for prepared, block, and Parquet samples. Scattered instant
 	//! sampling uses its explicit access-point shape below.
 	idx_t target_rows = 10000;
-	//! Prepared samples are the stable default. Instant sampling is explicitly
-	//! selected when sample maintenance is undesirable.
-	RPTSamplingMode mode = RPTSamplingMode::PREPARED;
+	//! Query-local sampling is the default; prepared samples are opt-in.
+	RPTSamplingMode mode = RPTSamplingMode::INSTANT;
 
 	//! Prepared-sample persistence. "auto" stores the cache beside the database.
 	std::string prepared_cache_dir = "auto";
@@ -56,10 +54,6 @@ struct RPTSamplingConfig {
 
 class RPTOptimizerConfig {
 public:
-	//! Query-local memory budget for optimizer-time Bloom work. Invalid means
-	//! "auto": use a conservative fraction of currently available DuckDB
-	//! operator memory. Bloom collections stay in memory and never spill.
-	optional_idx memory_limit;
 	bool late_materialize_flag = false;
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
 	//! These tables benefit from early termination; Bloom materialisation would defeat it.

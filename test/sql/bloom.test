@@ -24,11 +24,6 @@ SELECT current_setting('bloom_sample_cache_dir');
 ----
 auto
 
-query T
-SELECT current_setting('bloom_memory_limit');
-----
-auto
-
 query III
 SELECT current_setting('bloom_sample_size'),
        current_setting('bloom_sample_memory_cache'),
@@ -205,11 +200,9 @@ WHERE r.keep;
 ----
 analyzed_plan	<REGEX>:.*Table Scan.*
 
-# A zero Bloom budget must take the whole-query fallback before sampling or the
-# first materialization. Keep this query non-volatile so it reaches the memory
-# admission path rather than the volatile-expression guard below.
+# A denied temporary-memory reservation keeps DuckDB's original plan.
 statement ok
-SET bloom_memory_limit = '0B';
+SET debug_force_external = true;
 
 query II
 SELECT count(*), sum(l.id)
@@ -220,7 +213,7 @@ WHERE r.keep;
 100	495000
 
 statement ok
-SET bloom_memory_limit = 'auto';
+SET debug_force_external = false;
 
 # Prepared samples and row-id bitmaps must not inspect uncommitted table state:
 # cached samples can omit local values, and local row IDs occupy a high,

@@ -112,9 +112,10 @@ WHERE tag = 'ALLOCATOR';
 statement ok
 SET enable_bloom = true;
 
-# A non-zero budget below the sample estimate falls back before sampling.
+# At 8 MB even the native plan runs out of memory. Verify propagation and
+# allocator cleanup after Bloom falls back.
 statement ok
-SET bloom_memory_limit = '64KB';
+SET memory_limit = '8MB';
 
 statement ok
 PREPARE rpt_low_sample_fallback AS
@@ -124,10 +125,10 @@ JOIN rpt_low_wide1 w1 USING (id)
 JOIN rpt_low_wide2 w2 USING (id)
 WHERE w1.keep AND w2.keep;
 
-query III
+statement error
 EXECUTE rpt_low_sample_fallback;
 ----
-800	409600	409600
+Out of Memory Error
 
 query II
 SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
@@ -150,10 +151,10 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# Sampling fits, but the first wide source does not. This is a distinct
-# pre-materialization fallback and must still match the native plan footprint.
+# At 16 MB the query still runs out of memory; all transfer and executor
+# allocations must be released before subsequent statements.
 statement ok
-SET bloom_memory_limit = '13MB';
+SET memory_limit = '16MB';
 
 statement ok
 PREPARE rpt_low_materialize_fallback AS
@@ -163,10 +164,10 @@ JOIN rpt_low_wide1 w1 USING (id)
 JOIN rpt_low_wide2 w2 USING (id)
 WHERE w1.keep AND w2.keep;
 
-query III
+statement error
 EXECUTE rpt_low_materialize_fallback;
 ----
-800	409600	409600
+Out of Memory Error
 
 query II
 SELECT (abs(memory.memory_usage_bytes - baseline.bytes - native.bytes) <= 65536)::INTEGER,
@@ -189,13 +190,13 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# DuckDB can independently deny Bloom's temporary-memory reservation even when
-# the explicit Bloom limit is generous. That denial is also a native fallback.
+# Force DuckDB to deny the temporary-memory reservation, independently of
+# the global budget. Bloom must fall back to the native plan.
 statement ok
 SET debug_force_external = true;
 
 statement ok
-SET bloom_memory_limit = '32MB';
+SET memory_limit = '64MB';
 
 statement ok
 PREPARE rpt_low_reservation_fallback AS
@@ -238,7 +239,7 @@ SET debug_force_external = false;
 # Memory budgets and repeated execution cleanup
 # ============================================================================
 
-# A generous Bloom budget permits the complete rewrite. Its transfer state
+# A generous DuckDB budget permits the complete rewrite. Its transfer state
 # must be released at query completion even while the prepared statement exists.
 statement ok
 CALL enable_logging('Bloom', storage = 'memory');
@@ -247,7 +248,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-SET bloom_memory_limit = '32MB';
+SET memory_limit = '64MB';
 
 statement ok
 PREPARE rpt_low_full AS
@@ -302,7 +303,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-SET bloom_memory_limit = '14.4MB';
+SET memory_limit = '18MB';
 
 statement ok
 PREPARE rpt_low_partial AS
@@ -379,13 +380,13 @@ WHERE tag = 'ALLOCATOR';
 1	1
 
 # ============================================================================
-# Explicit and automatic fallback across execution widths
+# Reservation denial and global memory limits across execution widths
 # ============================================================================
 
-# Before any source is completed, no budget means a whole-query fallback.
+# Before any source is completed, reservation denial means a whole-query fallback.
 # Its prepared plan must retain exactly the native footprint.
 statement ok
-SET bloom_memory_limit = '0B';
+SET debug_force_external = true;
 
 statement ok
 SET threads = 1;
@@ -498,17 +499,17 @@ WHERE tag = 'ALLOCATOR';
 ----
 1	1
 
-# In automatic mode Bloom receives only a fraction of DuckDB's currently
-# available operator memory. A wide, parallel transfer must be rejected by
-# admission while the original query still runs within the global limit.
+statement ok
+SET debug_force_external = false;
+
+# Bloom uses DuckDB's currently available operator memory and still
+# checks phase reservations. A wide, parallel query must execute correctly
+# under the global limit and release its transfer allocations afterwards.
 statement ok
 SET memory_limit = '32MB';
 
 statement ok
 SET threads = 8;
-
-statement ok
-SET bloom_memory_limit = 'auto';
 
 statement ok
 PREPARE rpt_low_auto_fallback AS
@@ -573,7 +574,7 @@ statement ok con1
 SET bloom_sample_memory_cache = false;
 
 statement ok con1
-SET bloom_memory_limit = '48MB';
+SET memory_limit = '64MB';
 
 statement ok con1
 PREPARE rpt_low_pressure_holder AS
@@ -669,9 +670,6 @@ statement ok con2
 SET bloom_sample_memory_cache = false;
 
 statement ok con2
-SET bloom_memory_limit = 'auto';
-
-statement ok con2
 PREPARE rpt_low_contended_auto AS
 SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
 FROM rpt_low_hub h
@@ -733,9 +731,6 @@ SET memory_limit = '32MB';
 statement ok
 SET threads = 1;
 
-statement ok
-SET bloom_memory_limit = '16MB';
-
 statement error
 SELECT count(*), sum(length(w1.payload))
 FROM rpt_low_hub h
@@ -759,7 +754,7 @@ WHERE tag = 'ALLOCATOR';
 
 # Recovery must include Bloom itself, not only trivial native statements.
 statement ok
-SET bloom_memory_limit = '14.4MB';
+SET memory_limit = '20MB';
 
 query III
 SELECT count(*), sum(length(w1.payload)), sum(length(w2.payload))
@@ -783,7 +778,7 @@ statement ok
 SET threads = 4;
 
 statement ok
-SET bloom_memory_limit = '28MB';
+SET memory_limit = '32MB';
 
 statement error
 SELECT count(*), sum(length(w1.payload))
@@ -809,7 +804,7 @@ WHERE tag = 'ALLOCATOR';
 1	1
 
 statement ok
-SET bloom_memory_limit = '0B';
+SET debug_force_external = true;
 
 query II
 SELECT count(*), sum(length(w1.payload))

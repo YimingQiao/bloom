@@ -134,7 +134,7 @@ statement ok
 CALL truncate_duckdb_logs();
 
 statement ok
-SET bloom_memory_limit = '0B';
+SET debug_force_external = true;
 
 query I
 SELECT count(*)
@@ -151,12 +151,12 @@ SELECT event,
        event_sequence,
        (requested_bytes > 0)::INTEGER,
        retained_bytes,
-       budget_bytes,
+       (budget_bytes > 0)::INTEGER,
        completed_sources
 FROM duckdb_logs_parsed('Bloom')
 WHERE event = 'memory_stop';
 ----
-memory_stop	sample_admission	whole_query_fallback	2	1	0	0	0
+memory_stop	sample_admission	whole_query_fallback	2	1	0	1	0
 
 query I
 SELECT count(*)
@@ -174,7 +174,7 @@ statement ok
 CALL disable_logging();
 
 statement ok
-SET bloom_memory_limit = 'auto';
+SET debug_force_external = false;
 
 query I
 SELECT count(*)

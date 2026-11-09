@@ -96,18 +96,6 @@ static RPTExcitationMode ReadExcitationMode(const Value &value) {
 	           : RPTExcitationMode::JOIN_KEY_NDV;
 }
 
-static optional_idx ReadRPTMemoryLimit(const Value &value) {
-	auto limit = StringUtil::Lower(value.GetValue<string>());
-	StringUtil::Trim(limit);
-	if (limit == "auto") {
-		return optional_idx();
-	}
-	if (limit.empty() || limit.front() == '-' || limit == "none" || limit == "null") {
-		throw InvalidInputException("bloom_memory_limit must be 'auto' or a non-negative memory size");
-	}
-	return optional_idx(DBConfig::ParseMemoryLimit(limit));
-}
-
 static void ValidateSampleMode(ClientContext &, SetScope, Value &value) {
 	ReadSampleMode(value);
 }
@@ -118,10 +106,6 @@ static void ValidateInstantAccess(ClientContext &, SetScope, Value &value) {
 
 static void ValidateExcitationMode(ClientContext &, SetScope, Value &value) {
 	ReadExcitationMode(value);
-}
-
-static void ValidateRPTMemoryLimit(ClientContext &, SetScope, Value &value) {
-	ReadRPTMemoryLimit(value);
 }
 
 static void ValidateUnsignedRange(Value &value, const char *setting, idx_t maximum) {
@@ -233,9 +217,6 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 	}
 
 	RPTOptimizerConfig config;
-	if (input.context.TryGetCurrentSetting("bloom_memory_limit", setting)) {
-		config.memory_limit = ReadRPTMemoryLimit(setting);
-	}
 	if (input.context.TryGetCurrentSetting("bloom_sample_cache_dir", setting)) {
 		config.sampling.prepared_cache_dir = setting.ToString();
 	}
@@ -310,10 +291,6 @@ static void LoadInternal(ExtensionLoader &loader) {
 
 	config.AddExtensionOption("enable_bloom", "Enable the Bloom optimizer", LogicalType::BOOLEAN,
 	                          Value::BOOLEAN(EnvFlagDefault("BLOOM_ENABLE", true)));
-	config.AddExtensionOption(
-	    "bloom_memory_limit",
-	    "Maximum in-memory budget for optimizer-time Bloom work ('auto' uses 25% of available operator memory)",
-	    LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_MEMORY_LIMIT", "auto")), ValidateRPTMemoryLimit);
 	config.AddExtensionOption("bloom_sample_cache_dir",
 	                          "Prepared-sample cache directory ('auto' stores it beside the database)",
 	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_CACHE_DIR", "auto")));
@@ -324,7 +301,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "bloom_in_memory_sample_size", "Maximum uniformly sampled rows per in-memory CDC", LogicalType::UBIGINT,
 	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_IN_MEMORY_SAMPLE_SIZE", 4096)), ValidateInMemorySampleSize);
 	config.AddExtensionOption("bloom_sample_mode", "Base-table sampling mode: 'prepared' or 'instant'",
-	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_MODE", "prepared")),
+	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_MODE", "instant")),
 	                          ValidateSampleMode);
 	config.AddExtensionOption(
 	    "bloom_instant_access",

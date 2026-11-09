@@ -55,9 +55,7 @@ void ExcitationGraphManager::InitializeMemoryBudget() {
 	auto &buffer_manager = BufferManager::GetBufferManager(context);
 	auto limit = buffer_manager.GetOperatorMemoryLimit();
 	auto used = buffer_manager.GetUsedMemory();
-	auto available = used < limit ? limit - used : 0;
-	memory_budget_ =
-	    config.memory_limit.IsValid() ? MinValue(config.memory_limit.GetIndex(), available) : available / 4;
+	memory_budget_ = used < limit ? limit - used : 0;
 	if (memory_budget_ == 0) {
 		return;
 	}

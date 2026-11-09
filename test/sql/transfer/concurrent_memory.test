@@ -36,7 +36,7 @@ statement ok
 SET bloom_sample_size = 1000;
 
 statement ok
-SET bloom_memory_limit = 'auto';
+SET bloom_sample_mode = 'prepared';
 
 loop repeat 0 5
 
@@ -79,9 +79,6 @@ SET bloom_instant_access_points = 4;
 statement ok
 SET bloom_instant_rows_per_access = 64;
 
-statement ok
-SET bloom_memory_limit = 'auto';
-
 loop repeat 0 10
 
 # At 32 MB even native concurrent joins may exhaust memory. A query may
@@ -114,7 +111,7 @@ SELECT 42;
 
 # Once contention ends, the same connection/database can execute the query.
 statement ok
-SET bloom_memory_limit = '0B';
+SET memory_limit = '128MB';
 
 query IIII
 SELECT count(*), sum(h.id), sum(length(l.payload)), sum(length(r.payload))

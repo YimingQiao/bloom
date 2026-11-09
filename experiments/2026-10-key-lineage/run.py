@@ -24,7 +24,7 @@ VARIANTS = ("duckdb", "bloom")
 
 def settings(v, log=False):
     return (
-        "SET threads=1; SET memory_limit='16GB'; SET bloom_memory_limit='4GB';\n"
+        "SET threads=1; SET memory_limit='16GB';\n"
         "SET bloom_sample_mode='instant'; SET bloom_sample_seed=2;\n"
         f"SET enable_bloom={'false' if v=='duckdb' else 'true'}; "
         f"SET bloom_log_transfer_steps={'true' if log else 'false'};\n"
