@@ -11,7 +11,7 @@ See the [current measurements and methodology](duckdb-2.0/README.md) and
 
 The results below were measured on the previous DuckDB development commit
 `21aca042`; they are historical results, not DuckDB 2.0 measurements.
-They compare Bloom's default prepared sampling with the DuckDB
+They compare Bloom's then-default prepared sampling with the DuckDB
 baseline using one thread. The database is brought into the OS page cache
 before each benchmark process starts. Each query then gets one same-process
 warmup and five timed runs; CEB Stack uses one timed run because of its scale.
@@ -51,7 +51,9 @@ and TPC-DS data generators:
 CORE_EXTENSIONS='tpch;tpcds' BUILD_BENCHMARK=1 make release -j"$(nproc)"
 ```
 
-Run a workload with Bloom and the baseline:
+Run a workload with Bloom and the baseline. The runners default to `instant`,
+matching the extension. Pass `--sampling-mode prepared` to use the sampling
+mode of the historical measurements:
 
 ```bash
 python3 scripts/run_benchmark_suite.py --workload imdb --threads 1

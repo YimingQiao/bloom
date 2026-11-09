@@ -35,8 +35,8 @@ def parse_args():
     parser.add_argument(
         "--sampling-mode",
         choices=("prepared", "instant"),
-        default="prepared",
-        help="Sampling path for Bloom in a baseline comparison (default: prepared)",
+        default="instant",
+        help="Sampling path for Bloom in a baseline comparison (default: instant)",
     )
     parser.add_argument("--sample-seed", type=int, default=2, help="Sampling seed (default: 2)")
     parser.add_argument(

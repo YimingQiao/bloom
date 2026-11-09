@@ -25,9 +25,10 @@ Each phase must also obtain its complete share from DuckDB's temporary-memory
 manager. Bloom's large sample/materialized collections and filter payloads use
 DuckDB's non-spill `BufferAllocator`, so they count against the database-wide
 memory limit without becoming temporary-storage blocks; large task-local build
-states are included in admission estimates. If admission fails
-before the first materialization, Bloom keeps DuckDB's original plan; after
-transfer has begun it stops adding new transfer rounds. The reservation for
+states are included in admission estimates. If admission fails before any source
+has completed processing, Bloom releases its query-local state and keeps DuckDB's
+original plan. Otherwise, it stops adding transfer rounds and reuses the
+completed materializations and filters in subsequent execution. The reservation for
 tables and filters retained by the rewritten plan remains active until those
 execution objects are destroyed. Allocation failures that occur after admission
 are reported to the query; they are not silently converted into a fallback.
@@ -45,7 +46,7 @@ with uncommitted changes bypass Bloom and remain on DuckDB's native path. This
 prevents optimizer-time execution from evaluating side effects or mixing
 prepared samples with transaction-local state.
 
-`bloom_sample_cache_dir` defaults to `auto`, which stores samples
+In prepared mode, `bloom_sample_cache_dir` defaults to `auto`, which stores samples
 under `<database>.bloom_samples/`. Set another directory to share a cache, or `''`
 to disable disk caching. Prepared samples are keyed by `bloom_sample_seed`, whose
 cross-workload-validated default is `2`; changing the seed creates an independent

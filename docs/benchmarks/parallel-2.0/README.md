@@ -53,7 +53,8 @@ The initial small regressions against old Bloom on 25b and 27c narrowed to
 - Official Linux x86-64 DuckDB 2.0.0 CLI, commit `d54cbbe3df`.
 - Intel Xeon Platinum 8474C host; no CPU affinity set for the reported runs.
 - Compressed IMDB and TPC-H SF10 databases, opened read-only.
-- Default prepared sampling and `preserve_insertion_order=true`; disk sample
+- Prepared sampling (the default at measurement time) and
+  `preserve_insertion_order=true`; disk sample
   cache reused. Logging disabled during measurement.
 - Full JOB: one discarded warmup and three timed queries per process,
   rotating native/old/new order between queries. Reported medians use all

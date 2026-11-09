@@ -12,7 +12,7 @@ configuration, plus per-query medians and speedups: 113 JOB queries and
   `d54cbbe3df17e8e5ce68312f483b4155836112aa`.
 - One thread for both configurations, on the same machine and database files.
 - JOB: compressed IMDB, 2.05 GB. TPC-H: scale factor 10, 2.68 GB.
-- Bloom defaults: prepared sampling, 10,000 rows per table, seed 2;
+- Bloom defaults at the measured commit: prepared sampling, 10,000 rows per table, seed 2;
   experimental late materialization disabled.
 - The baseline disables Bloom. DuckDB's native join filters remain enabled
   for both configurations.
@@ -63,11 +63,11 @@ Run the same settings against your database files:
 ```bash
 python3 scripts/run_benchmark_suite.py \
   --workload imdb --db /path/to/imdb_compressed.duckdb \
-  --threads 1 --timed-runs 5 --sample-seed 2
+  --threads 1 --timed-runs 5 --sample-seed 2 --sampling-mode prepared
 
 python3 scripts/run_benchmark_suite.py \
   --workload tpch_sf10 --db /path/to/tpch_sf10.duckdb \
-  --threads 1 --timed-runs 5 --sample-seed 2
+  --threads 1 --timed-runs 5 --sample-seed 2 --sampling-mode prepared
 ```
 
 The suite runs Bloom and the baseline, verifies that both produced the same

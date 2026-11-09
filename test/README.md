@@ -62,3 +62,9 @@ Bloom filters retain separate opaque acceptance predicates, since false positive
 do not certify exact source membership. The implementation retains the existing
 activation, estimation, and memory policies, so it does not claim exact full
 reduction under estimation errors or approximate filters.
+
+The transfer suite above also tests memory handling using DuckDB's
+`memory_limit` directly. These tests cover
+whole-query fallback, retaining partial transfers, OOM propagation and recovery,
+prepared-statement cleanup, and concurrent queries. `debug_force_external` is
+used separately to exercise reservation denial deterministically.
