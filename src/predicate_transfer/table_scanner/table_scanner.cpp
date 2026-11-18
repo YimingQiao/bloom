@@ -23,8 +23,8 @@ void TableScanner::SetRequiredColumns(const column_binding_set_t &bindings) {
 	materialization_.SetRequiredColumns(bindings);
 }
 
-void TableScanner::Materialize() {
-	materialization_.Materialize(filters_);
+void TableScanner::Materialize(optional_idx estimated_rows) {
+	materialization_.Materialize(filters_, estimated_rows);
 }
 
 void TableScanner::AddFilter(ColumnBinding binding, shared_ptr<RPTFilter> filter, size_t identity_hash) {

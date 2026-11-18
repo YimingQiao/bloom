@@ -31,7 +31,7 @@ public:
 	             bool enable_late_materialization = false);
 
 	void SetRequiredColumns(const column_binding_set_t &bindings);
-	void Materialize();
+	void Materialize(optional_idx estimated_rows = optional_idx());
 
 	void AddFilter(ColumnBinding binding, shared_ptr<RPTFilter> filter, size_t identity_hash = 0);
 	void AddFilter(const vector<ColumnBinding> &bindings, shared_ptr<RPTFilter> filter, size_t identity_hash = 0);

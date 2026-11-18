@@ -1,0 +1,105 @@
+# name: test/sql/transfer/art_index.test
+# description: exact transfer keys can drive ART Fetch without losing predicates or transaction-local rows
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET enable_bloom=false;
+
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE art_s AS SELECT i::INTEGER k,i<32 AS keep FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE art_r AS SELECT i::INTEGER k,(i%1000)::INTEGER bridge,i::BIGINT payload FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE art_t AS SELECT i::INTEGER bridge FROM range(1000) t(i);
+
+statement ok
+CREATE INDEX art_r_k ON art_r(k);
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET bloom_sample_mode='instant';
+
+statement ok
+SET bloom_sample_size=20000;
+
+statement ok
+SET enable_bloom=true;
+
+query II
+SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k) JOIN art_t t USING(bridge)
+WHERE s.keep AND r.payload%2=0;
+----
+16	240
+
+# Candidate Fetch must preserve both a pushed local predicate and a residual.
+query II
+SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k) JOIN art_t t USING(bridge)
+WHERE s.keep AND r.payload<20 AND r.payload%2=0;
+----
+10	90
+
+statement ok
+BEGIN;
+
+statement ok
+DELETE FROM art_r WHERE k=0;
+
+statement ok
+UPDATE art_r SET k=10002 WHERE k=2;
+
+statement ok
+INSERT INTO art_r VALUES (8,8,100008),(NULL,8,100008);
+
+query II
+SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k) JOIN art_t t USING(bridge)
+WHERE s.keep AND r.payload%2=0;
+----
+15	100246
+
+statement ok
+ROLLBACK;
+
+statement ok
+SET threads=4;
+
+query II
+SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k) JOIN art_t t USING(bridge)
+WHERE s.keep AND r.payload%2=0;
+----
+16	240
+
+statement ok
+SET bloom_late_materialize=false;
+
+query II
+SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k) JOIN art_t t USING(bridge)
+WHERE s.keep AND r.payload%2=0;
+----
+16	240
+
+# Repeated prepared execution must not retain stale transfer keys.
+statement ok
+PREPARE art_q AS SELECT count(*),sum(r.payload) FROM art_s s JOIN art_r r USING(k)
+JOIN art_t t USING(bridge) WHERE s.keep AND r.payload%2=0;
+
+query II
+EXECUTE art_q;
+----
+16	240
+
+statement ok
+UPDATE art_s SET keep=(k<16);
+
+query II
+EXECUTE art_q;
+----
+8	56

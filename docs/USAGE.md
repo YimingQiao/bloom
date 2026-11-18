@@ -2,6 +2,28 @@
 
 [Back to Bloom](../README.md)
 
+## Index access during transfer
+
+Bloom can materialize a native DuckDB table through its ART index when a received
+PrefixRangeFilter contains fewer than 2,048 distinct exact keys and SSPT's current
+estimate is fewer than 2,048 output rows. Both limits are strict. This changes the
+access path, not SSPT's table-selection order.
+
+The path currently supports integral keys and a matching single-column ART index.
+Approximate filters, composite/expression indexes, and missing output estimates
+retain the normal scan path. Exact keys are enumerated from the PrefixRangeFilter;
+an approximate Bloom filter cannot supply them.
+
+Native ART lookup produces a contiguous row-ID array, which is sorted and
+deduplicated before native Fetch reads the required columns. All query predicates
+and received filters are still evaluated. Index deltas, visibility, and local
+storage use DuckDB's native mechanisms. The output threshold is an estimate, not
+a runtime cap: an underestimated result can make this path expensive, and there
+is no match-count fallback to a full scan.
+
+With `bloom_log_transfer_steps=true`, `BloomIndexSelect` records the chosen table
+and output estimate; `BloomIndexScan` records exact key and candidate row counts.
+
 ## Filter profiling
 
 `SET bloom_filter_profiling=true` explicitly enables query-local filter profiling.

@@ -233,7 +233,11 @@ void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 		}
 	}
 
-	executor_.EnsureMaterialized(*op, required);
+	optional_idx estimated_rows;
+	if (state_.HasCardinality(source_table_id)) {
+		estimated_rows = static_cast<idx_t>(state_.Cardinality(source_table_id));
+	}
+	executor_.EnsureMaterialized(*op, required, estimated_rows);
 	estimator_->Forget(*op);
 }
 

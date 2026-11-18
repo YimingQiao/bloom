@@ -1,6 +1,7 @@
 #include "predicate_transfer/table_scanner/materialization.hpp"
 #include "predicate_transfer/rpt_result_collector.hpp"
 #include "predicate_transfer/table_scanner/filter_set.hpp"
+#include "predicate_transfer/table_scanner/index_scan.hpp"
 
 #include "duckdb/catalog/catalog_entry/table_catalog_entry.hpp"
 #include "duckdb/common/types/selection_vector.hpp"
@@ -394,7 +395,7 @@ static void AddMaterializationRangePruning(LogicalOperator &op) {
 	}
 }
 
-void TableMaterialization::Materialize(ScannerFilterSet &filters) {
+void TableMaterialization::Materialize(ScannerFilterSet &filters, optional_idx estimated_rows) {
 	auto total_start = MaterializeClock::now();
 	auto log_timing = LogEnabled();
 	// Already-materialized CHUNK_GET leaves are set up in the constructor;
@@ -415,6 +416,7 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	// table_index matches a filter binding. Removes pushed entries from
 	// the filter set; remaining entries stay and will be applied in-memory by
 	// Scan() / Compact() after execution.
+	TryInstallRPTIndexScan(context_, *plan_copy, filters.Entries(), estimated_rows);
 	filters.Pushdown(*plan_copy);
 	auto inject_end = MaterializeClock::now();
 

@@ -176,7 +176,8 @@ bool TransferExecutor::IsMaterialized(LogicalOperator &op) const {
 	return s && s->IsMaterialized();
 }
 
-TableScanner *TransferExecutor::EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required) {
+TableScanner *TransferExecutor::EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required,
+                                                   optional_idx estimated_rows) {
 	auto *scanner = Register(op);
 	if (scanner->IsMaterialized()) {
 		return scanner;
@@ -184,7 +185,7 @@ TableScanner *TransferExecutor::EnsureMaterialized(LogicalOperator &op, const co
 	if (!required.empty()) {
 		scanner->SetRequiredColumns(required);
 	}
-	scanner->Materialize();
+	scanner->Materialize(estimated_rows);
 	return scanner;
 }
 

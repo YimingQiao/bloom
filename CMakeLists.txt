@@ -36,6 +36,7 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/rpt_result_collector.cpp
     src/predicate_transfer/table_operator_manager.cpp
     src/predicate_transfer/table_scanner/filter_set.cpp
+    src/predicate_transfer/table_scanner/index_scan.cpp
     src/predicate_transfer/table_scanner/materialize.cpp
     src/predicate_transfer/table_scanner/table_scanner.cpp
     src/predicate_transfer/transfer_plan/base_graph_manager.cpp

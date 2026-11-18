@@ -33,7 +33,8 @@ public:
 	//! Register + materialize, pruning to `required`. Idempotent. Callers
 	//! must attach cascade filters via AttachFilterToScanner *before*
 	//! calling this so they can be pushed into the underlying Get.
-	TableScanner *EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required);
+	TableScanner *EnsureMaterialized(LogicalOperator &op, const column_binding_set_t &required,
+	                                 optional_idx estimated_rows = optional_idx());
 
 	//! Registered AND materialized. Use this over Has() when the caller
 	//! needs actual in-memory data.

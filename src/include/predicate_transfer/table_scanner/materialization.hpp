@@ -28,7 +28,7 @@ public:
 	                     bool enable_late_materialization);
 
 	void SetRequiredColumns(const column_binding_set_t &bindings);
-	void Materialize(ScannerFilterSet &filters);
+	void Materialize(ScannerFilterSet &filters, optional_idx estimated_rows = optional_idx());
 
 	void InitScanChunk(DataChunk &chunk) const;
 	bool Scan(DataChunk &chunk);
