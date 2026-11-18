@@ -39,7 +39,12 @@ public:
 	idx_t ActiveTableCount() const {
 		return active_tables_.size();
 	}
-	idx_t PopSmallestActiveTable();
+	void SetFilterTime(idx_t table_id, double milliseconds) {
+		filter_times_ms_[table_id] = milliseconds;
+	}
+	double FilterTime(idx_t table_id) const;
+	double SchedulingScore(idx_t table_id, double rows_per_ms) const;
+	idx_t PopSmallestActiveTable(double rows_per_ms = 0);
 
 	void AddDependency(idx_t table_id, idx_t source_table_id);
 	const vector<idx_t> &Dependencies(idx_t table_id) const;
@@ -61,6 +66,7 @@ public:
 private:
 	unordered_map<idx_t, double> cardinalities_;
 	unordered_map<idx_t, double> baselines_;
+	unordered_map<idx_t, double> filter_times_ms_;
 	LineageTracker lineage_;
 	unordered_set<idx_t> active_tables_;
 	unordered_map<idx_t, vector<idx_t>> dependencies_;

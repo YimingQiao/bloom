@@ -178,7 +178,7 @@ static void GatherDirect(ColumnDataCollectionSegment &segment, idx_t chunk_index
 static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> &column_ids, idx_t target_rows,
                         idx_t seed, ExpressionExecutor *expr_exec, const vector<ScannerFilterSet::Entry> &filters,
                         ClientContext *stats_context, const char *phase, idx_t table_index,
-                        TableSampleManager::CDCEntry *cache) {
+                        TableSampleManager::CDCEntry *cache, ClientContext *profile_context, double *filter_time_ms) {
 	const auto started = std::chrono::steady_clock::now();
 	const idx_t n = cdc.Count(), k = MinValue(n, target_rows);
 	if (k == 0) {
@@ -329,6 +329,8 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		D_ASSERT(cursor == k);
 		save_chunk();
 		if (cache) {
+			cache->profiler.reset();
+			cache->profiling_sample.reset();
 			cache->sample.swap(acquired_chunks);
 			cache->columns = column_ids;
 			cache->touched_chunks = touched;
@@ -338,12 +340,51 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 	const auto acquired = std::chrono::steady_clock::now();
 	const auto &chunks = cache ? cache->sample : acquired_chunks;
 	idx_t survivors = 0;
-	for (auto &raw : chunks) {
-		sample.Reset();
-		raw->Copy(sample);
-		sample.SetCardinalityUnsafe(raw->size());
-		ApplySampleFilters(sample, expr_exec, filters);
-		survivors += sample.size();
+	if (profile_context && cache && !column_ids.empty()) {
+		if (!cache->profiler) {
+			cache->profiling_sample = make_uniq<ColumnDataCollection>(cdc.GetAllocator(), types);
+			for (auto &raw : chunks) {
+				cache->profiling_sample->Append(*raw);
+			}
+			vector<column_t> positions;
+			for (idx_t i = 0; i < types.size(); i++) {
+				positions.push_back(i);
+			}
+			cache->profiler =
+			    make_uniq<SampleFilterProfiler>(*profile_context, *cache->profiling_sample, std::move(positions));
+		}
+		// Refresh the active predicates while reusing observations already
+		// measured on the same sample and column layout.
+		cache->profiler->ClearLocal();
+		if (expr_exec) {
+			for (auto expression : expr_exec->expressions) {
+				cache->profiler->AddLocal(*expression);
+			}
+		}
+		auto active = cache->profiler->LocalFilters();
+		for (auto &filter : filters) {
+			if (filter.filter && !filter.chunk_cols.empty() &&
+			    std::all_of(filter.chunk_cols.begin(), filter.chunk_cols.end(),
+			                [&](idx_t col) { return col < types.size(); })) {
+				active.push_back(cache->profiler->AddRuntime(filter));
+			}
+		}
+		survivors = cache->profiler->Count(active);
+		if (filter_time_ms) {
+			*filter_time_ms = cache->profiler->EstimateLocalEvaluationNS(active) * double(n) / double(k) / 1e6;
+		}
+		Value log;
+		if (profile_context->TryGetCurrentSetting("bloom_log_transfer_steps", log) && log.GetValue<bool>()) {
+			cache->profiler->Log("cdc:" + to_string(table_index) + ":" + to_string(cache->snapshot_id), active);
+		}
+	} else {
+		for (auto &raw : chunks) {
+			sample.Reset();
+			raw->Copy(sample);
+			sample.SetCardinalityUnsafe(raw->size());
+			ApplySampleFilters(sample, expr_exec, filters);
+			survivors += sample.size();
+		}
 	}
 	const auto filtered = std::chrono::steady_clock::now();
 	// No sampled survivor means low selectivity, not a proven empty table.
@@ -415,7 +456,8 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 // normal execution.
 static idx_t SampleCollection(ClientContext &context, const ColumnDataCollection &cdc, const RPTSamplingConfig &config,
                               ExpressionExecutor *expr_exec, const vector<ScannerFilterSet::Entry> &filters,
-                              const char *phase, idx_t table_index, TableSampleManager::CDCEntry *cache = nullptr) {
+                              const char *phase, idx_t table_index, TableSampleManager::CDCEntry *cache = nullptr,
+                              double *filter_time_ms = nullptr) {
 	vector<bool> used(cdc.Types().size(), false);
 	if (expr_exec) {
 		for (auto expr : expr_exec->expressions) {
@@ -471,8 +513,13 @@ static idx_t SampleCollection(ClientContext &context, const ColumnDataCollection
 	}
 	const bool stats = BloomStructuredLoggingEnabled(context);
 	auto stats_context = stats ? &context : nullptr;
+	const bool profile = config.filter_profiling &&
+	                     (!expr_exec || std::all_of(expr_exec->expressions.begin(), expr_exec->expressions.end(),
+	                                               [](const Expression *expr) {
+		                                               return !expr->CanThrow() && !expr->IsVolatile();
+	                                               }));
 	return SampleRows(cdc, columns, config.in_memory_sample_size, config.seed, expr_exec, *active_filters,
-	                  stats_context, phase, table_index, cache);
+	                  stats_context, phase, table_index, cache, profile ? &context : nullptr, filter_time_ms);
 }
 
 // ---------------------------------------------------------------------------
@@ -541,10 +588,13 @@ idx_t SamplingCardinalityEstimator::SampleCDC(const LogicalOperator &op) {
 		expr_exec->AddExpression(*final_expr);
 	}
 
+	// Lifted CTE ownership belongs to the logical plan; use a call-local sample.
+	TableSampleManager::CDCEntry local_sample;
 	// No BF filters at init time.
 	static const vector<ScannerFilterSet::Entry> empty_filters;
-	return SampleCollection(context_, cdc, config_, expr_exec.get(), empty_filters, "init",
-	                        chunk_get.table_index.index);
+	return SampleCollection(context_, cdc, config_, expr_exec.get(), empty_filters, "init", chunk_get.table_index.index,
+	                        config_.filter_cost_rows_per_ms > 0 ? &local_sample : nullptr,
+	                        config_.filter_cost_rows_per_ms > 0 ? &filter_time_ms_ : nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -597,7 +647,20 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 	// set.
 	idx_t survivors = sample.local_survivors;
 	auto probe_started = std::chrono::steady_clock::now();
-	if (!bf_filters.empty() && sample.locally_filtered && sample.local_survivors > 0) {
+	if (sample.profiler) {
+		auto active = sample.profiler->LocalFilters();
+		for (auto &filter : bf_filters) {
+			active.push_back(sample.profiler->AddRuntime(filter));
+		}
+		survivors = sample.profiler->Count(active);
+		if (config_.filter_cost_rows_per_ms > 0) {
+			filter_time_ms_ = sample.profiler->EstimateLocalEvaluationNS(active) * double(sample.total_rows) /
+			                  double(sample.sampled_rows) / 1e6;
+		}
+		if (LogEnabled()) {
+			sample.profiler->Log(sample.table_name, active);
+		}
+	} else if (!bf_filters.empty() && sample.locally_filtered && sample.local_survivors > 0) {
 		vector<column_t> columns;
 		for (idx_t col = 0; col < sample.locally_filtered->Types().size(); col++) {
 			columns.push_back(col);
@@ -664,6 +727,7 @@ static bool IsCDC(const LogicalOperator &op) {
 }
 
 idx_t SamplingCardinalityEstimator::Estimate(const LogicalOperator &op) {
+	filter_time_ms_ = 0;
 	if (IsCDC(op)) {
 		return SampleCDC(op);
 	}
@@ -679,6 +743,7 @@ idx_t SamplingCardinalityEstimator::Estimate(const LogicalOperator &op) {
 }
 
 idx_t SamplingCardinalityEstimator::Estimate(const LogicalOperator &op, const vector<DirectFilterInfo> &filters) {
+	filter_time_ms_ = 0;
 	if (IsCDC(op)) {
 		return SampleCDC(op);
 	}
@@ -691,6 +756,7 @@ idx_t SamplingCardinalityEstimator::Estimate(const LogicalOperator &op, const ve
 }
 
 idx_t SamplingCardinalityEstimator::Estimate(TableScanner &scanner, const vector<DirectFilterInfo> &) {
+	filter_time_ms_ = 0;
 	auto *cdc = scanner.GetData();
 	if (!cdc) {
 		return 0;
@@ -718,7 +784,8 @@ idx_t SamplingCardinalityEstimator::Estimate(TableScanner &scanner, const vector
 	const auto &bindings = scanner.GetOutputBindings();
 	const auto table_index = bindings.empty() ? DConstants::INVALID_INDEX : bindings[0].table_index.index;
 	auto cache = &samples_.GetCDCEntry(scanner.GetDataReference(), table_index);
-	return SampleCollection(context_, *cdc, config_, expr_exec, *filters, "transfer", table_index, cache);
+	return SampleCollection(context_, *cdc, config_, expr_exec, *filters, "transfer", table_index, cache,
+	                        config_.filter_cost_rows_per_ms > 0 ? &filter_time_ms_ : nullptr);
 }
 
 } // namespace duckdb

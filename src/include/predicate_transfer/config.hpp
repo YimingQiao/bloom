@@ -21,6 +21,10 @@ enum class RPTInstantAccessMode : uint8_t {
 };
 
 struct RPTSamplingConfig {
+	//! Retain common raw samples and independently profile pending filters.
+	bool filter_profiling = false;
+	//! Equivalent tuple work per millisecond of sampled filter computation; zero disables.
+	double filter_cost_rows_per_ms = 10000;
 	//! Maximum random rows evaluated per in-memory CDC snapshot; smaller CDCs use all rows.
 	idx_t in_memory_sample_size = 4096;
 	//! Target rows for prepared, block, and Parquet samples. Scattered instant

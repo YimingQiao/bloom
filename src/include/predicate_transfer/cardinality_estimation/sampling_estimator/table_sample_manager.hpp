@@ -1,6 +1,7 @@
 #pragma once
 
 #include "predicate_transfer/config.hpp"
+#include "predicate_transfer/cardinality_estimation/sampling_estimator/filter_profiler.hpp"
 
 #include "duckdb/common/optional_idx.hpp"
 #include "duckdb/common/types/column/column_data_collection.hpp"
@@ -31,6 +32,8 @@ public:
 		vector<column_t> columns;
 		vector<unique_ptr<DataChunk>> sample;
 		idx_t touched_chunks = 0;
+		unique_ptr<ColumnDataCollection> profiling_sample;
+		unique_ptr<SampleFilterProfiler> profiler;
 	};
 	CDCEntry &GetCDCEntry(const shared_ptr<ColumnDataCollection> &source, idx_t table_index);
 
@@ -51,6 +54,7 @@ public:
 		//! Sample rows surviving the query's local predicate. Instant sampling
 		//! normally builds this view during its physical scan; prepared sampling
 		//! materializes it lazily on first use.
+		unique_ptr<SampleFilterProfiler> profiler;
 		shared_ptr<ColumnDataCollection> locally_filtered;
 		idx_t local_survivors = 0;
 		bool local_filter_evaluated = false;
@@ -71,6 +75,9 @@ public:
 	optional_idx TryGetExactLocalCardinality(const Entry &sample, const LogicalOperator &op) const;
 	void EnsureLocalFilter(Entry &sample, const LogicalOperator &op);
 	idx_t MemoryUsage() const;
+	void Forget(const LogicalOperator &op) {
+		entries_.erase(&op);
+	}
 
 private:
 	bool LogEnabled() const;

@@ -40,6 +40,8 @@ TableSampleManager::CDCEntry &TableSampleManager::GetCDCEntry(const shared_ptr<C
 	auto &entry = cdc_entries_[source.get()];
 	if (entry.sample.empty() || entry.total_rows != source->Count() || entry.total_chunks != source->ChunkCount() ||
 	    entry.table_index != table_index || entry.types != source->Types()) {
+		entry.profiler.reset();
+		entry.profiling_sample.reset();
 		entry.sample.clear();
 		entry.snapshot_id = ++next_cdc_snapshot_id_;
 		entry.source = source;
@@ -55,6 +57,9 @@ idx_t TableSampleManager::MemoryUsage() const {
 	unordered_set<const ColumnDataCollection *> seen;
 	idx_t total = 0;
 	for (auto &entry : entries_) {
+		if (entry.second.profiler) {
+			total += entry.second.profiler->MemoryUsage();
+		}
 		for (auto &collection : {entry.second.sample, entry.second.locally_filtered}) {
 			if (!collection || !seen.insert(collection.get()).second) {
 				continue;
@@ -65,6 +70,9 @@ idx_t TableSampleManager::MemoryUsage() const {
 		}
 	}
 	for (auto &entry : cdc_entries_) {
+		if (entry.second.profiler) {
+			total += entry.second.profiler->MemoryUsage() + entry.second.profiling_sample->AllocationSize();
+		}
 		for (auto &chunk : entry.second.sample) {
 			const auto allocation = chunk->GetAllocationSize();
 			total = allocation > std::numeric_limits<idx_t>::max() - total ? std::numeric_limits<idx_t>::max()
@@ -344,6 +352,16 @@ void TableSampleManager::EnsureLocalFilter(Entry &sample, const LogicalOperator 
 	const bool log = LogEnabled();
 	idx_t predicate_count = 0;
 	auto final_expression = BuildLocalPredicate(sample, op, sample_types, predicate_count, log);
+	// Independent profiling must not defeat short-circuit guards or repeat volatile evaluation.
+	if (config_.filter_profiling &&
+	    (!final_expression || (!final_expression->CanThrow() && !final_expression->IsVolatile()))) {
+		sample.profiler = make_uniq<SampleFilterProfiler>(context_, *sample.sample, sample.sample_column_positions);
+		if (final_expression) {
+			sample.profiler->AddLocal(*final_expression);
+		}
+		sample.local_survivors = sample.profiler->Count(sample.profiler->LocalFilters());
+		return;
+	}
 	unique_ptr<ExpressionExecutor> expression_executor;
 	if (final_expression) {
 		expression_executor = make_uniq<ExpressionExecutor>(context_);
@@ -447,7 +465,8 @@ void TableSampleManager::LogInstantSample(const Entry &sample, const InstantSamp
 		          << " candidate_rows=" << result.candidate_rows;
 	}
 	std::cerr << '\n';
-	std::cerr << "    [Bloom-Sample] predicates=" << predicate_count << " survivors=" << sample.local_survivors << "/"
+	std::cerr << "    [Bloom-Sample] predicates=" << predicate_count
+	          << (config_.filter_profiling ? " raw_retained=" : " survivors=") << sample.local_survivors << "/"
 	          << sample.sampled_rows << '\n';
 	std::cerr << "  [Bloom-SamplePhysical] table=" << sample.table_name;
 	if (result.source != InstantSampleSource::PARQUET) {
@@ -495,7 +514,10 @@ void TableSampleManager::AdoptInstantSample(Entry &sample, InstantSampleResult r
 	sample.locally_filtered = sample.sample;
 	sample.local_survivors = sample.sample->Count();
 	D_ASSERT(sample.local_survivors <= sample.sampled_rows);
-	sample.local_filter_evaluated = true;
+	sample.local_filter_evaluated = !config_.filter_profiling;
+	if (config_.filter_profiling) {
+		sample.locally_filtered.reset();
+	}
 	LogInstantSample(sample, result, predicate_count, table_seed);
 }
 
@@ -518,14 +540,16 @@ void TableSampleManager::BuildInstantSample(Entry &sample, const LogicalOperator
 		auto local_predicate = BuildLocalPredicate(sample, op, column_types, predicate_count, log);
 		std::mt19937_64 random(table_seed);
 		if (config_.instant_access == RPTInstantAccessMode::BLOCK) {
-			auto result = BuildInstantBlockSample(context_, table->GetStorage(), column_ids, column_types,
-			                                      config_.target_rows, config_.instant_block_windows, log,
-			                                      config_.instant_snapshot, local_predicate.get(), random);
+			auto result =
+			    BuildInstantBlockSample(context_, table->GetStorage(), column_ids, column_types, config_.target_rows,
+				                        config_.instant_block_windows, log, config_.instant_snapshot,
+				                        config_.filter_profiling ? nullptr : local_predicate.get(), random);
 			AdoptInstantSample(sample, std::move(result), predicate_count, table_seed);
 		} else {
-			auto result = BuildInstantScatteredSample(context_, table->GetStorage(), column_ids, column_types,
-			                                          config_.instant_access_points, config_.instant_rows_per_access,
-			                                          log, config_.instant_snapshot, local_predicate.get(), random);
+			auto result = BuildInstantScatteredSample(
+			    context_, table->GetStorage(), column_ids, column_types, config_.instant_access_points,
+			    config_.instant_rows_per_access, log, config_.instant_snapshot,
+			    config_.filter_profiling ? nullptr : local_predicate.get(), random);
 			AdoptInstantSample(sample, std::move(result), predicate_count, table_seed);
 		}
 		return;
@@ -553,7 +577,8 @@ void TableSampleManager::BuildInstantSample(Entry &sample, const LogicalOperator
 	    std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - metadata_started).count();
 	idx_t predicate_count = 0;
 	auto local_predicate = BuildLocalPredicate(sample, op, plan.output_types, predicate_count, log);
-	auto result = BuildInstantParquetSample(context_, get, plan, log, local_predicate.get());
+	auto result =
+	    BuildInstantParquetSample(context_, get, plan, log, config_.filter_profiling ? nullptr : local_predicate.get());
 	result.metadata_ms = metadata_ms;
 	AdoptInstantSample(sample, std::move(result), predicate_count, table_seed);
 }

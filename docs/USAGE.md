@@ -2,6 +2,79 @@
 
 [Back to Bloom](../README.md)
 
+## Filter profiling
+
+`SET bloom_filter_profiling=true` explicitly enables query-local filter profiling.
+The default cost scheduler also enables profiling automatically. It retains the unfiltered sample and evaluates each pending local
+predicate or finalized transfer filter independently on those same rows. AND
+children receive separate pass bitmaps; OR remains one predicate. Bitmap
+intersection supplies the joint cardinality estimate without multiplying
+individual selectivities. Throwing or volatile predicates retain their existing
+evaluation path, preserving short-circuit semantics.
+
+A local predicate is evaluated once per sample. Transfer observations are reused
+only for the same live filter object and column bindings. Materialization releases
+the original table sample; CDC sample replacement or a changed column layout
+invalidates its profiles. Filters already applied to the current materialization
+are not profiled again. Materialized-table profiling uses the scanner's pending
+filters, including composite keys.
+
+With `bloom_log_transfer_steps=true`, `Bloom-FilterProfile` reports the common
+sample size and joint pass count. Each `Bloom-FilterProfileItem` reports:
+
+- `pass`: rows passing this filter alone;
+- `input_after_others`: rows passing all other pending filters;
+- `additional_reject`: rows this filter removes from that remaining set;
+- `eval_us` and `ns_per_row`: measured filter evaluation time on the raw sample.
+
+Evaluation time excludes sample acquisition, executor construction and bitmap
+bookkeeping. End-to-end query timing includes all of them. Repeated diagnostic
+entries can reference cached observations; their evaluation time is not newly
+incurred work. Tiny samples and zero hits do not establish redundancy on the
+whole table. Profiling alone does not change predicate or table scheduling. It is available for base-table
+instant/prepared samples and cached CDC samples; initial `CHUNK_GET` estimates use a call-local profile when cost scheduling is enabled.
+
+### Filter-cost scheduling
+
+`bloom_filter_cost_rows_per_ms` defaults to `10000`. Bloom selects the eligible
+table minimizing `2 * estimated_output_rows + coefficient * filter_ms`.
+The coefficient is measured in equivalent rows per millisecond; it is not a
+measured throughput constant. Set it to zero to use output-only ordering.
+A positive coefficient enables profiling automatically. All available predicates
+are evaluated when the selected table is processed.
+
+The profiler measures each local predicate once on the raw cached sample. A new
+runtime filter is evaluated for its pass bitmap, but existing predicates are
+not rerun for timing. The estimated local computation is the sum of each local
+predicate's measured per-row cost multiplied by its estimated input row count.
+Input counts come from bitmap intersections, preserving observed correlations.
+The estimator accumulates these intersections once per bitmap word; it does not
+recompute the full prefix for every predicate. A single filter's survival count
+is reused directly from its observation.
+Cheap runtime filters are assumed to precede local predicates and are not charged
+in the cost surcharge. Local order uses increasing measured cost per rejected
+row as an approximation to native adaptive ordering. This changes no actual
+scan ordering. The per-row costs are reused for the lifetime of the sample;
+a new materialized snapshot or changed sample layout gets new observations.
+
+The estimate excludes acquisition, decoding, bitmap bookkeeping, and output
+materialization. Native filter order/fusion, conditional string distributions,
+indexes and caches may make actual costs differ. All pending filters still
+participate in the cardinality estimate, even when their computation is uncharged.
+
+Sample time is extrapolated by current input rows / sample rows. Base tables use
+the original cardinality; materialized CDCs use their current size and only
+pending filters. Empty filter sets have zero cost. Unsupported or unsafe
+profiling paths currently retain cardinality-only estimates (zero surcharge).
+The score changes selection only, never cardinalities, excitation thresholds,
+lineage, or result correctness. `Bloom-Excitation` reports the selected table's
+`filter_ms` and `score`; `Bloom-Estimate` reports refreshed filter times.
+
+This is an experimental query-local heuristic. The coefficient needs workload
+validation; it is not a globally optimal total-time model and does not charge
+I/O or decoding. Focused results and the reproducible runner live under
+`sspt-experiments/heavy-filter-job20b/`.
+
 ## Configuration
 
 Bloom works without tuning. Instant sampling is the default: it acquires a

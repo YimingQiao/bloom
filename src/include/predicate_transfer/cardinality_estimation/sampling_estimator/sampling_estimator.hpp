@@ -13,6 +13,12 @@ public:
 	idx_t Estimate(const LogicalOperator &op) override;
 	idx_t Estimate(const LogicalOperator &op, const vector<DirectFilterInfo> &filters) override;
 	idx_t Estimate(TableScanner &scanner, const vector<DirectFilterInfo> &filters) override;
+	double FilterTimeMS() const override {
+		return filter_time_ms_;
+	}
+	void Forget(const LogicalOperator &op) override {
+		samples_.Forget(op);
+	}
 	idx_t MemoryUsage() const override {
 		return samples_.MemoryUsage();
 	}
@@ -28,6 +34,7 @@ private:
 	ClientContext &context_;
 	RPTSamplingConfig config_;
 	TableSampleManager samples_;
+	double filter_time_ms_ = 0;
 };
 
 } // namespace duckdb

@@ -1,5 +1,6 @@
 #define DUCKDB_EXTENSION_MAIN
 
+#include <cmath>
 #include "bloom_extension.hpp"
 #include "predicate_transfer/cardinality_estimation/prepared_sampler.hpp"
 #include "predicate_transfer/config.hpp"
@@ -228,6 +229,9 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 		ValidateUnsignedRange(setting, "bloom_in_memory_sample_size", SampleOptions::MAX_SAMPLE_ROWS);
 		config.sampling.in_memory_sample_size = setting.GetValue<idx_t>();
 	}
+	if (input.context.TryGetCurrentSetting("bloom_filter_profiling", setting)) {
+		config.sampling.filter_profiling = setting.GetValue<bool>();
+	}
 	if (input.context.TryGetCurrentSetting("bloom_sample_mode", setting)) {
 		config.sampling.mode = ReadSampleMode(setting);
 	}
@@ -273,6 +277,16 @@ void BloomOptimizerExtension::Optimize(OptimizerExtensionInput &input, unique_pt
 		config.late_materialize_flag = setting.GetValue<bool>();
 	}
 
+	if (input.context.TryGetCurrentSetting("bloom_filter_cost_rows_per_ms", setting)) {
+		config.sampling.filter_cost_rows_per_ms = setting.GetValue<double>();
+		if (!std::isfinite(config.sampling.filter_cost_rows_per_ms) || config.sampling.filter_cost_rows_per_ms < 0) {
+			throw InvalidInputException("bloom_filter_cost_rows_per_ms must be finite and nonnegative");
+		}
+		if (config.sampling.filter_cost_rows_per_ms > 0) {
+			config.sampling.filter_profiling = true;
+		}
+	}
+
 	PredicateTransferOptimizer optimizer(input.optimizer, input.context, config);
 	plan = optimizer.Optimize(std::move(plan));
 	if (input.context.config.enable_profiler || config.log_transfer_steps) {
@@ -300,6 +314,13 @@ static void LoadInternal(ExtensionLoader &loader) {
 	config.AddExtensionOption(
 	    "bloom_in_memory_sample_size", "Maximum uniformly sampled rows per in-memory CDC", LogicalType::UBIGINT,
 	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_IN_MEMORY_SAMPLE_SIZE", 4096)), ValidateInMemorySampleSize);
+	config.AddExtensionOption(
+	    "bloom_filter_cost_rows_per_ms",
+	    "Schedule by 2 * output rows + this coefficient * estimated filter milliseconds; zero disables",
+	    LogicalType::DOUBLE, Value::DOUBLE(RPTSamplingConfig().filter_cost_rows_per_ms));
+	config.AddExtensionOption("bloom_filter_profiling",
+	                          "Profile pending predicates and transfer filters on a common cached sample",
+	                          LogicalType::BOOLEAN, Value::BOOLEAN(false));
 	config.AddExtensionOption("bloom_sample_mode", "Base-table sampling mode: 'prepared' or 'instant'",
 	                          LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_SAMPLE_MODE", "instant")),
 	                          ValidateSampleMode);

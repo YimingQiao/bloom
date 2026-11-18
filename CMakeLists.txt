@@ -26,6 +26,7 @@ set(EXTENSION_SOURCES
     src/predicate_transfer/cardinality_estimation/prepared_sampler.cpp
     src/predicate_transfer/cardinality_estimation/sampling_estimator/sampling_estimator.cpp
     src/predicate_transfer/cardinality_estimation/sampling_estimator/table_sample_manager.cpp
+    src/predicate_transfer/cardinality_estimation/sampling_estimator/filter_profiler.cpp
     src/predicate_transfer/filter/bitmap_filter.cpp
     src/predicate_transfer/filter/bloom_filter.cpp
     src/predicate_transfer/filter/table_filter.cpp

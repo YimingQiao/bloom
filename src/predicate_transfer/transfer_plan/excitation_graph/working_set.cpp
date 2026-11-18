@@ -7,6 +7,7 @@ namespace duckdb {
 void ExcitationWorkingSet::Reset() {
 	cardinalities_.clear();
 	baselines_.clear();
+	filter_times_ms_.clear();
 	lineage_.Clear();
 	active_tables_.clear();
 	dependencies_.clear();
@@ -58,15 +59,25 @@ void ExcitationWorkingSet::MarkZero(idx_t table_id) {
 	D_ASSERT(HasCardinality(table_id));
 	cardinalities_[table_id] = 0.0;
 	baselines_[table_id] = 0.0;
+	filter_times_ms_[table_id] = 0;
 	active_tables_.insert(table_id);
 }
 
-idx_t ExcitationWorkingSet::PopSmallestActiveTable() {
+double ExcitationWorkingSet::FilterTime(idx_t table_id) const {
+	auto entry = filter_times_ms_.find(table_id);
+	return entry == filter_times_ms_.end() ? 0 : entry->second;
+}
+
+double ExcitationWorkingSet::SchedulingScore(idx_t table_id, double rows_per_ms) const {
+	return 2 * Cardinality(table_id) + rows_per_ms * FilterTime(table_id);
+}
+
+idx_t ExcitationWorkingSet::PopSmallestActiveTable(double rows_per_ms) {
 	D_ASSERT(!active_tables_.empty());
 	idx_t best_id = std::numeric_limits<idx_t>::max();
 	double best_cardinality = std::numeric_limits<double>::infinity();
 	for (auto table_id : active_tables_) {
-		auto cardinality = Cardinality(table_id);
+		auto cardinality = SchedulingScore(table_id, rows_per_ms);
 		if (cardinality < best_cardinality || (cardinality == best_cardinality && table_id < best_id)) {
 			best_cardinality = cardinality;
 			best_id = table_id;

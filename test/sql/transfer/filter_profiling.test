@@ -1,0 +1,88 @@
+# name: test/sql/transfer/filter_profiling.test
+# description: Profiling preserves correlated predicates, pending transfers and rematerialized CDCs
+# group: [transfer]
+
+require bloom
+
+require parquet
+
+statement ok
+SET enable_bloom=false;
+
+statement ok
+SET threads=1;
+
+statement ok
+CREATE TABLE fp_s AS SELECT i::INTEGER k, (i%3)::INTEGER b, CASE WHEN i%17=0 THEN NULL ELSE i%3=0 END keep FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE fp_r AS SELECT i::INTEGER k, (i%3)::INTEGER b, ('v'||i)::VARCHAR payload, 2001::INTEGER yr FROM range(10000) t(i);
+
+statement ok
+CREATE TABLE fp_t AS SELECT i::INTEGER b FROM range(3) t(i);
+
+statement ok
+CREATE INDEX fp_r_k ON fp_r(k);
+
+statement ok
+CREATE TABLE fp_expected AS SELECT count(*) n,sum(r.k) total,min(r.payload) p FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+
+statement ok
+CHECKPOINT;
+
+statement ok
+SET enable_bloom=true;
+
+statement ok
+SET bloom_filter_profiling=true;
+
+query IIT
+SELECT count(*) n,sum(r.k) total,min(r.payload) p FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+----
+3137	15683727	v1002
+
+# Same logical expression must not leak observations between executions.
+query IIT
+SELECT count(*) n,sum(r.k) total,min(r.payload) p FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+----
+3137	15683727	v1002
+
+# Small exact-key transfer into an ART scan with mixed types and filter-only columns.
+query IIT
+SELECT count(*),sum(r.k),min(r.payload) FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.k<32 AND r.yr>2000;
+----
+32	496	v0
+
+statement ok
+SET bloom_sample_mode='prepared';
+
+statement ok
+SET bloom_sample_cache_dir='{TEST_DIR}/profile-cache';
+
+query IIT
+SELECT count(*) n,sum(r.k) total,min(r.payload) p FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+----
+3137	15683727	v1002
+
+statement ok
+SET bloom_late_materialize=true;
+
+query IIT
+SELECT count(*) n,sum(r.k) total,min(r.payload) p FROM fp_s s JOIN fp_r r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+----
+3137	15683727	v1002
+
+# Parquet acquisition must retain the same common sample before local filtering.
+statement ok
+SET bloom_late_materialize=false;
+
+statement ok
+SET bloom_sample_mode='instant';
+
+statement ok
+COPY fp_r TO '{TEST_DIR}/profile.parquet' (FORMAT PARQUET);
+
+query IIT
+SELECT count(*),sum(r.k),min(r.payload) FROM fp_s s JOIN read_parquet('{TEST_DIR}/profile.parquet') r USING(k) JOIN fp_t t ON r.b=t.b WHERE s.keep AND (s.b=0 OR s.k<0) AND r.yr>2000;
+----
+3137	15683727	v1002

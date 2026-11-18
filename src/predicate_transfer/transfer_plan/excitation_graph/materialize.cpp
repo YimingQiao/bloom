@@ -234,6 +234,7 @@ void ExcitationGraphManager::PrepareSourceTable(idx_t source_table_id) {
 	}
 
 	executor_.EnsureMaterialized(*op, required);
+	estimator_->Forget(*op);
 }
 
 vector<shared_ptr<GraphEdge>> ExcitationGraphManager::ActivateTables(idx_t source_table_id,

@@ -399,6 +399,7 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 			double row_count = (leaf == &op) ? base_rows : static_cast<double>(estimator_->Estimate(op));
 			init_lineage(table_id);
 			state_.AddTable(table_id, row_count, base_rows, true);
+			state_.SetFilterTime(table_id, leaf == &op ? 0 : estimator_->FilterTimeMS());
 			executor_.Register(op);
 			continue;
 		}
@@ -409,6 +410,7 @@ void ExcitationGraphManager::InitializeWorkingSet() {
 		bool will_be_active = true_card < base_rows * config.excitation_threshold;
 		init_lineage(table_id);
 		state_.AddTable(table_id, true_card, base_rows, will_be_active);
+		state_.SetFilterTime(table_id, estimator_->FilterTimeMS());
 	}
 
 	// Reverse adjacency for O(neighbors) incoming-edge lookup in PrepareSourceTable.
@@ -538,9 +540,11 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 		}
 
 		auto *dest_scanner = executor_.Find(*dest_op);
-		double current_card = dest_scanner ? static_cast<double>(estimator_->Estimate(*dest_scanner, direct_filters))
-		                                   : static_cast<double>(estimator_->Estimate(*dest_op, direct_filters));
+		double current_card = dest_scanner && dest_scanner->IsMaterialized()
+		                          ? static_cast<double>(estimator_->Estimate(*dest_scanner, direct_filters))
+		                          : static_cast<double>(estimator_->Estimate(*dest_op, direct_filters));
 
+		state_.SetFilterTime(neighbor_id, estimator_->FilterTimeMS());
 		state_.AddDependency(neighbor_id, edge->source);
 
 		auto last_card = state_.Baseline(neighbor_id);
@@ -559,6 +563,7 @@ void ExcitationGraphManager::UpdateNeighborCardinalities(const vector<shared_ptr
 			auto dest_name = TableOperatorManager::GetTableName(*dest_op);
 			std::cerr << "  [Bloom-Estimate] dest=[" << neighbor_id << "] name=" << dest_name
 			          << " prior=" << static_cast<idx_t>(prior_card) << " baseline=" << static_cast<idx_t>(last_card)
+			          << " filter_ms=" << state_.FilterTime(neighbor_id)
 			          << " estimate=" << static_cast<idx_t>(current_card)
 			          << " decision_boundary=" << static_cast<idx_t>(last_card * config.excitation_threshold)
 			          << " filters=" << direct_filters.size() << " source=" << (dest_scanner ? "materialized" : "base")
@@ -675,8 +680,10 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			std::string name = op ? TableOperatorManager::GetTableName(*op) : "?";
 			bool active = state_.IsActive(tid);
 			std::cerr << "  [" << tid << "] " << name << "  card=" << static_cast<idx_t>(cardinality)
-			          << "  baseline=" << static_cast<idx_t>(state_.Baseline(tid)) << (active ? "  ACTIVE" : "")
-			          << '\n';
+			          << "  baseline=" << static_cast<idx_t>(state_.Baseline(tid))
+			          << "  filter_ms=" << state_.FilterTime(tid)
+			          << "  score=" << state_.SchedulingScore(tid, config.sampling.filter_cost_rows_per_ms)
+			          << (active ? "  ACTIVE" : "") << '\n';
 		}
 		std::cerr << "[Bloom-Excitation] active_nodes count: " << state_.ActiveTableCount() << '\n';
 	}
@@ -692,7 +699,7 @@ void ExcitationGraphManager::ExecuteTransfer() {
 	// 4. build/apply A's outgoing filters to the destination tables B
 	// 5. re-estimate each affected B after those filters are attached
 	while (state_.HasActiveTables()) {
-		idx_t table_id = state_.PopSmallestActiveTable();
+		idx_t table_id = state_.PopSmallestActiveTable(config.sampling.filter_cost_rows_per_ms);
 
 		excitation_round++;
 		if (bloom_diagnostic_log) {
@@ -703,6 +710,8 @@ void ExcitationGraphManager::ExecuteTransfer() {
 			std::string src_name = src_op ? TableOperatorManager::GetTableName(*src_op) : "?";
 			std::cerr << "[Bloom-Excitation] --- Round " << excitation_round << ": source=[" << table_id << "] "
 			          << src_name << "  card=" << static_cast<idx_t>(state_.Cardinality(table_id))
+			          << "  filter_ms=" << state_.FilterTime(table_id)
+			          << "  score=" << state_.SchedulingScore(table_id, config.sampling.filter_cost_rows_per_ms)
 			          << "  remaining_active=" << state_.ActiveTableCount() << '\n';
 		}
 
