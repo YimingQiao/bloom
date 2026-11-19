@@ -58,7 +58,7 @@ instant/prepared samples and cached CDC samples; initial `CHUNK_GET` estimates u
 
 ### Filter-cost scheduling
 
-`bloom_filter_cost_rows_per_ms` defaults to `10000`. Bloom selects the eligible
+`bloom_filter_cost_rows_per_ms` defaults to `2500`. Bloom selects the eligible
 table minimizing `2 * estimated_output_rows + coefficient * filter_ms`.
 The coefficient is measured in equivalent rows per millisecond; it is not a
 measured throughput constant. Set it to zero to use output-only ordering.
