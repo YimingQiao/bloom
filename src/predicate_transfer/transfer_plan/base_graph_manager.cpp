@@ -240,10 +240,20 @@ static bool ComputeJoinProtection(const LogicalComparisonJoin &join, bool &prote
 // (a compression projection inserted a type cast, e.g. BIGINT → UINTEGER),
 // use the scan's type because the BF operates on the uncompressed column.
 static LogicalType ResolveSourceKeyType(const ColumnBinding &pre_rename, const ColumnBinding &post_rename,
-                                        const LogicalOperator &node, const LogicalType &fallback) {
-	if (pre_rename != post_rename && post_rename.column_index < node.types.size() &&
-	    node.types[post_rename.column_index] != fallback) {
-		return node.types[post_rename.column_index];
+                                        LogicalOperator &node, const LogicalType &fallback) {
+	if (pre_rename == post_rename) {
+		return fallback;
+	}
+
+	// A binding's column index is stable across projection pruning and may
+	// not equal its position in the operator's output types.
+	const auto bindings = node.GetColumnBindings();
+	const auto it = std::find(bindings.begin(), bindings.end(), post_rename);
+	if (it != bindings.end()) {
+		const auto output_index = static_cast<idx_t>(it - bindings.begin());
+		if (output_index < node.types.size()) {
+			return node.types[output_index];
+		}
 	}
 	return fallback;
 }

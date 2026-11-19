@@ -64,9 +64,6 @@ private:
 
 	static bool IsInnerEquiJoin(const LogicalOperator &op);
 
-	//! Recursively search an expression tree for a single BOUND_COLUMN_REF.
-	//! Used to see through wrapping functions (e.g. __internal_compress_integral_uinteger).
-	static void FindInnerColumnRef(Expression &expr, BoundColumnRefExpression *&out_ref);
 
 	struct HashFunc {
 		size_t operator()(const ColumnBinding &key) const {

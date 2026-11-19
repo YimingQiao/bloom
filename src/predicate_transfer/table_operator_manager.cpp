@@ -1,3 +1,4 @@
+#include "predicate_transfer/join_graph/key_column.hpp"
 #include "predicate_transfer/table_operator_manager.hpp"
 #include "duckdb/main/settings.hpp"
 #include "duckdb/parallel/task_scheduler.hpp"
@@ -60,47 +61,6 @@ const char *OptimizerExecutionUnsafeReason(const LogicalOperator &op, ClientCont
 		}
 	}
 	return nullptr;
-}
-
-void TableOperatorManager::FindInnerColumnRef(Expression &expr, BoundColumnRefExpression *&out_ref) {
-	if (expr.GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-		if (out_ref) {
-			// Multiple column refs found — ambiguous, bail out
-			out_ref = nullptr;
-			return;
-		}
-		out_ref = &expr.Cast<BoundColumnRefExpression>();
-		return;
-	}
-	// Only recurse into DuckDB internal functions (compression/decompression).
-	// These are bijective and safe to see through. User-visible functions
-	// like col + 1 could produce wrong BF values if resolved through.
-	if (expr.GetExpressionType() == ExpressionType::BOUND_FUNCTION) {
-		auto &func = expr.Cast<BoundFunctionExpression>();
-		if (func.Function().GetName().GetIdentifierName().rfind("__internal_", 0) != 0) {
-			return;
-		}
-	}
-	// Scalar-subquery error wrapping: DuckDB binds scalar subqueries as
-	//   CASE WHEN count > 1 THEN error('...') ELSE first_agg END
-	// (see plan_subquery.cpp). The WHEN/THEN branch is a row-count guard
-	// that has nothing to do with the value flow; semantically the result
-	// equals the ELSE expression. Recurse only into ELSE so PROJECTION
-	// rename mapping can see through to the underlying column ref.
-	if (expr.GetExpressionType() == ExpressionType::CASE_EXPR) {
-		auto &case_expr = expr.Cast<BoundCaseExpression>();
-		auto &checks = case_expr.CaseChecksMutable();
-		auto &else_expr = case_expr.ElseMutable();
-		bool is_scalar_subquery_guard =
-		    checks.size() == 1 && else_expr && checks[0].then_expr &&
-		    checks[0].then_expr->GetExpressionType() == ExpressionType::BOUND_FUNCTION &&
-		    checks[0].then_expr->Cast<BoundFunctionExpression>().Function().GetName() == "error";
-		if (is_scalar_subquery_guard) {
-			FindInnerColumnRef(*else_expr, out_ref);
-			return;
-		}
-	}
-	ExpressionIterator::EnumerateChildren(expr, [&](Expression &child) { FindInnerColumnRef(child, out_ref); });
 }
 
 void TableOperatorManager::Build(LogicalOperator &plan) {
@@ -349,17 +309,9 @@ void TableOperatorManager::RecordRenameOneLevel(LogicalOperator &op) {
 	if (op.type == LogicalOperatorType::LOGICAL_PROJECTION) {
 		auto old_refs = op.GetColumnBindings();
 		for (size_t i = 0; i < op.expressions.size(); i++) {
-			if (op.expressions[i]->GetExpressionType() == ExpressionType::BOUND_COLUMN_REF) {
-				auto &col_ref = op.expressions[i]->Cast<BoundColumnRefExpression>();
-				rename_col_bindings.insert({old_refs[i], col_ref.Binding()});
-			} else {
-				// See through wrapping functions (e.g. __internal_compress_integral_*)
-				// and scalar-subquery error guards.
-				BoundColumnRefExpression *inner_ref = nullptr;
-				FindInnerColumnRef(*op.expressions[i], inner_ref);
-				if (inner_ref) {
-					rename_col_bindings.insert({old_refs[i], inner_ref->Binding()});
-				}
+			auto ref = predicate_transfer_graph::FindKeyColumn(*op.expressions[i]);
+			if (ref) {
+				rename_col_bindings.emplace(old_refs[i], ref->Binding());
 			}
 		}
 		return;
