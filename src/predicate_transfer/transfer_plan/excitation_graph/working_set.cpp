@@ -69,7 +69,12 @@ double ExcitationWorkingSet::FilterTime(idx_t table_id) const {
 }
 
 double ExcitationWorkingSet::SchedulingScore(idx_t table_id, double rows_per_ms) const {
-	return 2 * Cardinality(table_id) + rows_per_ms * FilterTime(table_id);
+	if (rows_per_ms == 0) {
+		return Cardinality(table_id);
+	}
+	const double row_cost_ms = 2.0 / rows_per_ms;
+	const double output_rows = Cardinality(table_id);
+	return (FilterTime(table_id) + row_cost_ms * output_rows) * output_rows;
 }
 
 idx_t ExcitationWorkingSet::PopSmallestActiveTable(double rows_per_ms) {

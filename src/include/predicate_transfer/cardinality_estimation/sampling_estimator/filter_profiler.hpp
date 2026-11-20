@@ -34,9 +34,9 @@ public:
 	//! both its live filter object and bound columns match.
 	idx_t AddRuntime(const ScannerFilterSet::Entry &filter);
 	idx_t Count(const vector<idx_t> &filters) const;
-	//! Estimate pending local computation from cached timings and pass bitmaps.
-	//! Cheap runtime filters reduce input counts but are not charged.
 	double EstimateLocalEvaluationNS(const vector<idx_t> &filters) const;
+	//! Estimate pending filter evaluation from cached timings and pass bitmaps.
+	double EstimateEvaluationNS(const vector<idx_t> &filters, vector<idx_t> *order = nullptr) const;
 	void Log(const string &table, const vector<idx_t> &filters) const;
 	idx_t MemoryUsage() const;
 	const vector<idx_t> &LocalFilters() const {

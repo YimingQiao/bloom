@@ -139,6 +139,108 @@ double SampleFilterProfiler::EstimateLocalEvaluationNS(const vector<idx_t> &filt
 	return elapsed;
 }
 
+double SampleFilterProfiler::EstimateEvaluationNS(const vector<idx_t> &filters, vector<idx_t> *order) const {
+	if (order) {
+		order->clear();
+	}
+	const auto rows = SampleSize();
+	if (filters.empty() || !rows) {
+		return 0;
+	}
+	const auto n = filters.size();
+	if (n == 1) {
+		if (order) {
+			order->push_back(filters.front());
+		}
+		return observations_[filters.front()].evaluation_ns;
+	}
+
+	// For a prefix S, only rows passing every filter in S reach the next
+	// filter. Their number depends on S, independently of its ordering.
+	constexpr idx_t max_exact_filters = 16;
+	if (n <= max_exact_filters) {
+		const idx_t states = idx_t(1) << n;
+		const idx_t full = states - 1;
+		vector<idx_t> survivors(states, 0);
+		// Histogram the observed pass patterns, then sum over supersets.
+		for (idx_t row = 0; row < rows; row++) {
+			idx_t pattern = 0;
+			const auto bit = uint64_t(1) << (row % 64);
+			for (idx_t i = 0; i < n; i++) {
+				if (observations_[filters[i]].passes[row / 64] & bit) {
+					pattern |= idx_t(1) << i;
+				}
+			}
+			survivors[pattern]++;
+		}
+		for (idx_t bit = 1; bit < states; bit <<= 1) {
+			for (idx_t base = 0; base < states; base += 2 * bit) {
+				for (idx_t i = base; i < base + bit; i++) {
+					survivors[i] += survivors[i + bit];
+				}
+			}
+		}
+		vector<double> best(states, 0);
+		vector<uint8_t> next(order ? states : 0);
+		for (idx_t mask = full; mask-- > 0;) {
+			best[mask] = std::numeric_limits<double>::infinity();
+			for (idx_t i = 0; i < n; i++) {
+				auto bit = idx_t(1) << i;
+				if (mask & bit) {
+					continue;
+				}
+				auto cost = observations_[filters[i]].evaluation_ns * double(survivors[mask]) / rows +
+				            best[mask | bit];
+				if (cost < best[mask]) {
+					best[mask] = cost;
+					if (order) {
+						next[mask] = static_cast<uint8_t>(i);
+					}
+				}
+			}
+		}
+		if (order) {
+			for (idx_t mask = 0; mask != full;) {
+				auto i = next[mask];
+				order->push_back(filters[i]);
+				mask |= idx_t(1) << i;
+			}
+		}
+		return best[0];
+	}
+
+	// Bound optimizer work for unusually large conjunctions. Greedily rank
+	// each next filter by cost per newly rejected row of the current prefix.
+	vector<idx_t> remaining = filters;
+	vector<idx_t> prefix;
+	double total = 0;
+	idx_t input = rows;
+	while (!remaining.empty()) {
+		idx_t selected = 0, output = input;
+		double lowest = std::numeric_limits<double>::infinity();
+		prefix.push_back(remaining.front());
+		for (idx_t i = 0; i < remaining.size(); i++) {
+			prefix.back() = remaining[i];
+			auto passed = Count(prefix);
+			auto rank = input > passed ? observations_[remaining[i]].evaluation_ns / (input - passed)
+			                           : std::numeric_limits<double>::infinity();
+			if (!i || rank < lowest) {
+				selected = i;
+				output = passed;
+				lowest = rank;
+			}
+		}
+		prefix.back() = remaining[selected];
+		total += observations_[prefix.back()].evaluation_ns * double(input) / rows;
+		input = output;
+		remaining.erase(remaining.begin() + selected);
+	}
+	if (order) {
+		*order = std::move(prefix);
+	}
+	return total;
+}
+
 idx_t SampleFilterProfiler::Count(const vector<idx_t> &filters) const {
 	if (filters.empty()) {
 		return SampleSize();
@@ -163,6 +265,13 @@ void SampleFilterProfiler::Log(const string &table, const vector<idx_t> &filters
 	auto joint = Count(filters);
 	std::cerr << "  [Bloom-FilterProfile] table=" << std::quoted(table) << " rows=" << SampleSize()
 	          << " filters=" << filters.size() << " joint_pass=" << joint << '\n';
+	vector<idx_t> order;
+	auto cost = EstimateEvaluationNS(filters, &order);
+	std::cerr << "  [Bloom-FilterCostOrder] table=" << std::quoted(table) << " sample_ns=" << cost << " ids=";
+	for (auto id : order) {
+		std::cerr << id << " ";
+	}
+	std::cerr << '\n';
 	for (idx_t i = 0; i < filters.size(); i++) {
 		vector<idx_t> others;
 		for (idx_t j = 0; j < filters.size(); j++) {

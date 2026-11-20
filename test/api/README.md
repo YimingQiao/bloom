@@ -15,8 +15,8 @@ Standalone pass-bitmap profiling check:
 
 Checks correlated conjunctions, OR grouping, NULLs, partial bitmap words,
 constant/empty results, native PRF evaluation, and reuse by filter identity plus
-column binding and refreshing pending predicates on a reused sample. It also compares accumulated
-cost-prefix counts against direct row evaluation, including empty samples,
+column binding and refreshing pending predicates on a reused sample. It also compares the modeled order and cost with exhaustive permutation search
+using direct row evaluation, including empty samples,
 runtime-only filters, NULLs and partial bitmap words. End-to-end profiling regressions:
 
     build/release/test/unittest --stdin < test/sql/transfer/filter_profiling.test

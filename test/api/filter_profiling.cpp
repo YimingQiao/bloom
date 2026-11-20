@@ -15,40 +15,34 @@ static void Require(bool ok, const char *what) {
 	if (!ok)
 		throw std::runtime_error(what);
 }
-// Independent reference: count matching sample rows directly, without bitmap
-// prefix accumulation, using the same measured costs and ordering policy.
-static void CheckLocalCost(const SampleFilterProfiler &profiler, const vector<idx_t> &active) {
-	vector<idx_t> runtime, local;
-	const auto &observations = profiler.Observations();
-	for (auto id : active) {
-		(observations[id].expression ? local : runtime).push_back(id);
-	}
-	auto rank = [&](idx_t id) {
-		auto rejected = profiler.SampleSize() - observations[id].passed;
-		return rejected ? observations[id].evaluation_ns / rejected : std::numeric_limits<double>::infinity();
-	};
-	std::stable_sort(local.begin(), local.end(), [&](idx_t a, idx_t b) { return rank(a) < rank(b); });
-	vector<idx_t> counts(local.size(), 0);
-	for (idx_t row = 0; row < profiler.SampleSize(); row++) {
-		auto passes = [&](idx_t id) {
-			return observations[id].passes[row / 64] & (uint64_t(1) << (row % 64));
-		};
-		if (!std::all_of(runtime.begin(), runtime.end(), passes)) {
-			continue;
-		}
-		for (idx_t i = 0; i < local.size(); i++) {
-			counts[i]++;
-			if (!passes(local[i])) {
-				break;
+// Check the chosen order and cost against all permutations using direct row evaluation.
+static void CheckFilterCost(const SampleFilterProfiler &profiler, vector<idx_t> active) {
+	auto cost = [&](const vector<idx_t> &order) {
+		double total = 0;
+		for (idx_t row = 0; row < profiler.SampleSize(); row++) {
+			for (auto id : order) {
+				const auto &obs = profiler.Observations()[id];
+				total += obs.evaluation_ns / profiler.SampleSize();
+				if (!(obs.passes[row / 64] & (uint64_t(1) << (row % 64)))) {
+					break;
+				}
 			}
 		}
+		return total;
+	};
+	std::sort(active.begin(), active.end());
+	double best = std::numeric_limits<double>::infinity();
+	do {
+		best = std::min(best, cost(active));
+	} while (std::next_permutation(active.begin(), active.end()));
+	vector<idx_t> order;
+	auto estimate = profiler.EstimateEvaluationNS(active, &order);
+	Require(std::abs(estimate - best) <= 1e-9 * (1 + best), "minimum over all sample orders");
+	Require(std::abs(estimate - cost(order)) <= 1e-9 * (1 + best), "chosen order attains minimum");
+	if (profiler.SampleSize()) {
+		std::sort(order.begin(), order.end());
+		Require(order == active, "chosen order contains every pending filter");
 	}
-	double expected = 0;
-	for (idx_t i = 0; i < local.size() && profiler.SampleSize(); i++) {
-		expected += observations[local[i]].evaluation_ns * double(counts[i]) / double(profiler.SampleSize());
-	}
-	Require(std::abs(profiler.EstimateLocalEvaluationNS(active) - expected) <= 1e-8,
-	        "cost prefix counts match direct row evaluation");
 }
 int main() {
 	DuckDB db(nullptr);
@@ -109,27 +103,29 @@ int main() {
 	entry.chunk_cols = {3};
 	auto id = profiler.AddRuntime(entry);
 	Require(profiler.Count({id}) == runtime_count, "runtime filter on raw rows");
+	Require(profiler.EstimateLocalEvaluationNS({id}) == 0, "received filters contribute no local predicate cost");
 	auto elapsed = profiler.Observations()[id].evaluation_ns;
 	Require(profiler.AddRuntime(entry) == id && profiler.Observations()[id].evaluation_ns == elapsed,
 	        "cached immutable filter");
 	auto active = profiler.LocalFilters();
 	active.push_back(id);
 	Require(profiler.Count(active) == joint_count, "intersection equals full joint evaluation");
-	CheckLocalCost(profiler, {});
-	CheckLocalCost(profiler, {id});
-	CheckLocalCost(profiler, {2});
-	CheckLocalCost(profiler, profiler.LocalFilters());
-	CheckLocalCost(profiler, active);
+	CheckFilterCost(profiler, {});
+	CheckFilterCost(profiler, {id});
+	CheckFilterCost(profiler, {2});
+	CheckFilterCost(profiler, profiler.LocalFilters());
+	CheckFilterCost(profiler, active);
 	entry.chunk_cols = {4};
 	auto second = profiler.AddRuntime(entry);
 	Require(second != id && profiler.Count({second}) == second_count, "same filter different bound column");
 	active.push_back(second);
-	CheckLocalCost(profiler, active);
+	CheckFilterCost(profiler, {id, 0, second});
+	CheckFilterCost(profiler, active);
 	Require(profiler.Count(profiler.LocalFilters()) == local_count, "runtime probing preserves raw sample");
 	BoundConstantExpression never(Value(LogicalType::BOOLEAN));
 	profiler.AddLocal(never);
 	Require(profiler.Count(profiler.LocalFilters()) == 0, "NULL predicate rejects every row");
-	CheckLocalCost(profiler, profiler.LocalFilters());
+	CheckFilterCost(profiler, profiler.LocalFilters());
 	Require(profiler.MemoryUsage() > 0, "bitmap memory accounted");
 	auto observation_count = profiler.Observations().size();
 	auto local_elapsed = profiler.Observations()[0].evaluation_ns;
@@ -145,6 +141,6 @@ int main() {
 	SampleFilterProfiler empty_profiler(ctx, empty, {0, 1, 2, 3, 4});
 	empty_profiler.AddLocal(always);
 	Require(empty_profiler.Count({0}) == 0, "empty sample");
-	CheckLocalCost(empty_profiler, {0});
+	CheckFilterCost(empty_profiler, {0});
 	std::cout << "Passed filter-profile bitmap, correlation, NULL, OR, cache, binding and empty-sample checks\n";
 }

@@ -316,7 +316,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    Value::UBIGINT(EnvUBigIntDefault("BLOOM_IN_MEMORY_SAMPLE_SIZE", 4096)), ValidateInMemorySampleSize);
 	config.AddExtensionOption(
 	    "bloom_filter_cost_rows_per_ms",
-	    "Schedule by 2 * output rows + this coefficient * estimated filter milliseconds; zero disables",
+	    "Schedule by (filter milliseconds + 2 * output rows / coefficient) * output rows; zero selects by output rows alone",
 	    LogicalType::DOUBLE, Value::DOUBLE(RPTSamplingConfig().filter_cost_rows_per_ms));
 	config.AddExtensionOption("bloom_filter_profiling",
 	                          "Profile pending predicates and transfer filters on a common cached sample",

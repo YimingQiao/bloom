@@ -58,31 +58,24 @@ instant/prepared samples and cached CDC samples; initial `CHUNK_GET` estimates u
 
 ### Filter-cost scheduling
 
-`bloom_filter_cost_rows_per_ms` defaults to `2500`. Bloom selects the eligible
-table minimizing `2 * estimated_output_rows + coefficient * filter_ms`.
-The coefficient is measured in equivalent rows per millisecond; it is not a
-measured throughput constant. Set it to zero to use output-only ordering.
+Bloom ranks eligible tables by `(filter_ms + 0.00006 * estimated_output_rows) * estimated_output_rows`
+by default. Here `filter_ms` is the total estimated filter time on the candidate
+table. The 60 ns offset represents per-row materialization and filter construction.
+The setting `bloom_filter_cost_rows_per_ms` controls the offset as
+`2 / coefficient` milliseconds. Set it to zero for output-only ordering.
 A positive coefficient enables profiling automatically. All available predicates
 are evaluated when the selected table is processed.
 
-The profiler measures each local predicate once on the raw cached sample. A new
-runtime filter is evaluated for its pass bitmap, but existing predicates are
-not rerun for timing. The estimated local computation is the sum of each local
-predicate's measured per-row cost multiplied by its estimated input row count.
-Input counts come from bitmap intersections, preserving observed correlations.
-The estimator accumulates these intersections once per bitmap word; it does not
-recompute the full prefix for every predicate. A single filter's survival count
-is reused directly from its observation.
-Cheap runtime filters are assumed to precede local predicates and are not charged
-in the cost surcharge. Local order uses increasing measured cost per rejected
-row as an approximation to native adaptive ordering. This changes no actual
-scan ordering. The per-row costs are reused for the lifetime of the sample;
-a new materialized snapshot or changed sample layout gets new observations.
+The scheduler charges each pending local predicate and incoming transfer filter.
+It multiplies each filter's measured per-row cost by the estimated rows reaching
+that filter. Intersections of the observed pass bitmaps preserve correlations.
+For up to 16 filters it computes the lowest estimated cost over all orders.
+For larger sets it greedily chooses the lowest cost per additional row rejected.
+This order is used for scoring. DuckDB controls the actual scan order.
 
-The estimate excludes acquisition, decoding, bitmap bookkeeping, and output
-materialization. Native filter order/fusion, conditional string distributions,
-indexes and caches may make actual costs differ. All pending filters still
-participate in the cardinality estimate, even when their computation is uncharged.
+The estimate covers predicate evaluation. Acquisition, decoding, bitmap
+bookkeeping and output materialization are excluded. A new materialized
+snapshot or changed sample layout gets new observations.
 
 Sample time is extrapolated by current input rows / sample rows. Base tables use
 the original cardinality; materialized CDCs use their current size and only
@@ -241,8 +234,7 @@ of base-table sampling, for example `SET bloom_in_memory_sample_size = 4096`.
 The unfiltered sample is cached for the current materialized collection and
 reused with the current predicates and transfer filters. Replacing or extending the collection invalidates its sample; adding a required column also
 rebuilds it. Sampling never modifies the source data. When a partial sample has
-no survivors, the estimator returns a small positive row count (the weight of one sample row, rounded down), rather than scanning the
-full collection or declaring it empty. A census can still return an exact zero.
+no survivors, the estimator uses the rounded weight of one sampled row. A census can still return an exact zero.
 
 `bloom_sample_seed` controls reproducibility. CDC sampling has no block/row mode
 switch; the former `bloom_sample_rate` setting is removed. Base-table DuckDB and
@@ -266,7 +258,7 @@ ORDER BY connection_id, query_id, event_sequence;
 visited, cache reuse, and acquisition/filtering time. `sampling_se` is an
 estimated standard error of the survival fraction, not a confidence guarantee;
 it is zero for a census. `estimate_status=sampled_zero_floor` identifies a
-zero-survivor partial sample whose estimate was raised to a positive value.
+zero-survivor partial sample whose estimate represents one sampled match, or source rows divided by sampled rows, rounded to the nearest row.
 
 For exact diagnostic verification of the **same CDC and filters**, use DEBUG:
 

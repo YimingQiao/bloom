@@ -371,7 +371,7 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		}
 		survivors = cache->profiler->Count(active);
 		if (filter_time_ms) {
-			*filter_time_ms = cache->profiler->EstimateLocalEvaluationNS(active) * double(n) / double(k) / 1e6;
+			*filter_time_ms = cache->profiler->EstimateEvaluationNS(active, nullptr) * double(n) / double(k) / 1e6;
 		}
 		Value log;
 		if (profile_context->TryGetCurrentSetting("bloom_log_transfer_steps", log) && log.GetValue<bool>()) {
@@ -387,11 +387,10 @@ static idx_t SampleRows(const ColumnDataCollection &cdc, const vector<column_t> 
 		}
 	}
 	const auto filtered = std::chrono::steady_clock::now();
-	// No sampled survivor means low selectivity, not a proven empty table.
-	// Use one sample row's weight without scanning additional source rows.
+	// Extrapolate one sampled match when a partial sample misses every match.
 	const bool zero_floor = survivors == 0 && k < n;
-	const auto estimate =
-	    zero_floor ? n / k : static_cast<idx_t>(std::llround(double(n) * double(survivors) / double(k)));
+	const idx_t estimated_hits = zero_floor ? 1 : survivors;
+	const auto estimate = static_cast<idx_t>(std::llround(double(n) * double(estimated_hits) / double(k)));
 	if (stats_context) {
 		auto ms = [](auto a, auto b) {
 			return StringUtil::Format("%.17g", std::chrono::duration<double, std::milli>(b - a).count());
@@ -654,7 +653,7 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		}
 		survivors = sample.profiler->Count(active);
 		if (config_.filter_cost_rows_per_ms > 0) {
-			filter_time_ms_ = sample.profiler->EstimateLocalEvaluationNS(active) * double(sample.total_rows) /
+			filter_time_ms_ = sample.profiler->EstimateEvaluationNS(active, nullptr) * double(sample.total_rows) /
 			                  double(sample.sampled_rows) / 1e6;
 		}
 		if (LogEnabled()) {
@@ -675,20 +674,8 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 		          << " survivors=" << survivors << " elapsed=" << elapsed << "ms" << '\n';
 	}
 
-	// Extrapolate to the full table. A 0 estimate is special downstream (treated
-	// as EmptyResult), so only return 0 when we sampled the WHOLE table — a
-	// partial sample can miss a rare-but-present match, and reporting empty would
-	// wrongly drop all rows. With 0 survivors in a partial sample, report the
-	// weight of a single sample row (total/sample) rather than 1: a hard floor of
-	// 1 would tie with genuinely single-row tables (whose full-sample estimate is
-	// exact) and mislead the excitation ordering into flooding an uncertain table
-	// first.
-	//
-	// A 0 is only trustworthy for a pure LOCAL predicate on a fully materialized
-	// sample: then the whole table was checked. With BF filters applied the
-	// probe BF was itself built from the *source* table's sample, so it has
-	// false negatives — 0 survivors here does not mean the join is empty, and
-	// returning 0 would wrongly rewrite a non-empty table to EmptyResult.
+	// Only a census of local predicates can establish an exact zero here.
+	// A partial sample or a filter derived from sampled keys can miss real matches.
 	idx_t est;
 	string estimate_status = "sampled";
 	if (survivors == 0) {
@@ -696,7 +683,7 @@ idx_t SamplingCardinalityEstimator::EstimateOnSample(TableSampleManager::Entry &
 			est = 0;
 			estimate_status = "sampled_exact_zero";
 		} else {
-			est = MaxValue<idx_t>(sample.total_rows / MaxValue<idx_t>(sample.sampled_rows, 1), 1);
+			est = MaxValue<idx_t>(1, std::llround(double(sample.total_rows) / double(sample.sampled_rows)));
 			estimate_status = "sampled_zero_floor";
 		}
 	} else {
