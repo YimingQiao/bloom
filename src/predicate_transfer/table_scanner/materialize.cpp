@@ -27,6 +27,11 @@
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
 
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
+
 #include <chrono>
 #include <cstdio>
 #include <functional>
@@ -467,6 +472,9 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 			is_pruned_ = true;
 			new_col_ids.push_back(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID));
 			rowid_col_ids_pos = new_col_ids.size() - 1;
+			if (plan_copy.get() == &get && !get.projection_ids.empty()) {
+				get.projection_ids.emplace_back(rowid_col_ids_pos);
+			}
 
 			// Walk intermediate PROJECTIONs to add rowid expression
 			LogicalOperator *cur = plan_copy.get();
@@ -507,6 +515,24 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters) {
 	if (late_mat_get && rowid_col_ids_pos != DConstants::INVALID_INDEX) {
 		ColumnBinding rowid_binding(late_mat_get->table_index, ProjectionIndex(rowid_col_ids_pos));
 		rowid_chunk_col_ = FindChunkCol(rowid_binding);
+		// Pruning can renumber GET columns. Publish their original bindings
+		// before later filters and payload assembly access the compact keys.
+		auto original = ScannerFilterSet::GetPushdownScan(table_op_);
+		if (original && original->table_index == late_mat_get->table_index) {
+			const auto &columns = original->GetColumnIds();
+			for (idx_t i = 0; i < output_bindings_.size(); i++) {
+				auto &binding = output_bindings_[i];
+				if (i == rowid_chunk_col_) {
+					binding = ColumnBinding();
+				} else if (binding.table_index == original->table_index) {
+					const auto &physical = late_mat_get->GetColumnIds()[binding.column_index];
+					auto it = std::find(columns.begin(), columns.end(), physical);
+					if (it != columns.end()) {
+						binding.column_index = ProjectionIndex(it - columns.begin());
+					}
+				}
+			}
+		}
 	}
 	auto late_materialization_end = MaterializeClock::now();
 
@@ -645,6 +671,90 @@ void TableMaterialization::ResetScan() {
 
 idx_t TableMaterialization::Count() const {
 	return data_ ? data_->Count() : 0;
+}
+
+bool TableMaterialization::TryFetchDeferred(const std::function<bool(idx_t)> &reserve_bytes) {
+	if (!is_pruned_ || !data_ || pending_expression_ || rowid_chunk_col_ == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	auto get = ScannerFilterSet::GetPushdownScan(table_op_);
+	if (!get || !get->GetTable() || !get->GetTable()->IsDuckTable()) {
+		return false;
+	}
+	auto &table = get->GetTable()->Cast<DuckTableEntry>();
+	auto bindings = table_op_.GetColumnBindings();
+	const auto &types = table_op_.types;
+	if (types.size() != bindings.size()) {
+		return false;
+	}
+	vector<StorageIndex> columns;
+	vector<LogicalType> fetch_types;
+	vector<idx_t> positions;
+	const idx_t retained_width = data_->ColumnCount();
+	for (idx_t i = 0; i < bindings.size(); i++) {
+		auto pos = FindChunkCol(bindings[i]);
+		if (pos < retained_width && pos != rowid_chunk_col_ && data_->Types()[pos] == types[i]) {
+			positions.push_back(pos);
+			continue;
+		}
+		const auto &binding = bindings[i];
+		if (binding.table_index != get->table_index || binding.column_index >= get->GetColumnIds().size()) {
+			return false;
+		}
+		const auto &column = get->GetColumnIds()[binding.column_index];
+		if (column.IsVirtualColumn() || column.HasChildren() || column.HasType() ||
+		    get->GetColumnType(column) != types[i]) {
+			return false;
+		}
+		positions.push_back(retained_width + columns.size());
+		columns.push_back(table.GetStorageIndex(column));
+		fetch_types.push_back(types[i]);
+	}
+	if (columns.empty() || !reserve_bytes(data_->AllocationSize())) {
+		return false;
+	}
+	const auto start = MaterializeClock::now();
+	auto full = make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), types);
+	auto &transaction = DuckTransaction::Get(context_, table.catalog);
+	DataChunk input, payload, output;
+	data_->InitializeScanChunk(input);
+	payload.Initialize(context_, fetch_types);
+	output.Initialize(context_, types);
+	ColumnDataScanState scan;
+	data_->InitializeScan(scan);
+	while (data_->Scan(scan, input)) {
+		ColumnFetchState state; // Release pinned payload blocks between batches.
+		auto &row_ids = input.data[rowid_chunk_col_];
+		row_ids.Flatten();
+		payload.Reset();
+		table.GetStorage().Fetch(transaction, payload, columns, row_ids, input.size(), state);
+		// Only positional alignment can pair fetched payloads with retained keys.
+		if (payload.size() != input.size()) {
+			return false;
+		}
+		output.Reset();
+		for (idx_t i = 0; i < positions.size(); i++) {
+			auto pos = positions[i];
+			output.data[i].Reference(pos < retained_width ? input.data[pos] : payload.data[pos - retained_width]);
+		}
+		output.SetCardinalityUnsafe(input.size());
+		if (!reserve_bytes(full->AllocationSize() + output.GetAllocationSize())) {
+			return false;
+		}
+		full->Append(output);
+	}
+	if (!reserve_bytes(full->AllocationSize())) {
+		return false;
+	}
+	if (LogEnabled()) {
+		std::cerr << "[BatchPayloadFetch] table=" << table.name << " rows=" << full->Count()
+		          << " ms=" << MaterializeElapsedMs(start, MaterializeClock::now()) << '\n';
+	}
+	output_bindings_ = std::move(bindings);
+	is_pruned_ = false;
+	rowid_chunk_col_ = DConstants::INVALID_INDEX;
+	ReplaceData(std::move(full));
+	return true;
 }
 
 void TableMaterialization::ReplaceData(unique_ptr<ColumnDataCollection> data) {

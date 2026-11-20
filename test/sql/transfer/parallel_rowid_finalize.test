@@ -43,3 +43,22 @@ JOIN rpt_rowid_edge e ON a.bridge = e.bridge
 WHERE s.keep AND e.keep;
 ----
 75000	3749925000	7499850000
+
+# A compact key and two deferred strings must stay aligned across fetch batches.
+statement ok
+CREATE TABLE rpt_fetch_titles AS
+SELECT CASE WHEN i % 7 <> 0 THEN 'title-' || i::VARCHAR END AS title,
+       i::INTEGER AS id, 'code-' || (i * 13)::VARCHAR AS code
+FROM range(10000) t(i);
+
+query III
+SELECT count(*),
+       count(*) FILTER (WHERE s.title IS DISTINCT FROM
+                        CASE WHEN p.k % 7 <> 0 THEN 'title-' || p.k::VARCHAR END),
+       count(*) FILTER (WHERE s.code <> 'code-' || (p.k * 13)::VARCHAR)
+FROM rpt_fetch_titles s
+JOIN rpt_rowid_probe p ON p.k = s.id
+JOIN rpt_rowid_edge e ON e.bridge = s.id
+WHERE e.keep;
+----
+7500	0	0

@@ -36,6 +36,7 @@ public:
 	idx_t Count() const;
 	idx_t FindChunkCol(const ColumnBinding &binding) const;
 
+	bool TryFetchDeferred(const std::function<bool(idx_t)> &reserve_bytes);
 	void ReplaceData(unique_ptr<ColumnDataCollection> data);
 	shared_ptr<ColumnDataCollection> TakeData() {
 		return std::move(data_);
