@@ -433,10 +433,6 @@ shared_ptr<RPTFilter> TransferExecutor::FinalizeRowIDBitmap(LogicalOperator &op)
 	}
 	auto &scanner = *scanner_it->second;
 
-	// Compact unconditionally: flooding may leave pending BFs that never
-	// triggered a Compact, and BuildMemoryScan would otherwise see unshrunk data.
-	scanner.Compact();
-
 	idx_t rowid_chunk_col = scanner.GetRowIdChunkCol();
 	if (rowid_chunk_col == DConstants::INVALID_INDEX) {
 		return nullptr;

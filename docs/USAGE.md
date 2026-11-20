@@ -90,6 +90,18 @@ validation; it is not a globally optimal total-time model and does not charge
 I/O or decoding. Focused results and the reproducible runner live under
 `sspt-experiments/heavy-filter-job20b/`.
 
+### Late materialization
+
+Bloom can defer VARCHAR output columns during predicate transfer. It keeps all
+other outputs, join keys, filter inputs, and the row ID on the first scan.
+Set `bloom_late_materialize=false` to disable this optimization. Bloom defers eligible strings when the estimated surviving fraction is at most
+0.5% and at most 8,192 rows are expected to survive. It also defers them when
+the deferred width multiplied by the estimated rejected fraction exceeds the
+retained width times `bloom_late_min_byte_ratio` (default 2.0). The retained
+width excludes the row ID. After compaction, batch fetch is eligible for
+at most 4,096 surviving rows at a density of at most 0.5% of the rows in
+the row groups they touch. Denser selections use the bitmap scan.
+
 ## Configuration
 
 Bloom works without tuning. Instant sampling is the default: it acquires a

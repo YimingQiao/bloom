@@ -105,6 +105,18 @@ void ExcitationGraphManager::GenerateJoinStageExecutionPlan() {
 			requested = SaturatingAdd(requested, row_id_scan_memory);
 			auto retained = RetainedMemoryUsage();
 			if (FitsMemoryBudget(retained, requested)) {
+				scanner->Compact();
+				if (scanner->IsPruned()) {
+					// Keep the compact keys alive until the full collection is ready.
+					auto compacted_memory = RetainedMemoryUsage();
+					auto bitmap_bytes = SaturatingAdd(bitmap_memory, row_id_scan_memory);
+					auto reserve_fetch = [&](idx_t bytes) {
+						return FitsMemoryBudget(compacted_memory, MaxValue(bytes, bitmap_bytes));
+					};
+					if (scanner->TryFetchDeferred(reserve_fetch)) {
+						continue;
+					}
+				}
 				auto bitmap = executor_.FinalizeRowIDBitmap(*op);
 				if (bitmap) {
 					row_id_filters_[table_id] = bitmap;

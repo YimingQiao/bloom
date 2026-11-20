@@ -360,10 +360,18 @@ static void LoadInternal(ExtensionLoader &loader) {
 	    "bloom_excitation_mode",
 	    "Repeated-transfer information criterion: 'table_size' or exact 'join_key_ndv' equality domains",
 	    LogicalType::VARCHAR, Value(EnvStringDefault("BLOOM_EXCITATION_MODE", "table_size")), ValidateExcitationMode);
+	config.AddExtensionOption("bloom_late_min_byte_ratio", "Threshold for selectivity-adjusted deferred bytes per retained byte in the width-based late materialization rule",
+	                          LogicalType::DOUBLE, Value::DOUBLE(2.0),
+	                          [](ClientContext &, SetScope, Value &v) {
+		                          auto ratio = v.GetValue<double>();
+		                          if (!std::isfinite(ratio) || ratio < 0) {
+			                          throw InvalidInputException("bloom_late_min_byte_ratio must be finite and nonnegative");
+		                          }
+	                          });
 	config.AddExtensionOption(
 	    "bloom_late_materialize",
-	    "Experimental: materialize transfer keys and row IDs, then filter the original table scan",
-	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LATE_MATERIALIZE", false)));
+	    "Defer eligible VARCHAR payloads during predicate transfer",
+	    LogicalType::BOOLEAN, Value::BOOLEAN(EnvFlagDefault("BLOOM_LATE_MATERIALIZE", true)));
 
 	TableFunction preload_samples("bloom_preload_samples", {}, RPTSamplePreloadFunction, RPTSamplePreloadBind,
 	                              RPTSamplePreloadInit);

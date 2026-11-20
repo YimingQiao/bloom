@@ -1,0 +1,71 @@
+# name: test/sql/transfer/payload_fetch_density.test
+# description: choose between row-id fetch and bitmap scan at the survivor density boundary
+# group: [transfer]
+
+require bloom
+
+statement ok
+SET threads=1;
+
+statement ok
+SET bloom_late_min_byte_ratio=0;
+
+statement ok
+SET bloom_late_materialize=true;
+
+statement ok
+CREATE TABLE density_payload AS
+SELECT i::INTEGER id, (i * 3)::BIGINT numeric_payload, 'name-' || i::VARCHAR payload FROM range(100000) s(i);
+
+statement ok
+CREATE TABLE density_edges AS
+SELECT i::INTEGER k, i::INTEGER j FROM range(100000) s(i);
+
+statement ok
+CREATE TABLE density_probes AS
+SELECT i::INTEGER j, i % 200 = 0 keep FROM range(100000) s(i);
+
+statement ok
+SET enable_profiling='json';
+
+statement ok
+SET profiling_output='{TEST_DIR}/density_500.json';
+
+query II
+SELECT count(*), count(*) FILTER (WHERE t.payload <> 'name-' || e.k::VARCHAR OR t.numeric_payload <> 3 * e.k)
+FROM density_probes p JOIN density_edges e ON p.j=e.j
+JOIN density_payload t ON e.k=t.id WHERE p.keep;
+----
+500	0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT contains(content, '.density_payload"') FROM read_text('{TEST_DIR}/density_500.json');
+----
+false
+
+statement ok
+UPDATE density_probes SET keep=true WHERE j=99999;
+
+statement ok
+SET enable_profiling='json';
+
+statement ok
+SET profiling_output='{TEST_DIR}/density_501.json';
+
+query II
+SELECT count(*), count(*) FILTER (WHERE t.payload <> 'name-' || e.k::VARCHAR OR t.numeric_payload <> 3 * e.k)
+FROM density_probes p JOIN density_edges e ON p.j=e.j
+JOIN density_payload t ON e.k=t.id WHERE p.keep;
+----
+501	0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT contains(content, '.density_payload"') FROM read_text('{TEST_DIR}/density_501.json');
+----
+true

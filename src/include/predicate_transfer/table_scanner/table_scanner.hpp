@@ -43,6 +43,9 @@ public:
 	idx_t Count() const;
 	CompactResult Compact(const vector<StatsRequest> &stats_requests = {});
 
+	bool TryFetchDeferred(const std::function<bool(idx_t)> &reserve_bytes) {
+		return materialization_.TryFetchDeferred(reserve_bytes);
+	}
 	idx_t FindChunkCol(const ColumnBinding &binding) const {
 		return materialization_.FindChunkCol(binding);
 	}

@@ -10,11 +10,16 @@ SET threads = 8;
 statement ok
 SET bloom_late_materialize = true;
 
+# A permissive ratio still keeps numeric payloads on the initial scan.
+statement ok
+SET bloom_late_min_byte_ratio = 0;
+
 statement ok
 CREATE TABLE rpt_rowid_source AS
 SELECT i::INTEGER k,
        i::INTEGER bridge,
        (i * 2)::BIGINT payload,
+       'v' || i::VARCHAR label,
        (i % 4 != 3) keep
 FROM range(100000) t(i);
 
@@ -34,6 +39,12 @@ SELECT i::INTEGER bridge,
        (i % 4 != 3) keep
 FROM range(100000) t(i);
 
+statement ok
+SET enable_profiling='json';
+
+statement ok
+SET profiling_output='{TEST_DIR}/parallel_rowid_finalize.json';
+
 query III
 SELECT count(*), sum(s.bridge), sum(s.payload)
 FROM rpt_rowid_probe p
@@ -43,3 +54,58 @@ JOIN rpt_rowid_edge e ON a.bridge = e.bridge
 WHERE s.keep AND e.keep;
 ----
 75000	3749925000	7499850000
+
+statement ok
+PRAGMA disable_profiling;
+
+# The numeric-only payload is already available in memory.
+query I
+SELECT contains(content, '__internal_bloom_rpt_filter(rowid)')
+FROM read_text('{TEST_DIR}/parallel_rowid_finalize.json');
+----
+false
+
+# Adding a string payload exercises parallel row-id finalization on the same rows.
+statement ok
+SET enable_profiling='json';
+
+statement ok
+SET profiling_output='{TEST_DIR}/parallel_string_finalize.json';
+
+query II
+SELECT sum(s.payload), count(*) FILTER (WHERE s.label <> 'v' || p.k::VARCHAR)
+FROM rpt_rowid_probe p
+JOIN rpt_rowid_source s ON p.k = s.k
+JOIN rpt_rowid_anchor a ON s.bridge = a.bridge
+JOIN rpt_rowid_edge e ON a.bridge = e.bridge
+WHERE s.keep AND e.keep;
+----
+7499850000	0
+
+statement ok
+PRAGMA disable_profiling;
+
+query I
+SELECT contains(content, '__internal_bloom_rpt_filter(rowid)')
+FROM read_text('{TEST_DIR}/parallel_string_finalize.json');
+----
+true
+
+# A compact key and two deferred strings must stay aligned across fetch batches.
+statement ok
+CREATE TABLE rpt_fetch_titles AS
+SELECT CASE WHEN i % 7 <> 0 THEN 'title-' || i::VARCHAR END AS title,
+       i::INTEGER AS id, 'code-' || (i * 13)::VARCHAR AS code
+FROM range(8192) t(i);
+
+query III
+SELECT count(*),
+       count(*) FILTER (WHERE s.title IS DISTINCT FROM
+                        CASE WHEN p.k % 7 <> 0 THEN 'title-' || p.k::VARCHAR END),
+       count(*) FILTER (WHERE s.code <> 'code-' || (p.k * 13)::VARCHAR)
+FROM rpt_fetch_titles s
+JOIN rpt_rowid_probe p ON p.k = s.id
+JOIN rpt_rowid_edge e ON e.bridge = s.id
+WHERE e.keep;
+----
+6144	0	0

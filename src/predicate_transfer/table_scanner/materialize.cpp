@@ -19,6 +19,7 @@
 #include "duckdb/planner/expression/bound_reference_expression.hpp"
 #include "duckdb/planner/expression/expression_barrier.hpp"
 #include "duckdb/planner/expression_iterator.hpp"
+#include "duckdb/planner/logical_operator_visitor.hpp"
 #include "duckdb/planner/filter/expression_filter.hpp"
 #include "duckdb/planner/filter/table_filter_functions.hpp"
 #include "duckdb/planner/operator/logical_column_data_get.hpp"
@@ -27,6 +28,15 @@
 #include "duckdb/planner/operator/logical_get.hpp"
 #include "duckdb/planner/operator/logical_projection.hpp"
 #include "duckdb/storage/buffer_manager.hpp"
+#include "duckdb/storage/data_table.hpp"
+#include "duckdb/storage/statistics/string_stats.hpp"
+
+#include <algorithm>
+#include "duckdb/catalog/catalog_entry/duck_table_entry.hpp"
+#include "duckdb/storage/table/row_group_collection.hpp"
+#include "duckdb/storage/table/row_group_segment_tree.hpp"
+#include "duckdb/storage/table/scan_state.hpp"
+#include "duckdb/transaction/duck_transaction.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -39,6 +49,43 @@ using MaterializeClock = std::chrono::steady_clock;
 
 static double MaterializeElapsedMs(MaterializeClock::time_point begin, MaterializeClock::time_point end) {
 	return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+// Expose the row ID through the same FILTER/MARK chain used to install the
+// final disk filter. Projection maps index the child's output, not the GET.
+static ColumnBinding ExposeScanRowId(LogicalOperator &op, LogicalGet &get) {
+	if (&op == &get) {
+		auto &columns = get.GetMutableColumnIds();
+		idx_t index = 0;
+		while (index < columns.size() && !columns[index].IsRowIdColumn()) {
+			++index;
+		}
+		if (index == columns.size()) {
+			columns.emplace_back(COLUMN_IDENTIFIER_ROW_ID);
+		}
+		auto &ids = get.projection_ids;
+		if (!ids.empty() && std::find(ids.begin(), ids.end(), ProjectionIndex(index)) == ids.end()) {
+			ids.emplace_back(index);
+		}
+		return ColumnBinding(get.table_index, ProjectionIndex(index));
+	}
+	auto &child = *op.children[0];
+	auto &map = op.type == LogicalOperatorType::LOGICAL_FILTER ? op.Cast<LogicalFilter>().projection_map
+	                                                          : op.Cast<LogicalComparisonJoin>().left_projection_map;
+	const auto old_bindings = child.GetColumnBindings();
+	auto row_id = ExposeScanRowId(child, get);
+	if (!map.empty()) {
+		const auto bindings = child.GetColumnBindings();
+		// A MARK column moves when its left input gains an output.
+		for (auto &index : map) {
+			index = ProjectionIndex(std::find(bindings.begin(), bindings.end(), old_bindings[index]) - bindings.begin());
+		}
+		const auto pos = ProjectionIndex(std::find(bindings.begin(), bindings.end(), row_id) - bindings.begin());
+		if (std::find(map.begin(), map.end(), pos) == map.end()) {
+			map.push_back(pos);
+		}
+	}
+	return row_id;
 }
 
 bool TableMaterialization::LogEnabled() const {
@@ -395,6 +442,91 @@ static void AddMaterializationRangePruning(LogicalOperator &op) {
 	}
 }
 
+// Called on the GET/FILTER/MARK path that can expose a real base row ID.
+static void KeepFilterColumns(LogicalOperator &plan, LogicalGet &get, const ScannerFilterSet &pending,
+                              column_binding_set_t &required) {
+	for (auto &filter : get.table_filters) {
+		required.insert(ColumnBinding(get.table_index, filter.GetIndex()));
+	}
+	for (auto &filter : get.table_filters.GetMultiColumnFilters()) {
+		for (auto idx : filter->Cast<ExpressionFilter>().column_indexes) {
+			required.insert(ColumnBinding(get.table_index, idx));
+		}
+	}
+	for (auto &filter : pending.Entries()) {
+		for (auto &binding : filter.bindings) {
+			required.insert(binding);
+		}
+	}
+	for (auto *op = &plan; op != &get; op = op->children[0].get()) {
+		LogicalOperatorVisitor::EnumerateExpressions(*op, [&](unique_ptr<Expression> *expr) {
+			ExpressionIterator::VisitExpression<BoundColumnRefExpression>(**expr,
+			    [&](const BoundColumnRefExpression &ref) { required.insert(ref.Binding()); });
+		});
+	}
+}
+
+// Compare widths of projected output columns. Predicate-only scan inputs do
+// not occupy space in the materialized result.
+static bool ShouldDeferPayload(ClientContext &context, LogicalOperator &plan, LogicalGet &get,
+                               column_binding_set_t &required, optional_idx estimated_rows, bool log) {
+	Value setting;
+	context.TryGetCurrentSetting("bloom_late_min_byte_ratio", setting);
+	plan.ResolveOperatorTypes();
+	auto bindings = plan.GetColumnBindings();
+	auto table = get.GetTable();
+	double kept = 0;
+	double deferred = 0;
+	for (idx_t i = 0; i < bindings.size(); i++) {
+		auto &type = plan.types[i];
+		if (type.IsNested()) {
+			return false;
+		}
+		double bytes = GetTypeIdSize(type.InternalType());
+		// Keep every non-string output on the first scan, including fixed-width
+		// payloads from scans that also project a deferred string.
+		if (type.id() != LogicalTypeId::VARCHAR) {
+			required.insert(bindings[i]);
+		}
+		bool retain = required.count(bindings[i]) != 0;
+		if (bindings[i].table_index == get.table_index && bindings[i].column_index < get.GetColumnIds().size()) {
+			const auto &column = get.GetColumnIds()[bindings[i].column_index];
+			if (column.IsRowIdColumn()) {
+				continue; // Keep the binding for fetch, but exclude it from the width estimate.
+			}
+			if (table && table->IsDuckTable() && !column.IsVirtualColumn() && !column.IsPushdownExtract() &&
+			    type.InternalType() == PhysicalType::VARCHAR && get.returned_types[column.GetPrimaryIndex()] == type) {
+				auto stats = table->GetStatistics(context, column.GetPrimaryIndex());
+				auto rows = table->GetStorage().GetTotalRows();
+				if (stats && rows) {
+					auto length = StringStats::TotalStringLength(*stats);
+					if (length.IsValid()) {
+						// The slot already holds short inlined strings. Use average
+						// logical length as a conservative payload-width estimate.
+						bytes = MaxValue<double>(bytes, double(length.GetIndex()) / rows);
+					}
+				}
+			}
+		}
+		(retain ? kept : deferred) += bytes;
+	}
+	auto threshold = setting.GetValue<double>();
+	auto base_rows = table && table->IsDuckTable() ? table->GetStorage().GetTotalRows() : 0;
+	auto selectivity = estimated_rows.IsValid() && base_rows
+	                       ? MinValue(1.0, double(estimated_rows.GetIndex()) / base_rows)
+	                       : 1.0;
+	bool small_result = estimated_rows.IsValid() && estimated_rows.GetIndex() <= 8192 && selectivity <= 0.005;
+	bool use_late = deferred > 0 && (small_result || deferred * (1.0 - selectivity) > kept * threshold);
+	if (log && table) {
+		double deferred_bytes = estimated_rows.IsValid() ? estimated_rows.GetIndex() * deferred : 0;
+		std::cerr << "  [LateBytes] table=" << table->name << " deferred=" << deferred << " retained=" << kept
+		          << " expected_rows=" << (estimated_rows.IsValid() ? double(estimated_rows.GetIndex()) : -1)
+		          << " deferred_bytes=" << deferred_bytes
+		          << " sel=" << selectivity << " base_rows=" << base_rows << " threshold=" << threshold << " eligible=" << use_late << '\n';
+	}
+	return use_late;
+}
+
 void TableMaterialization::Materialize(ScannerFilterSet &filters, optional_idx estimated_rows) {
 	auto total_start = MaterializeClock::now();
 	auto log_timing = LogEnabled();
@@ -424,32 +556,30 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters, optional_idx e
 	// reduces to a single FILTER/PROJ/COMPARISON_JOIN chain over a single
 	// LogicalGet. Other shapes (UNION, WINDOW, CROSS_PRODUCT, grouped AGG,
 	// CHUNK_GET, multi-GET joins, …) skip this step entirely.
-	LogicalOperator *leaf = plan_copy.get();
-	while ((leaf->type == LogicalOperatorType::LOGICAL_FILTER ||
-	        leaf->type == LogicalOperatorType::LOGICAL_PROJECTION ||
-	        leaf->type == LogicalOperatorType::LOGICAL_COMPARISON_JOIN) &&
-	       !leaf->children.empty()) {
-		leaf = leaf->children[0].get();
+	auto leaf = enable_late_materialization_ && !required_bindings_.empty()
+	                ? ScannerFilterSet::GetPushdownScan(*plan_copy) : nullptr;
+	if (leaf && leaf->GetTable() && leaf->GetTable()->IsDuckTable() &&
+	    leaf->virtual_columns.count(COLUMN_IDENTIFIER_ROW_ID)) {
+		KeepFilterColumns(*plan_copy, *leaf, filters, required_bindings_);
+	} else {
+		leaf = nullptr;
 	}
 
-	idx_t rowid_col_ids_pos = DConstants::INVALID_INDEX;
-	LogicalGet *late_mat_get = nullptr;
-	vector<ColumnBinding> pre_prune_bindings;
-	if (leaf->type == LogicalOperatorType::LOGICAL_GET && enable_late_materialization_ && !required_bindings_.empty()) {
-		auto &get = leaf->Cast<LogicalGet>();
-		late_mat_get = &get;
+	if (leaf && ShouldDeferPayload(context_, *plan_copy, *leaf, required_bindings_, estimated_rows, log_timing)) {
+		auto &get = *leaf;
 		auto col_count_before = get.GetColumnIds().size();
 
 		// Wrap in projection of required columns → RemoveUnusedColumns → unwrap
 		plan_copy->ResolveOperatorTypes();
 		auto bindings = plan_copy->GetColumnBindings();
-		pre_prune_bindings = bindings;
 		auto col_types = plan_copy->types;
 
+		vector<ColumnBinding> original_keys;
 		auto proj = make_uniq<LogicalProjection>(get.table_index, vector<unique_ptr<Expression>> {});
 		for (auto &req : required_bindings_) {
 			for (idx_t i = 0; i < bindings.size(); i++) {
 				if (bindings[i] == req) {
+					original_keys.push_back(req);
 					proj->expressions.push_back(make_uniq<BoundColumnRefExpression>(col_types[i], bindings[i]));
 					break;
 				}
@@ -464,52 +594,40 @@ void TableMaterialization::Materialize(ScannerFilterSet &filters, optional_idx e
 
 		plan_copy = std::move(wrapper->children[0]);
 
-		auto &new_col_ids = get.GetMutableColumnIds();
-		if (new_col_ids.size() < col_count_before) {
-			is_pruned_ = true;
-			new_col_ids.push_back(ColumnIndex(COLUMN_IDENTIFIER_ROW_ID));
-			rowid_col_ids_pos = new_col_ids.size() - 1;
-
-			// Walk intermediate PROJECTIONs to add rowid expression
-			LogicalOperator *cur = plan_copy.get();
-			while (cur != &get) {
-				if (cur->type == LogicalOperatorType::LOGICAL_PROJECTION) {
-					auto &p = cur->Cast<LogicalProjection>();
-					ColumnBinding rowid_bind(get.table_index, ProjectionIndex(rowid_col_ids_pos));
-					p.expressions.push_back(make_uniq<BoundColumnRefExpression>(LogicalType::ROW_TYPE, rowid_bind));
-				}
-				cur = cur->children[0].get();
-			}
-
+		is_pruned_ = get.GetColumnIds().size() < col_count_before || plan_copy->GetColumnBindings() != bindings;
+		if (is_pruned_ && ScannerFilterSet::GetPushdownScan(*plan_copy) == &get &&
+		    get.virtual_columns.count(COLUMN_IDENTIFIER_ROW_ID) && get.GetTable()) {
+			auto row_id = ExposeScanRowId(*plan_copy, get);
+			output_bindings_ = plan_copy->GetColumnBindings();
+			rowid_chunk_col_ = FindChunkCol(row_id);
+			D_ASSERT(rowid_chunk_col_ != DConstants::INVALID_INDEX);
 			if (LogEnabled()) {
-				fprintf(stderr, "  [LateMat] %s: pruned to %lu/%lu cols (+rowid)\n",
-				        late_mat_get->GetTable() ? late_mat_get->GetTable()->name.c_str() : "?", new_col_ids.size(),
-				        col_count_before);
+				fprintf(stderr, "  [LateMat] %s: rowid at materialized output %lu\n",
+				        get.GetTable()->name.c_str(), rowid_chunk_col_);
+			}
+		}
+		if (is_pruned_) {
+			// The optimizer rewrites references in our wrapper when it renumbers
+			// columns. Publish original graph bindings at their new chunk positions.
+			auto physical_bindings = plan_copy->GetColumnBindings();
+			output_bindings_.assign(physical_bindings.size(), ColumnBinding());
+			D_ASSERT(original_keys.size() == wrapper->expressions.size());
+			for (idx_t i = 0; i < original_keys.size(); i++) {
+				auto key = wrapper->expressions[i]->Cast<BoundColumnRefExpression>().Binding();
+				auto pos = std::find(physical_bindings.begin(), physical_bindings.end(), key);
+				if (pos == physical_bindings.end()) {
+					throw InternalException("Late materialization lost a required transfer key");
+				}
+				output_bindings_[pos - physical_bindings.begin()] = original_keys[i];
 			}
 		}
 	}
 
 	plan_copy->ResolveOperatorTypes();
-	output_bindings_ = plan_copy->GetColumnBindings();
-
-	// RemoveUnusedColumns can also narrow the subtree through FILTER
-	// projection_maps without shrinking the GET's column_ids; the column-count
-	// check above misses that. Whenever the materialized output no longer
-	// matches the original subtree's bindings, the data cannot back a
-	// MemoryScan rewrite — mark pruned so GetTableResult takes DefaultScan.
-	if (late_mat_get && !is_pruned_ && output_bindings_ != pre_prune_bindings) {
-		is_pruned_ = true;
-		if (LogEnabled()) {
-			fprintf(stderr, "  [LateMat] %s: subtree narrowed via projection_map (%lu -> %lu bindings)\n",
-			        late_mat_get->GetTable() ? late_mat_get->GetTable()->name.c_str() : "?", pre_prune_bindings.size(),
-			        output_bindings_.size());
-		}
+	if (!is_pruned_) {
+		output_bindings_ = plan_copy->GetColumnBindings();
 	}
 
-	if (late_mat_get && rowid_col_ids_pos != DConstants::INVALID_INDEX) {
-		ColumnBinding rowid_binding(late_mat_get->table_index, ProjectionIndex(rowid_col_ids_pos));
-		rowid_chunk_col_ = FindChunkCol(rowid_binding);
-	}
 	auto late_materialization_end = MaterializeClock::now();
 
 	if (log_timing) {
@@ -647,6 +765,146 @@ void TableMaterialization::ResetScan() {
 
 idx_t TableMaterialization::Count() const {
 	return data_ ? data_->Count() : 0;
+}
+
+// A bitmap scan amortizes decoding over each visited row group. Count only
+// distinct groups containing survivor row IDs, including partial groups.
+static bool IsSparsePayloadFetch(DataTable &storage, ColumnDataCollection &data, idx_t rowid_column, bool log) {
+	static constexpr idx_t SCAN_ROWS_PER_FETCH_ROW = 200; // At most 0.5% density.
+	auto required_coverage = data.Count() * SCAN_ROWS_PER_FETCH_ROW;
+	auto groups = storage.GetRowGroupCollection()->GetRowGroups();
+	unordered_set<idx_t> seen;
+	idx_t covered = 0, start = 0, end = 0;
+	ColumnDataScanState scan;
+	DataChunk input;
+	data.InitializeScan(scan, vector<column_t> {rowid_column});
+	data.InitializeScanChunk(scan, input);
+	while (data.Scan(scan, input)) {
+		auto &ids = input.data[0];
+		ids.Flatten();
+		auto rows = FlatVector::GetData<row_t>(ids);
+		for (idx_t i = 0; i < input.size(); i++) {
+			if (rows[i] < 0 || rows[i] >= MAX_ROW_ID) {
+				return false;
+			}
+			auto id = NumericCast<idx_t>(rows[i]);
+			if (id >= start && id < end) {
+				continue;
+			}
+			auto lock = groups->Lock();
+			idx_t index;
+			if (!groups->TryGetSegmentIndex(lock, id, index)) {
+				return false;
+			}
+			auto group = groups->GetSegmentByIndex(lock, NumericCast<int64_t>(index));
+			start = group->GetRowStart();
+			auto count = group->GetNode().count.load();
+			end = start + count;
+			if (seen.insert(index).second) {
+				covered += count;
+			}
+		}
+	}
+	if (log) {
+		std::cerr << "[PayloadFetchDensity] rows=" << data.Count() << " covered_rows=" << covered
+		          << " fetch=" << (covered >= required_coverage) << '\n';
+	}
+	return covered >= required_coverage;
+}
+
+bool TableMaterialization::TryFetchDeferred(const std::function<bool(idx_t)> &reserve_bytes) {
+	if (!is_pruned_ || !data_ || pending_expression_ || rowid_chunk_col_ == DConstants::INVALID_INDEX) {
+		return false;
+	}
+	// Dense payloads are cheaper to recover through the row-id bitmap scan.
+	// The caller has already compacted this table's final set of survivors.
+	static constexpr idx_t MAX_PAYLOAD_FETCH_ROWS = 4096;
+	if (data_->Count() > MAX_PAYLOAD_FETCH_ROWS) {
+		if (LogEnabled()) {
+			std::cerr << "[BatchPayloadFetchLimit] rows=" << data_->Count() << " limit=" << MAX_PAYLOAD_FETCH_ROWS
+			          << '\n';
+		}
+		return false;
+	}
+	auto get = ScannerFilterSet::GetPushdownScan(table_op_);
+	if (!get || !get->GetTable() || !get->GetTable()->IsDuckTable()) {
+		return false;
+	}
+	auto &table = get->GetTable()->Cast<DuckTableEntry>();
+	auto bindings = table_op_.GetColumnBindings();
+	const auto &types = table_op_.types;
+	if (types.size() != bindings.size()) {
+		return false;
+	}
+	vector<StorageIndex> columns;
+	vector<LogicalType> fetch_types;
+	vector<idx_t> positions;
+	const idx_t retained_width = data_->ColumnCount();
+	for (idx_t i = 0; i < bindings.size(); i++) {
+		auto pos = FindChunkCol(bindings[i]);
+		if (pos < retained_width && pos != rowid_chunk_col_ && data_->Types()[pos] == types[i]) {
+			positions.push_back(pos);
+			continue;
+		}
+		const auto &binding = bindings[i];
+		if (binding.table_index != get->table_index || binding.column_index >= get->GetColumnIds().size()) {
+			return false;
+		}
+		const auto &column = get->GetColumnIds()[binding.column_index];
+		if (column.IsVirtualColumn() || column.HasChildren() || column.HasType() ||
+		    get->GetColumnType(column) != types[i]) {
+			return false;
+		}
+		positions.push_back(retained_width + columns.size());
+		columns.push_back(table.GetStorageIndex(column));
+		fetch_types.push_back(types[i]);
+	}
+	if (columns.empty() || !IsSparsePayloadFetch(table.GetStorage(), *data_, rowid_chunk_col_, LogEnabled()) ||
+	    !reserve_bytes(data_->AllocationSize())) {
+		return false;
+	}
+	const auto start = MaterializeClock::now();
+	auto full = make_uniq<ColumnDataCollection>(BufferAllocator::Get(context_), types);
+	auto &transaction = DuckTransaction::Get(context_, table.catalog);
+	DataChunk input, payload, output;
+	data_->InitializeScanChunk(input);
+	payload.Initialize(context_, fetch_types);
+	output.Initialize(context_, types);
+	ColumnDataScanState scan;
+	data_->InitializeScan(scan);
+	while (data_->Scan(scan, input)) {
+		ColumnFetchState state; // Release pinned payload blocks between batches.
+		auto &row_ids = input.data[rowid_chunk_col_];
+		row_ids.Flatten();
+		payload.Reset();
+		table.GetStorage().Fetch(transaction, payload, columns, row_ids, input.size(), state);
+		// Only positional alignment can pair fetched payloads with retained keys.
+		if (payload.size() != input.size()) {
+			return false;
+		}
+		output.Reset();
+		for (idx_t i = 0; i < positions.size(); i++) {
+			auto pos = positions[i];
+			output.data[i].Reference(pos < retained_width ? input.data[pos] : payload.data[pos - retained_width]);
+		}
+		output.SetCardinalityUnsafe(input.size());
+		if (!reserve_bytes(full->AllocationSize() + output.GetAllocationSize())) {
+			return false;
+		}
+		full->Append(output);
+	}
+	if (!reserve_bytes(full->AllocationSize())) {
+		return false;
+	}
+	if (LogEnabled()) {
+		std::cerr << "[BatchPayloadFetch] table=" << table.name << " rows=" << full->Count()
+		          << " ms=" << MaterializeElapsedMs(start, MaterializeClock::now()) << '\n';
+	}
+	output_bindings_ = std::move(bindings);
+	is_pruned_ = false;
+	rowid_chunk_col_ = DConstants::INVALID_INDEX;
+	ReplaceData(std::move(full));
+	return true;
 }
 
 void TableMaterialization::ReplaceData(unique_ptr<ColumnDataCollection> data) {

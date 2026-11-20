@@ -58,7 +58,7 @@ struct RPTSamplingConfig {
 
 class RPTOptimizerConfig {
 public:
-	bool late_materialize_flag = false;
+	bool late_materialize_flag = true;
 	//! Protect the left-leaf table below TOP_N / LIMIT / MARK-join from excitation.
 	//! These tables benefit from early termination; Bloom materialisation would defeat it.
 	bool enable_table_protection = false;
