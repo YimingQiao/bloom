@@ -48,9 +48,6 @@ its decisions as it learns more about the query. Load the extension and keep
 using your existing SQL: Bloom applies these optimizations automatically within
 DuckDB's query planner.
 
-**Up to 8.69× faster on an individual JOB query.**
-[See the measurements →](#benchmarks)
-
 ## How it works
 
 Bloom uses what it learns from one table to rule out irrelevant rows in others.
@@ -87,26 +84,12 @@ LOAD 'build/release/extension/bloom/bloom.duckdb_extension';
 
 ## Benchmarks
 
-Bloom 0.0.4 improves parallel materialization. At eight threads, the complete
-JOB workload took 5.524 s versus 12.241 s with Bloom 0.0.3 and 6.192 s with
-native DuckDB. Individual regressions remain;
-[see the multithreaded measurements and methodology](docs/benchmarks/parallel-2.0/README.md).
+We recommend the **Join Order Benchmark (JOB)** and **CEB-IMDb** for evaluating
+Bloom on multi-join analytical queries. Both use IMDB data, with selective
+predicates and varied join structures.
 
-The single-thread measurements below were collected with Bloom 0.0.3.
-DuckDB v2.0.0, one thread. Totals are sums of per-query medians from five timed
-runs after warmup; JOB uses compressed IMDB.
-
-| Workload | Queries | DuckDB | Bloom | Total speedup |
-|---|---:|---:|---:|---:|
-| JOB | 113 | 28.427 s | 20.114 s | **1.413×** |
-| TPC-H SF10 | 22 | 17.180 s | 15.336 s | **1.120×** |
-
-The **8.69×** headline is JOB query 12b: 188.038 ms → 21.643 ms.
-Results vary across queries, including slowdowns.
-
-[Methodology and reproduction](docs/benchmarks/duckdb-2.0/README.md) ·
-[Per-query timings](docs/benchmarks/duckdb-2.0/timings.csv) ·
-[Historical results](docs/benchmarks/README.md)
+See the [benchmark runner guide](scripts/README.md) for running comparisons
+and the [CEB workload guide](benchmark/ceb/README.md) for preparing CEB-IMDb.
 
 ## Documentation
 
